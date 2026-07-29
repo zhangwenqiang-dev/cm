@@ -3041,6 +3041,9 @@ func TestAppWebProfileOwnerAPI(t *testing.T) {
 	if _, err := app.MemberStore.AddMember("王恒辉", "whh@example.com", "operator"); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
+	if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "xcode-vnc"}); err != nil {
+		t.Fatalf("upsert managed profile: %v", err)
+	}
 	if _, err := app.MemberStore.AssignMember("user@example.com", "old@example.com", "owner"); err != nil {
 		t.Fatalf("assign old member: %v", err)
 	}

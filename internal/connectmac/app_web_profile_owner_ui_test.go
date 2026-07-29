@@ -135,6 +135,82 @@ func TestAppWebProfileOwnersFiltersNonAdminAccess(t *testing.T) {
 	})
 }
 
+func TestAppWebProfileOwnerSetAuthorizationValidationAndAudit(t *testing.T) {
+	addOwnerTarget := func(t *testing.T, app *App) {
+		t.Helper()
+		if _, err := app.MemberStore.AddMember("Target Owner", "target-owner@example.com", "operator"); err != nil {
+			t.Fatalf("add owner target: %v", err)
+		}
+	}
+	postOwner := func(t *testing.T, app *App, role, profile string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := strings.NewReader(`{"profile":"` + profile + `","member_email":"target-owner@example.com"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/profile-owner/set", body)
+		addWebAuth(t, app, req, role)
+		rec := httptest.NewRecorder()
+		app.newWebHandler("").ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("operator forbidden", func(t *testing.T) {
+		app := newWebAutoReleaseTestApp(t)
+		addOwnerTarget(t, &app)
+		if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "assigned-usw2"}); err != nil {
+			t.Fatalf("upsert profile: %v", err)
+		}
+		rec := postOwner(t, &app, "operator", "assigned-usw2")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if _, found, err := app.MemberStore.ProfileOwner("assigned-usw2"); err != nil || found {
+			t.Fatalf("operator changed profile owner: found=%t err=%v", found, err)
+		}
+	})
+
+	t.Run("nonexistent profile rejected", func(t *testing.T) {
+		app := newWebAutoReleaseTestApp(t)
+		addOwnerTarget(t, &app)
+		rec := postOwner(t, &app, "admin", "missing-usw2")
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "profile missing-usw2 not found") {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if _, found, err := app.MemberStore.ProfileOwner("missing-usw2"); err != nil || found {
+			t.Fatalf("nonexistent profile owner created: found=%t err=%v", found, err)
+		}
+	})
+
+	t.Run("admin sets existing profile and records event", func(t *testing.T) {
+		app := newWebAutoReleaseTestApp(t)
+		addOwnerTarget(t, &app)
+		profile := Profile{Name: "assigned-usw2"}
+		profile.AWS.AccountEmail = "apple@example.com"
+		if _, err := app.MemberStore.UpsertManagedProfile(profile); err != nil {
+			t.Fatalf("upsert profile: %v", err)
+		}
+		rec := postOwner(t, &app, "admin", profile.Name)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		owner, found, err := app.MemberStore.ProfileOwner(profile.Name)
+		if err != nil || !found || owner.Owner.Email != "target-owner@example.com" {
+			t.Fatalf("profile owner: owner=%+v found=%t err=%v", owner, found, err)
+		}
+		events, err := app.MemberStore.RecentEvents(profile.AWS.AccountEmail, 10)
+		if err != nil {
+			t.Fatalf("recent events: %v", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("events = %+v", events)
+		}
+		event := events[0]
+		if event.Action != "profile-owner.set" || event.Profile != profile.Name || event.AppleEmail != profile.AWS.AccountEmail ||
+			event.MemberID == "" || event.MemberEmail != "admin@example.com" || event.MemberName != "Test Admin" ||
+			event.Status != "success" || !event.Confirmed || !strings.Contains(event.Message, "target-owner@example.com") {
+			t.Fatalf("event = %+v", event)
+		}
+	})
+}
+
 func decodeProfileOwnersResponse(t *testing.T, rec *httptest.ResponseRecorder) []PublicProfileOwner {
 	t.Helper()
 	var response struct {

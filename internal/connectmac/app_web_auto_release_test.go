@@ -564,6 +564,62 @@ func TestAppWebAutoReleaseReactivatesReleasedReminderForReadyMac(t *testing.T) {
 	}
 }
 
+func TestAppWebAutoReleaseRejectsReleasedReminderWithoutCurrentProfileOwner(t *testing.T) {
+	dir := t.TempDir()
+	key := writeSSHKey(t, 0o600)
+	config := writeConfig(t, dir, key)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, dir)
+	app.AWSService.NewClient = func(ctx context.Context, plan MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			Instances: []InstanceStatus{{
+				InstanceID:          "i-ready",
+				State:               "running",
+				SystemStatus:        "ok",
+				InstanceStatusCheck: "ok",
+				EBSStatus:           "ok",
+				Tags:                managedTestTags(),
+			}},
+			ElasticIP: ElasticIP{InstanceID: "i-ready", PublicIP: "54.1.2.3", AllocationID: "eipalloc-1"},
+		}}, nil
+	}
+	seed := ReleaseReminder{
+		ProfileName:        "xcode-vnc",
+		AppleEmail:         "user@example.com",
+		HostID:             "h-1",
+		OwnerEmail:         "historical-owner@example.com",
+		OwnerName:          "Historical Owner",
+		ReleaseDueAt:       "2026-07-01T08:00:00Z",
+		Status:             ReleaseReminderStatusReleased,
+		ReleasedAt:         "2026-07-01T09:00:00Z",
+		AutoReleaseEnabled: false,
+		AutoReleaseState:   ReleaseReminderAutoReleaseStateReleased,
+	}
+	saved, err := app.MemberStore.UpsertReleaseReminder(seed)
+	if err != nil {
+		t.Fatalf("seed released reminder: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/auto-release", strings.NewReader(`{"profile":"xcode-vnc","enabled":true}`))
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler(config).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), errAutoReleaseOwnerMissing.Error()) {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := mustReleaseReminder(t, app, seed.ProfileName)
+	if !reflect.DeepEqual(got, saved) {
+		t.Fatalf("released reminder changed:\n got: %+v\nwant: %+v", got, saved)
+	}
+	events, err := app.MemberStore.RecentEvents(seed.AppleEmail, 10)
+	if err != nil {
+		t.Fatalf("recent events: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("failed reactivation recorded events: %+v", events)
+	}
+}
+
 func TestAppWebAutoReleaseToggleRoleAndValidation(t *testing.T) {
 	t.Run("profile required", func(t *testing.T) {
 		app := newWebAutoReleaseTestApp(t)

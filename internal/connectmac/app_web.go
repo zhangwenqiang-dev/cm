@@ -447,7 +447,7 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/member/unassign", a.requireWebRole(a.webMemberAssignHandler(true), "admin"))
 	mux.HandleFunc("/api/member/profiles", a.requireWebRole(a.webMemberProfilesHandler(), "admin"))
 	mux.HandleFunc("/api/profile-owners", a.requireWebRole(a.webProfileOwnersHandler(), "viewer", "operator", "admin"))
-	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/profile-owner/set", a.requireWebRole(a.webProfileOwnerSetHandler(), "admin"))
 	mux.HandleFunc("/api/release-reminders", a.requireWebRole(a.webReleaseRemindersHandler(), "viewer", "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/extend", a.requireWebRole(a.webReleaseReminderExtendHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/release-reminder/auto-release", a.requireWebRole(a.webReleaseReminderAutoReleaseHandler(configPath), "viewer", "operator", "admin"))
@@ -1022,6 +1022,11 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
 		var req struct {
 			Profile     string `json:"profile"`
 			MemberEmail string `json:"member_email"`
@@ -1030,9 +1035,43 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
-		owner, err := a.MemberStore.SetProfileOwner(req.Profile, req.MemberEmail)
+		profileName := strings.TrimSpace(req.Profile)
+		profiles, err := a.MemberStore.ListManagedProfiles(member.Email)
+		if err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		var managedProfile ManagedProfile
+		found := false
+		for _, profile := range profiles {
+			if profile.Name == profileName {
+				managedProfile = profile
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeWebError(w, http.StatusBadRequest, fmt.Sprintf("profile %s not found", profileName))
+			return
+		}
+		owner, err := a.MemberStore.SetProfileOwner(profileName, req.MemberEmail)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		event := OperationEvent{
+			Action:      "profile-owner.set",
+			Profile:     profileName,
+			AppleEmail:  managedProfile.AppleEmail,
+			MemberID:    member.ID,
+			MemberEmail: member.Email,
+			MemberName:  member.Name,
+			Confirmed:   true,
+			Status:      "success",
+			Message:     "profile owner set to " + displayNameEmail(owner.Owner.Name, owner.Owner.Email),
+		}
+		if err := a.MemberStore.RecordEvent(event); err != nil {
+			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"owner": owner}})
@@ -1119,7 +1158,7 @@ func (a App) webReleaseReminderAutoReleaseHandler(configPath string) http.Handle
 					return
 				} else if found {
 					reactivationOwner = owner.Owner
-				} else if current.OwnerEmail == "" {
+				} else {
 					writeReleaseReminderUpdateError(w, errAutoReleaseOwnerMissing)
 					return
 				}
