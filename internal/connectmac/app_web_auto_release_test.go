@@ -287,6 +287,26 @@ func TestWebAutoReleaseRemoteModeRoutesReminderAPIs(t *testing.T) {
 	}
 }
 
+func TestRemoteUserAPIPathAllowsReleaseReminderRoutes(t *testing.T) {
+	for _, path := range []string{
+		"/api/release-reminders",
+		"/api/release-reminder/auto-release",
+	} {
+		if !isRemoteUserAPIPath(path) {
+			t.Errorf("remote user API path %q is not allowed", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/release-reminder/cleanup",
+		"/api/release-reminder/auto-release/extra",
+		"/api/aws/destroy",
+	} {
+		if isRemoteUserAPIPath(path) {
+			t.Errorf("unexpected remote user API path %q is allowed", path)
+		}
+	}
+}
+
 func TestWebAutoReleaseModalRejectsChangedSelection(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
 	if err != nil {

@@ -13,8 +13,9 @@ owners are available.
 
 ## Design
 
-1. Preserve owners included in the `/api/profiles` response as the initial
-   authoritative display state.
+1. Treat each `/api/profiles` response as an authoritative owner snapshot.
+   Build a fresh owner map from its embedded owners so a profile with an empty
+   `owners` array clears any stale owner previously shown for that profile.
 2. Always request `/api/profile-owners` through the existing `api()` helper.
    The helper already selects same-origin or configured remote routing.
 3. Replace the owner map only after a successful owner response.
@@ -26,15 +27,18 @@ owners are available.
 ## Error Handling
 
 An owner endpoint failure must not fail the entire profile list load. The
-profile list remains usable and displays its embedded owner data. A later
-refresh can reconcile the owner map after the endpoint recovers.
+profile list remains usable and displays exactly the owner data embedded in
+the latest `/api/profiles` response, including clearing owners omitted by that
+response. A later refresh can reconcile the owner map after the endpoint
+recovers.
 
 ## Tests
 
 Add static web regression coverage proving:
 
 - `loadProfileOwners()` is not gated by `clientConfig.user_api`.
-- Owners embedded in `/api/profiles` seed `state.profileOwners`.
+- A fresh map seeded from `/api/profiles` replaces the prior owner map, so
+  embedded owners are shown and empty owner arrays clear stale entries.
 - A failed `/api/profile-owners` request does not clear the seeded owners.
 - A successful owner response still replaces the seeded map.
 

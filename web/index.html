@@ -1458,7 +1458,7 @@
     async function loadProfiles() {
       const body = await api("/api/profiles");
       state.profiles = body.data.profiles || [];
-      const seededOwners = { ...state.profileOwners };
+      const seededOwners = {};
       for (const profile of state.profiles) {
         const owner = profile.owners?.[0];
         if (owner) {

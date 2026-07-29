@@ -560,6 +560,8 @@ func isRemoteUserAPIPath(path string) bool {
 		strings.HasPrefix(path, "/api/profile-owner/") ||
 		path == "/api/managed-profiles" ||
 		strings.HasPrefix(path, "/api/managed-profile/") ||
+		path == "/api/release-reminders" ||
+		path == "/api/release-reminder/auto-release" ||
 		path == "/api/settings" ||
 		strings.HasPrefix(path, "/api/events")
 }
@@ -982,10 +984,33 @@ func (a App) webProfileOwnersHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
 		owners, err := a.MemberStore.ProfileOwners()
 		if err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if member.Role != "admin" {
+			profiles, err := a.MemberStore.ListManagedProfiles(member.Email)
+			if err != nil {
+				writeWebError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			allowed := make(map[string]struct{}, len(profiles))
+			for _, profile := range profiles {
+				allowed[profile.Name] = struct{}{}
+			}
+			filtered := make([]PublicProfileOwner, 0, len(owners))
+			for _, owner := range owners {
+				if _, ok := allowed[owner.ProfileName]; ok {
+					filtered = append(filtered, owner)
+				}
+			}
+			owners = filtered
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"owners": owners}})
 	}
