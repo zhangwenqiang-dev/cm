@@ -55,6 +55,12 @@ const mysqlProfileOwnerForUpdateQuery = `SELECT o.member_id, COALESCE(m.email, '
 
 const mysqlDeleteMatchingProfileOwnerQuery = `DELETE FROM cm_profile_owners WHERE profile_name = ? AND member_id = ?`
 
+const mysqlManagedProfileForUpdateQuery = `SELECT name, COALESCE(apple_email, '') FROM cm_profiles WHERE name = ? FOR UPDATE`
+
+const mysqlMemberByEmailForUpdateQuery = `SELECT id, name, email, username, role, enabled, COALESCE(password_hash, ''), COALESCE(password_salt, ''), COALESCE(api_token_hash, ''), COALESCE(api_token_at, ''), created_at, updated_at FROM cm_members WHERE LOWER(email) = LOWER(?) FOR UPDATE`
+
+const mysqlProfileOwnerUpsertQuery = `INSERT INTO cm_profile_owners (profile_name, member_id, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE member_id = VALUES(member_id), updated_at = VALUES(updated_at)`
+
 const mysqlStoreLockName = "member_store"
 
 const mysqlStoreLockForUpdateQuery = `SELECT version FROM cm_store_locks WHERE lock_name = ? FOR UPDATE`
@@ -863,6 +869,29 @@ func (s MySQLMemberStore) SetProfileOwner(profileName, memberEmail string) (Publ
 	return setProfileOwnerInStore(s.unlocked(), profileName, memberEmail)
 }
 
+func (s MySQLMemberStore) SetProfileOwnerAndRecordEvent(profileName, memberEmail string, event OperationEvent) (PublicProfileOwner, error) {
+	defer s.lockMutation()()
+	if err := s.EnsureSchema(); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	return setProfileOwnerAndRecordEventInMySQLTransaction(
+		sqlMySQLReleaseReminderTransaction{tx: tx},
+		profileName,
+		memberEmail,
+		event,
+		s.currentTime(),
+	)
+}
+
 func (s MySQLMemberStore) ClearProfileOwner(profileName string) error {
 	defer s.lockMutation()()
 	return clearProfileOwnerInStore(s.unlocked(), profileName)
@@ -1379,6 +1408,95 @@ func upsertReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 
 func updateReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName string, now time.Time, update func(ReleaseReminder) (ReleaseReminder, error)) (updated ReleaseReminder, err error) {
 	return updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx, profileName, now, update, nil)
+}
+
+func setProfileOwnerAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName, memberEmail string, event OperationEvent, now time.Time) (owner PublicProfileOwner, err error) {
+	profileName = strings.TrimSpace(profileName)
+	memberEmail = normalizeEmail(memberEmail)
+	if profileName == "" {
+		return PublicProfileOwner{}, errors.New("profile is required")
+	}
+	if memberEmail == "" || !strings.Contains(memberEmail, "@") {
+		return PublicProfileOwner{}, errors.New("valid member email is required")
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	var profile ManagedProfile
+	if err = tx.QueryRow(mysqlManagedProfileForUpdateQuery, profileName).Scan(&profile.Name, &profile.AppleEmail); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PublicProfileOwner{}, fmt.Errorf("profile %s not found", profileName)
+		}
+		return PublicProfileOwner{}, err
+	}
+	var member Member
+	if err = tx.QueryRow(mysqlMemberByEmailForUpdateQuery, memberEmail).Scan(
+		&member.ID,
+		&member.Name,
+		&member.Email,
+		&member.Username,
+		&member.Role,
+		&member.Enabled,
+		&member.PasswordHash,
+		&member.PasswordSalt,
+		&member.APITokenHash,
+		&member.APITokenAt,
+		&member.CreatedAt,
+		&member.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return PublicProfileOwner{}, fmt.Errorf("member %s not found", memberEmail)
+		}
+		return PublicProfileOwner{}, err
+	}
+	updatedAt := now.Format(time.RFC3339)
+	if err = tx.Exec(mysqlProfileOwnerUpsertQuery, profileName, member.ID, updatedAt); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	event.Profile = profileName
+	event.AppleEmail = profile.AppleEmail
+	data := MemberData{}
+	if err = appendOperationEvent(&data, event, updatedAt); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	normalized := data.Events[0]
+	if err = tx.Exec(
+		mysqlOperationEventInsertQuery,
+		normalized.ID,
+		normalized.Action,
+		normalized.Profile,
+		normalized.AppleEmail,
+		normalized.MemberID,
+		normalized.MemberEmail,
+		normalized.MemberName,
+		normalized.Confirmed,
+		normalized.Status,
+		normalized.Message,
+		normalized.CreatedAt,
+	); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	committed = true
+	return PublicProfileOwner{
+		ProfileName: profileName,
+		Owner:       publicMember(member),
+		UpdatedAt:   updatedAt,
+	}, nil
 }
 
 func updateReleaseReminderAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName string, now time.Time, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (updated ReleaseReminder, err error) {

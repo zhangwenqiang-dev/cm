@@ -424,6 +424,79 @@ func TestMemberStoreUpdateReleaseReminderAndRecordEventRollsBackSaveFailure(t *t
 	}
 }
 
+func TestMemberStoreSetProfileOwnerAndRecordEventIsAtomic(t *testing.T) {
+	newStore := func(t *testing.T) MemberStore {
+		t.Helper()
+		store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+		if _, err := store.AddMember("Old Owner", "old@example.com", "operator"); err != nil {
+			t.Fatalf("add old owner: %v", err)
+		}
+		if _, err := store.AddMember("New Owner", "new@example.com", "operator"); err != nil {
+			t.Fatalf("add new owner: %v", err)
+		}
+		profile := Profile{Name: "apple-usw2"}
+		profile.AWS.AccountEmail = "apple@example.com"
+		if _, err := store.UpsertManagedProfile(profile); err != nil {
+			t.Fatalf("upsert profile: %v", err)
+		}
+		return store
+	}
+
+	t.Run("success persists owner and normalized event", func(t *testing.T) {
+		store := newStore(t)
+		owner, err := store.SetProfileOwnerAndRecordEvent("apple-usw2", " NEW@EXAMPLE.COM ", OperationEvent{
+			Action:      "profile-owner.set",
+			MemberID:    "member-admin",
+			MemberEmail: " ADMIN@EXAMPLE.COM ",
+			MemberName:  " Admin ",
+			Confirmed:   true,
+			Status:      "success",
+			Message:     "owner changed",
+		})
+		if err != nil {
+			t.Fatalf("atomic owner update: %v", err)
+		}
+		if owner.ProfileName != "apple-usw2" || owner.Owner.Email != "new@example.com" {
+			t.Fatalf("owner = %+v", owner)
+		}
+		events, err := store.RecentEvents("apple@example.com", 10)
+		if err != nil || len(events) != 1 {
+			t.Fatalf("events = %+v err=%v", events, err)
+		}
+		event := events[0]
+		if event.Profile != "apple-usw2" || event.AppleEmail != "apple@example.com" ||
+			event.MemberEmail != "admin@example.com" || event.MemberName != "Admin" ||
+			event.Action != "profile-owner.set" || event.Status != "success" {
+			t.Fatalf("event = %+v", event)
+		}
+	})
+
+	t.Run("save failure preserves old owner and no event", func(t *testing.T) {
+		store := newStore(t)
+		oldOwner, err := store.SetProfileOwner("apple-usw2", "old@example.com")
+		if err != nil {
+			t.Fatalf("seed old owner: %v", err)
+		}
+		wantErr := errors.New("replace failed")
+		store.Rename = func(string, string) error { return wantErr }
+		_, err = store.SetProfileOwnerAndRecordEvent("apple-usw2", "new@example.com", OperationEvent{
+			Action: "profile-owner.set",
+			Status: "success",
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("save failure = %v, want %v", err, wantErr)
+		}
+		got, found, err := store.ProfileOwner("apple-usw2")
+		if err != nil || !found || !reflect.DeepEqual(got, oldOwner) {
+			t.Fatalf("owner after failed save = %+v found=%t err=%v, want %+v", got, found, err, oldOwner)
+		}
+		events, err := store.RecentEvents("apple@example.com", 10)
+		if err != nil || len(events) != 0 {
+			t.Fatalf("events after failed save = %+v err=%v", events, err)
+		}
+	})
+}
+
 func TestMemberStoreUpdateReleaseReminderSerializesConcurrentUpdates(t *testing.T) {
 	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
 	if _, err := store.UpsertReleaseReminder(ReleaseReminder{ProfileName: "apple-usw2"}); err != nil {

@@ -63,6 +63,7 @@ type MemberRepository interface {
 	ProfileOwners() ([]PublicProfileOwner, error)
 	ProfileOwner(profileName string) (PublicProfileOwner, bool, error)
 	SetProfileOwner(profileName, memberEmail string) (PublicProfileOwner, error)
+	SetProfileOwnerAndRecordEvent(profileName, memberEmail string, event OperationEvent) (PublicProfileOwner, error)
 	ClearProfileOwner(profileName string) error
 	ListManagedProfiles(memberEmail string) ([]ManagedProfile, error)
 	UpsertManagedProfile(profile Profile) (ManagedProfile, error)
@@ -757,6 +758,15 @@ func (s MemberStore) SetProfileOwner(profileName, memberEmail string) (PublicPro
 	}
 	defer unlock()
 	return setProfileOwnerInStore(s.unlocked(), profileName, memberEmail)
+}
+
+func (s MemberStore) SetProfileOwnerAndRecordEvent(profileName, memberEmail string, event OperationEvent) (PublicProfileOwner, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	defer unlock()
+	return setProfileOwnerAndRecordEventInStore(s.unlocked(), profileName, memberEmail, event)
 }
 
 func (s MemberStore) ClearProfileOwner(profileName string) error {
@@ -1977,6 +1987,55 @@ func setProfileOwnerInStore(s memberDataStore, profileName, memberEmail string) 
 	}
 	if !updated {
 		db.ProfileOwners = append(db.ProfileOwners, record)
+	}
+	if err := s.Save(db); err != nil {
+		return PublicProfileOwner{}, err
+	}
+	return PublicProfileOwner{
+		ProfileName: record.ProfileName,
+		Owner:       publicMember(member),
+		UpdatedAt:   record.UpdatedAt,
+	}, nil
+}
+
+func setProfileOwnerAndRecordEventInStore(s memberDataStore, profileName, memberEmail string, event OperationEvent) (PublicProfileOwner, error) {
+	profileName = strings.TrimSpace(profileName)
+	memberEmail = normalizeEmail(memberEmail)
+	if profileName == "" {
+		return PublicProfileOwner{}, errors.New("profile is required")
+	}
+	if memberEmail == "" || !strings.Contains(memberEmail, "@") {
+		return PublicProfileOwner{}, errors.New("valid member email is required")
+	}
+	db, err := s.Load()
+	if err != nil {
+		return PublicProfileOwner{}, err
+	}
+	profile, ok := findManagedProfileByName(db, profileName)
+	if !ok {
+		return PublicProfileOwner{}, fmt.Errorf("profile %s not found", profileName)
+	}
+	member, ok := findMemberByEmail(db, memberEmail)
+	if !ok {
+		return PublicProfileOwner{}, fmt.Errorf("member %s not found", memberEmail)
+	}
+	now := s.currentTime().Format(time.RFC3339)
+	record := ProfileOwner{ProfileName: profileName, MemberID: member.ID, UpdatedAt: now}
+	updated := false
+	for i := range db.ProfileOwners {
+		if db.ProfileOwners[i].ProfileName == profileName {
+			db.ProfileOwners[i] = record
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		db.ProfileOwners = append(db.ProfileOwners, record)
+	}
+	event.Profile = profileName
+	event.AppleEmail = profile.AppleEmail
+	if err := appendOperationEvent(&db, event, now); err != nil {
+		return PublicProfileOwner{}, err
 	}
 	if err := s.Save(db); err != nil {
 		return PublicProfileOwner{}, err

@@ -1326,3 +1326,73 @@ func TestMySQLUpdateReleaseReminderAndRecordEventRollsBackEventFailure(t *testin
 		t.Fatalf("event failure operations = %v, want %v", tx.operations, wantOperations)
 	}
 }
+
+func TestMySQLSetProfileOwnerAndRecordEventTransaction(t *testing.T) {
+	now := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
+	member := Member{
+		ID: "member-owner", Name: "Owner", Email: "owner@example.com", Username: "owner@example.com",
+		Role: "operator", Enabled: true, CreatedAt: "2026-07-01T00:00:00Z", UpdatedAt: "2026-07-01T00:00:00Z",
+	}
+	event := OperationEvent{
+		Action: "profile-owner.set", MemberID: "member-admin", MemberEmail: "admin@example.com",
+		MemberName: "Admin", Confirmed: true, Status: "success", Message: "owner changed",
+	}
+
+	for _, test := range []struct {
+		name     string
+		eventErr error
+	}{
+		{name: "success"},
+		{name: "event insert failure rolls back", eventErr: errors.New("event insert failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			defer db.Close()
+			store := mysqlTransferTestStore(db, now)
+
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+				WithArgs(mysqlStoreLockName).
+				WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(9))
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlManagedProfileForUpdateQuery)).
+				WithArgs("apple-usw2").
+				WillReturnRows(sqlmock.NewRows([]string{"name", "apple_email"}).AddRow("apple-usw2", "apple@example.com"))
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlMemberByEmailForUpdateQuery)).
+				WithArgs("owner@example.com").
+				WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "username", "role", "enabled", "password_hash", "password_salt", "api_token_hash", "api_token_at", "created_at", "updated_at"}).
+					AddRow(member.ID, member.Name, member.Email, member.Username, member.Role, member.Enabled, "", "", "", "", member.CreatedAt, member.UpdatedAt))
+			mock.ExpectExec(regexp.QuoteMeta(mysqlProfileOwnerUpsertQuery)).
+				WithArgs("apple-usw2", member.ID, now.Format(time.RFC3339)).
+				WillReturnResult(sqlmock.NewResult(1, 1))
+			eventInsert := mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
+				WithArgs(sqlmock.AnyArg(), event.Action, "apple-usw2", "apple@example.com", event.MemberID, event.MemberEmail, event.MemberName, event.Confirmed, event.Status, event.Message, now.Format(time.RFC3339))
+			if test.eventErr != nil {
+				eventInsert.WillReturnError(test.eventErr)
+				mock.ExpectRollback()
+			} else {
+				eventInsert.WillReturnResult(sqlmock.NewResult(1, 1))
+				mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).
+					WithArgs(mysqlStoreLockName).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectCommit()
+			}
+
+			owner, err := store.SetProfileOwnerAndRecordEvent("apple-usw2", " OWNER@EXAMPLE.COM ", event)
+			if test.eventErr != nil {
+				if !errors.Is(err, test.eventErr) {
+					t.Fatalf("event failure = %v, want %v", err, test.eventErr)
+				}
+			} else if err != nil {
+				t.Fatalf("atomic owner update: %v", err)
+			} else if owner.ProfileName != "apple-usw2" || owner.Owner.Email != member.Email {
+				t.Fatalf("owner = %+v", owner)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

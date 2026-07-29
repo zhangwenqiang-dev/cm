@@ -1041,11 +1041,9 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		var managedProfile ManagedProfile
 		found := false
 		for _, profile := range profiles {
 			if profile.Name == profileName {
-				managedProfile = profile
 				found = true
 				break
 			}
@@ -1054,24 +1052,18 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, fmt.Sprintf("profile %s not found", profileName))
 			return
 		}
-		owner, err := a.MemberStore.SetProfileOwner(profileName, req.MemberEmail)
-		if err != nil {
-			writeWebError(w, http.StatusBadRequest, err.Error())
-			return
-		}
 		event := OperationEvent{
 			Action:      "profile-owner.set",
-			Profile:     profileName,
-			AppleEmail:  managedProfile.AppleEmail,
 			MemberID:    member.ID,
 			MemberEmail: member.Email,
 			MemberName:  member.Name,
 			Confirmed:   true,
 			Status:      "success",
-			Message:     "profile owner set to " + displayNameEmail(owner.Owner.Name, owner.Owner.Email),
+			Message:     "profile owner set to " + normalizeEmail(req.MemberEmail),
 		}
-		if err := a.MemberStore.RecordEvent(event); err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
+		owner, err := a.MemberStore.SetProfileOwnerAndRecordEvent(profileName, req.MemberEmail, event)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"owner": owner}})
