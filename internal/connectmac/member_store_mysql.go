@@ -1414,10 +1414,10 @@ func setProfileOwnerAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTran
 	profileName = strings.TrimSpace(profileName)
 	memberEmail = normalizeEmail(memberEmail)
 	if profileName == "" {
-		return PublicProfileOwner{}, errors.New("profile is required")
+		return PublicProfileOwner{}, profileOwnerValidationError("profile is required")
 	}
 	if memberEmail == "" || !strings.Contains(memberEmail, "@") {
-		return PublicProfileOwner{}, errors.New("valid member email is required")
+		return PublicProfileOwner{}, profileOwnerValidationError("valid member email is required")
 	}
 	committed := false
 	defer func() {
@@ -1434,7 +1434,7 @@ func setProfileOwnerAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTran
 	var profile ManagedProfile
 	if err = tx.QueryRow(mysqlManagedProfileForUpdateQuery, profileName).Scan(&profile.Name, &profile.AppleEmail); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return PublicProfileOwner{}, fmt.Errorf("profile %s not found", profileName)
+			return PublicProfileOwner{}, profileOwnerValidationError("profile %s not found", profileName)
 		}
 		return PublicProfileOwner{}, err
 	}
@@ -1454,7 +1454,7 @@ func setProfileOwnerAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTran
 		&member.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return PublicProfileOwner{}, fmt.Errorf("member %s not found", memberEmail)
+			return PublicProfileOwner{}, profileOwnerValidationError("member %s not found", memberEmail)
 		}
 		return PublicProfileOwner{}, err
 	}

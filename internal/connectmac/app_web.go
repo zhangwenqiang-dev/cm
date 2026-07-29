@@ -1038,7 +1038,8 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 		profileName := strings.TrimSpace(req.Profile)
 		profiles, err := a.MemberStore.ListManagedProfiles(member.Email)
 		if err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
+			a.logProfileError("profile-owner.set", Profile{Name: profileName}, err.Error())
+			writeWebError(w, http.StatusInternalServerError, "failed to validate profile owner request")
 			return
 		}
 		found := false
@@ -1063,7 +1064,12 @@ func (a App) webProfileOwnerSetHandler() http.HandlerFunc {
 		}
 		owner, err := a.MemberStore.SetProfileOwnerAndRecordEvent(profileName, req.MemberEmail, event)
 		if err != nil {
-			writeWebError(w, http.StatusBadRequest, err.Error())
+			if errors.Is(err, ErrProfileOwnerValidation) {
+				writeWebError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			a.logProfileError("profile-owner.set", Profile{Name: profileName}, err.Error())
+			writeWebError(w, http.StatusInternalServerError, "failed to update profile owner")
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"owner": owner}})

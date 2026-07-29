@@ -185,6 +185,7 @@ type TransferRecord struct {
 
 var (
 	ErrTransferRecordNotFound = errors.New("transfer record not found")
+	ErrProfileOwnerValidation = errors.New("invalid profile owner request")
 )
 
 const (
@@ -2002,10 +2003,10 @@ func setProfileOwnerAndRecordEventInStore(s memberDataStore, profileName, member
 	profileName = strings.TrimSpace(profileName)
 	memberEmail = normalizeEmail(memberEmail)
 	if profileName == "" {
-		return PublicProfileOwner{}, errors.New("profile is required")
+		return PublicProfileOwner{}, profileOwnerValidationError("profile is required")
 	}
 	if memberEmail == "" || !strings.Contains(memberEmail, "@") {
-		return PublicProfileOwner{}, errors.New("valid member email is required")
+		return PublicProfileOwner{}, profileOwnerValidationError("valid member email is required")
 	}
 	db, err := s.Load()
 	if err != nil {
@@ -2013,11 +2014,11 @@ func setProfileOwnerAndRecordEventInStore(s memberDataStore, profileName, member
 	}
 	profile, ok := findManagedProfileByName(db, profileName)
 	if !ok {
-		return PublicProfileOwner{}, fmt.Errorf("profile %s not found", profileName)
+		return PublicProfileOwner{}, profileOwnerValidationError("profile %s not found", profileName)
 	}
 	member, ok := findMemberByEmail(db, memberEmail)
 	if !ok {
-		return PublicProfileOwner{}, fmt.Errorf("member %s not found", memberEmail)
+		return PublicProfileOwner{}, profileOwnerValidationError("member %s not found", memberEmail)
 	}
 	now := s.currentTime().Format(time.RFC3339)
 	record := ProfileOwner{ProfileName: profileName, MemberID: member.ID, UpdatedAt: now}
@@ -2045,6 +2046,10 @@ func setProfileOwnerAndRecordEventInStore(s memberDataStore, profileName, member
 		Owner:       publicMember(member),
 		UpdatedAt:   record.UpdatedAt,
 	}, nil
+}
+
+func profileOwnerValidationError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrProfileOwnerValidation, fmt.Sprintf(format, args...))
 }
 
 func clearProfileOwnerInStore(s memberDataStore, profileName string) error {

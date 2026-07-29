@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,9 +143,9 @@ func TestAppWebProfileOwnerSetAuthorizationValidationAndAudit(t *testing.T) {
 			t.Fatalf("add owner target: %v", err)
 		}
 	}
-	postOwner := func(t *testing.T, app *App, role, profile string) *httptest.ResponseRecorder {
+	postOwner := func(t *testing.T, app *App, role, profile, memberEmail string) *httptest.ResponseRecorder {
 		t.Helper()
-		body := strings.NewReader(`{"profile":"` + profile + `","member_email":"target-owner@example.com"}`)
+		body := strings.NewReader(`{"profile":"` + profile + `","member_email":"` + memberEmail + `"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/profile-owner/set", body)
 		addWebAuth(t, app, req, role)
 		rec := httptest.NewRecorder()
@@ -158,7 +159,7 @@ func TestAppWebProfileOwnerSetAuthorizationValidationAndAudit(t *testing.T) {
 		if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "assigned-usw2"}); err != nil {
 			t.Fatalf("upsert profile: %v", err)
 		}
-		rec := postOwner(t, &app, "operator", "assigned-usw2")
+		rec := postOwner(t, &app, "operator", "assigned-usw2", "target-owner@example.com")
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
@@ -170,7 +171,7 @@ func TestAppWebProfileOwnerSetAuthorizationValidationAndAudit(t *testing.T) {
 	t.Run("nonexistent profile rejected", func(t *testing.T) {
 		app := newWebAutoReleaseTestApp(t)
 		addOwnerTarget(t, &app)
-		rec := postOwner(t, &app, "admin", "missing-usw2")
+		rec := postOwner(t, &app, "admin", "missing-usw2", "target-owner@example.com")
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "profile missing-usw2 not found") {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
@@ -187,7 +188,7 @@ func TestAppWebProfileOwnerSetAuthorizationValidationAndAudit(t *testing.T) {
 		if _, err := app.MemberStore.UpsertManagedProfile(profile); err != nil {
 			t.Fatalf("upsert profile: %v", err)
 		}
-		rec := postOwner(t, &app, "admin", profile.Name)
+		rec := postOwner(t, &app, "admin", profile.Name, "target-owner@example.com")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
@@ -209,6 +210,45 @@ func TestAppWebProfileOwnerSetAuthorizationValidationAndAudit(t *testing.T) {
 			t.Fatalf("event = %+v", event)
 		}
 	})
+
+	t.Run("missing member is a validation error", func(t *testing.T) {
+		app := newWebAutoReleaseTestApp(t)
+		if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "assigned-usw2"}); err != nil {
+			t.Fatalf("upsert profile: %v", err)
+		}
+		rec := postOwner(t, &app, "admin", "assigned-usw2", "missing-owner@example.com")
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "member missing-owner@example.com not found") {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("storage failure is internal and sanitized", func(t *testing.T) {
+		app := newWebAutoReleaseTestApp(t)
+		addOwnerTarget(t, &app)
+		if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "assigned-usw2"}); err != nil {
+			t.Fatalf("upsert profile: %v", err)
+		}
+		app.MemberStore = failingProfileOwnerRepository{
+			MemberRepository: app.MemberStore,
+			err:              errors.New("database password secret failed"),
+		}
+		rec := postOwner(t, &app, "admin", "assigned-usw2", "target-owner@example.com")
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "failed to update profile owner") || strings.Contains(rec.Body.String(), "password secret") {
+			t.Fatalf("storage error response = %s", rec.Body.String())
+		}
+	})
+}
+
+type failingProfileOwnerRepository struct {
+	MemberRepository
+	err error
+}
+
+func (r failingProfileOwnerRepository) SetProfileOwnerAndRecordEvent(string, string, OperationEvent) (PublicProfileOwner, error) {
+	return PublicProfileOwner{}, r.err
 }
 
 func decodeProfileOwnersResponse(t *testing.T, rec *httptest.ResponseRecorder) []PublicProfileOwner {
