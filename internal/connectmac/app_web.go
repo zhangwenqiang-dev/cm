@@ -1052,10 +1052,6 @@ func (a App) webReleaseReminderAutoReleaseHandler(configPath string) http.Handle
 			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
 		}
-		if member.Role != "admin" {
-			writeWebError(w, http.StatusForbidden, "admin role required")
-			return
-		}
 		var req struct {
 			Profile string `json:"profile"`
 			Enabled *bool  `json:"enabled"`
@@ -1071,6 +1067,10 @@ func (a App) webReleaseReminderAutoReleaseHandler(configPath string) http.Handle
 		}
 		if req.Enabled == nil {
 			writeWebError(w, http.StatusBadRequest, "enabled is required")
+			return
+		}
+		if err := a.ensureWebMemberProfileAccess(member, profileName); err != nil {
+			writeWebError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		enabled := *req.Enabled

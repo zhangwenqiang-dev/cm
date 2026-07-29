@@ -26,7 +26,7 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 	for _, want := range []string{
 		`id="autoReleaseSummary"`,
 		`id="autoReleaseError"`,
-		`id="autoReleaseToggleBtn" class="admin-only"`,
+		`id="autoReleaseToggleBtn" aria-pressed="false"`,
 		`/api/release-reminder/auto-release`,
 		`未开启自动释放`,
 		`等待提醒`,
@@ -403,7 +403,6 @@ func TestWebAutoReleaseMobileAndRoleContract(t *testing.T) {
 		`@media (max-width: 720px)`,
 		`.auto-release-strip { align-items: stretch; flex-direction: column; }`,
 		`.auto-release-actions { width: 100%; }`,
-		`$("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());`,
 		`$("autoReleaseSummary").textContent = autoReleaseStateText(reminder, profile);`,
 		`const ready = !!(profile && profileReady(profile.name));`,
 		`!profile || !reminder || !ready || state.busy`,
@@ -412,6 +411,16 @@ func TestWebAutoReleaseMobileAndRoleContract(t *testing.T) {
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web auto release role/mobile contract missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`id="autoReleaseToggleBtn" class="admin-only"`,
+		`$("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());`,
+		`if (!p || !reminder || !isAdmin() || state.autoReleaseSubmitting) return;`,
+		`if (!isAdmin() || state.autoReleaseSubmitting) return;`,
+	} {
+		if strings.Contains(html, forbidden) {
+			t.Fatalf("web auto release member access remains admin-only: found %q", forbidden)
 		}
 	}
 	if strings.Contains(html, `class="auto-release-strip local-action"`) {
@@ -536,17 +545,6 @@ func TestAppWebAutoReleaseReactivatesReleasedReminderForReadyMac(t *testing.T) {
 }
 
 func TestAppWebAutoReleaseToggleRoleAndValidation(t *testing.T) {
-	for _, role := range []string{"operator", "viewer"} {
-		t.Run(role+" forbidden", func(t *testing.T) {
-			app := newWebAutoReleaseTestApp(t)
-			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusActive)
-			rec := postWebAutoRelease(t, &app, role, "xcode-vnc", true)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
-
 	t.Run("profile required", func(t *testing.T) {
 		app := newWebAutoReleaseTestApp(t)
 		rec := postWebAutoRelease(t, &app, "admin", " ", true)
@@ -572,6 +570,42 @@ func TestAppWebAutoReleaseToggleRoleAndValidation(t *testing.T) {
 			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusActive)
 			rec := postWebAutoReleaseBody(t, &app, "admin", body)
 			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "enabled is required") {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAppWebAutoReleaseToggleAssignedMemberAccess(t *testing.T) {
+	for _, role := range []string{"operator", "viewer"} {
+		t.Run(role+" assigned", func(t *testing.T) {
+			app := newWebAutoReleaseTestApp(t)
+			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusActive)
+			if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "xcode-vnc"}); err != nil {
+				t.Fatalf("upsert managed profile: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/auto-release", strings.NewReader(`{"profile":"xcode-vnc","enabled":false}`))
+			addWebAuth(t, &app, req, role)
+			if _, err := app.MemberStore.AssignProfileAccess("xcode-vnc", "admin@example.com"); err != nil {
+				t.Fatalf("assign profile access: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			app.newWebHandler("").ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+		})
+
+		t.Run(role+" unassigned", func(t *testing.T) {
+			app := newWebAutoReleaseTestApp(t)
+			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusActive)
+			if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "xcode-vnc"}); err != nil {
+				t.Fatalf("upsert managed profile: %v", err)
+			}
+
+			rec := postWebAutoRelease(t, &app, role, "xcode-vnc", false)
+			if rec.Code != http.StatusForbidden {
 				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 			}
 		})

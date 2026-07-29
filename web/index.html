@@ -805,7 +805,7 @@
               <small id="autoReleaseError" class="error hidden"></small>
             </div>
             <div class="auto-release-actions">
-              <button id="autoReleaseToggleBtn" class="admin-only" aria-pressed="false">开启自动释放</button>
+              <button id="autoReleaseToggleBtn" aria-pressed="false">开启自动释放</button>
             </div>
           </div>
           <div class="output">
@@ -1458,6 +1458,14 @@
     async function loadProfiles() {
       const body = await api("/api/profiles");
       state.profiles = body.data.profiles || [];
+      const seededOwners = {};
+      for (const profile of state.profiles) {
+        const owner = profile.owners?.[0];
+        if (owner) {
+          seededOwners[profile.name] = owner;
+        }
+      }
+      state.profileOwners = seededOwners;
       await loadProfileOwners();
       await loadReleaseReminders();
       applyProfileOwners();
@@ -1489,21 +1497,19 @@
     }
 
     async function loadProfileOwners() {
-      if (!state.clientConfig?.user_api) {
-        state.profileOwners = {};
-        return;
-      }
       try {
         const body = await api("/api/profile-owners");
         const owners = body.data?.owners || [];
-        state.profileOwners = {};
+        const nextOwners = {};
         for (const item of owners) {
           if (item.profile_name && item.owner) {
-            state.profileOwners[item.profile_name] = item.owner;
+            nextOwners[item.profile_name] = item.owner;
           }
         }
+        state.profileOwners = nextOwners;
+        return true;
       } catch (err) {
-        state.profileOwners = {};
+        return false;
       }
     }
 
@@ -1865,7 +1871,6 @@
       $("autoReleaseToggleBtn").textContent = enabled ? "关闭自动释放" : "开启自动释放";
       $("autoReleaseToggleBtn").setAttribute("aria-pressed", String(enabled));
       $("autoReleaseToggleBtn").disabled = !profile || !reminder || !ready || state.busy || state.autoReleaseSubmitting || active || released;
-      $("autoReleaseToggleBtn").classList.toggle("hidden", !isAdmin());
     }
 
     function renderUserPage() {
@@ -2044,7 +2049,7 @@
     function openAutoReleaseDialog() {
       const p = selectedProfile();
       const reminder = p ? state.reminders[p.name] : null;
-      if (!p || !reminder || !isAdmin() || state.autoReleaseSubmitting) return;
+      if (!p || !reminder || state.autoReleaseSubmitting) return;
       if (autoReleaseActive(reminder, p.name)) {
         setStatus("自动释放正在执行，当前不能更改设置。");
         return;
@@ -2104,7 +2109,7 @@
         setStatus("自动释放目标已变化，请重新打开设置。");
         return;
       }
-      if (!isAdmin() || state.autoReleaseSubmitting) return;
+      if (state.autoReleaseSubmitting) return;
       state.autoReleaseSubmitting = true;
       renderAutoReleaseDialog();
       try {
