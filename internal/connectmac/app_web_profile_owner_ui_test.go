@@ -16,7 +16,7 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 
 	loadProfiles := webFunctionForContractTest(t, html, "async function loadProfiles()", "async function loadReleaseReminders(")
 	for _, want := range []string{
-		`const seededOwners = {};`,
+		`const seededOwners = { ...state.profileOwners };`,
 		`const owner = profile.owners?.[0];`,
 		`seededOwners[profile.name] = owner;`,
 		`state.profileOwners = seededOwners;`,
@@ -26,8 +26,16 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 			t.Fatalf("profile loading does not seed embedded owners before reconciliation: missing %q", want)
 		}
 	}
-	if strings.Index(loadProfiles, `state.profileOwners = seededOwners;`) > strings.Index(loadProfiles, `await loadProfileOwners();`) {
-		t.Fatal("embedded owners must seed state before owner reconciliation")
+	if strings.Contains(loadProfiles, `const seededOwners = {};`) {
+		t.Fatal("profile loading must not discard current owners before reconciliation")
+	}
+	copyCurrent := strings.Index(loadProfiles, `const seededOwners = { ...state.profileOwners };`)
+	overlayEmbedded := strings.Index(loadProfiles, `seededOwners[profile.name] = owner;`)
+	commitFallback := strings.Index(loadProfiles, `state.profileOwners = seededOwners;`)
+	reconcile := strings.Index(loadProfiles, `await loadProfileOwners();`)
+	if copyCurrent < 0 || overlayEmbedded < 0 || commitFallback < 0 || reconcile < 0 ||
+		copyCurrent > overlayEmbedded || overlayEmbedded > commitFallback || commitFallback > reconcile {
+		t.Fatal("profile owner fallback must copy current owners, overlay embedded owners, then reconcile")
 	}
 
 	loadOwners := webFunctionForContractTest(t, html, "async function loadProfileOwners()", "function applyProfileOwners()")
