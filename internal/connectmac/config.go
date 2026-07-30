@@ -21,8 +21,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	UserAPI string
-	Token   string
+	UserAPI          string
+	Token            string
+	LocalAgentOrigin string
 }
 
 type ProfileDefaults struct {
@@ -188,6 +189,9 @@ func mergeServer(dst *ServerConfig, src ServerConfig, source string) error {
 		return err
 	}
 	if err := mergeDefaultString(&dst.Token, src.Token, "server.token", source); err != nil {
+		return err
+	}
+	if err := mergeDefaultString(&dst.LocalAgentOrigin, src.LocalAgentOrigin, "server.local_agent_origin", source); err != nil {
 		return err
 	}
 	return nil
@@ -913,6 +917,8 @@ func applyServerField(server *ServerConfig, line string) error {
 		server.UserAPI = strings.TrimRight(value, "/")
 	case "token":
 		server.Token = value
+	case "local_agent_origin":
+		server.LocalAgentOrigin = strings.TrimRight(value, "/")
 	default:
 		return fmt.Errorf("unsupported server field %q", key)
 	}

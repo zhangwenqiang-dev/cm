@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -33,6 +35,230 @@ const localAgentPlistPath = "~/Library/LaunchAgents/com.connectmac.local-agent.p
 const localAgentProbeTimeout = 500 * time.Millisecond
 
 const localAgentClientTimeout = time.Second
+
+const (
+	defaultTerminalSessionLimit = 256
+	defaultTerminalSessionTTL   = 30 * time.Second
+)
+
+type terminalSessionGrant struct {
+	Profile   string
+	RequestID string
+	ExpiresAt time.Time
+}
+
+type terminalSessionEntry struct {
+	Grant    terminalSessionGrant
+	Reserved bool
+}
+
+var (
+	errTerminalSessionCapacity = errors.New("terminal session registry is full")
+	errTerminalSessionInvalid  = errors.New("terminal session token is invalid, expired, or already used")
+	errTerminalSessionReserved = errors.New("terminal session token is already reserved")
+)
+
+type terminalSessionRegistry struct {
+	mu      sync.Mutex
+	entries map[string]terminalSessionEntry
+	Max     int
+	TTL     time.Duration
+	Now     func() time.Time
+}
+
+func newTerminalSessionRegistry(max int, ttl time.Duration) *terminalSessionRegistry {
+	if max <= 0 {
+		max = defaultTerminalSessionLimit
+	}
+	if ttl <= 0 {
+		ttl = defaultTerminalSessionTTL
+	}
+	return &terminalSessionRegistry{
+		entries: make(map[string]terminalSessionEntry),
+		Max:     max,
+		TTL:     ttl,
+		Now:     time.Now,
+	}
+}
+
+func (r *terminalSessionRegistry) Issue(profile, requestID string) (string, error) {
+	if r == nil {
+		return "", errors.New("terminal session registry is not configured")
+	}
+	profile = strings.TrimSpace(profile)
+	requestID = strings.TrimSpace(requestID)
+	if profile == "" || requestID == "" {
+		return "", errors.New("terminal session profile and request ID are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.currentTime()
+	r.pruneLocked(now)
+	if len(r.entries) >= r.maxEntries() {
+		return "", errTerminalSessionCapacity
+	}
+	for attempts := 0; attempts < 4; attempts++ {
+		token, err := randomToken(32)
+		if err != nil {
+			return "", fmt.Errorf("generate terminal session token: %w", err)
+		}
+		if _, exists := r.entries[token]; exists {
+			continue
+		}
+		r.entries[token] = terminalSessionEntry{
+			Grant: terminalSessionGrant{
+				Profile: profile, RequestID: requestID, ExpiresAt: now.Add(r.ttl()),
+			},
+		}
+		return token, nil
+	}
+	return "", errors.New("generate unique terminal session token")
+}
+
+func (r *terminalSessionRegistry) Consume(token, profile string) (terminalSessionGrant, error) {
+	_, err := r.Reserve(token, profile)
+	if err != nil {
+		return terminalSessionGrant{}, err
+	}
+	consumed, err := r.ConsumeReserved(token)
+	if err != nil {
+		_ = r.Release(token)
+		return terminalSessionGrant{}, err
+	}
+	return consumed, nil
+}
+
+func (r *terminalSessionRegistry) Reserve(token, profile string) (terminalSessionGrant, error) {
+	if r == nil {
+		return terminalSessionGrant{}, errors.New("terminal session registry is not configured")
+	}
+	token = strings.TrimSpace(token)
+	profile = strings.TrimSpace(profile)
+	if token == "" || profile == "" {
+		return terminalSessionGrant{}, errors.New("terminal session token and profile are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.currentTime()
+	r.pruneLocked(now)
+	entry, err := r.validateLocked(token, profile, now)
+	if err != nil {
+		return terminalSessionGrant{}, err
+	}
+	if entry.Reserved {
+		return terminalSessionGrant{}, errTerminalSessionReserved
+	}
+	entry.Reserved = true
+	r.entries[token] = entry
+	return entry.Grant, nil
+}
+
+func (r *terminalSessionRegistry) Validate(token, profile string) (terminalSessionGrant, error) {
+	if r == nil {
+		return terminalSessionGrant{}, errors.New("terminal session registry is not configured")
+	}
+	token = strings.TrimSpace(token)
+	profile = strings.TrimSpace(profile)
+	if token == "" || profile == "" {
+		return terminalSessionGrant{}, errors.New("terminal session token and profile are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.currentTime()
+	r.pruneLocked(now)
+	entry, err := r.validateLocked(token, profile, now)
+	if err != nil {
+		return terminalSessionGrant{}, err
+	}
+	if entry.Reserved {
+		return terminalSessionGrant{}, errTerminalSessionReserved
+	}
+	return entry.Grant, nil
+}
+
+func (r *terminalSessionRegistry) validateLocked(token, profile string, now time.Time) (terminalSessionEntry, error) {
+	entry, ok := r.entries[token]
+	if !ok || !entry.Grant.ExpiresAt.After(now) {
+		return terminalSessionEntry{}, errTerminalSessionInvalid
+	}
+	if entry.Grant.Profile != profile {
+		return terminalSessionEntry{}, errors.New("terminal session token does not match profile")
+	}
+	return entry, nil
+}
+
+func (r *terminalSessionRegistry) Release(token string) error {
+	if r == nil {
+		return errors.New("terminal session registry is not configured")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("terminal session token is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.currentTime()
+	r.pruneLocked(now)
+	entry, ok := r.entries[token]
+	if !ok {
+		return errTerminalSessionInvalid
+	}
+	entry.Reserved = false
+	r.entries[token] = entry
+	return nil
+}
+
+func (r *terminalSessionRegistry) ConsumeReserved(token string) (terminalSessionGrant, error) {
+	if r == nil {
+		return terminalSessionGrant{}, errors.New("terminal session registry is not configured")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return terminalSessionGrant{}, errors.New("terminal session token is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.currentTime()
+	r.pruneLocked(now)
+	entry, ok := r.entries[token]
+	if !ok || !entry.Grant.ExpiresAt.After(now) {
+		return terminalSessionGrant{}, errTerminalSessionInvalid
+	}
+	if !entry.Reserved {
+		return terminalSessionGrant{}, errors.New("terminal session token is not reserved")
+	}
+	delete(r.entries, token)
+	return entry.Grant, nil
+}
+
+func (r *terminalSessionRegistry) currentTime() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+func (r *terminalSessionRegistry) maxEntries() int {
+	if r.Max > 0 {
+		return r.Max
+	}
+	return defaultTerminalSessionLimit
+}
+
+func (r *terminalSessionRegistry) ttl() time.Duration {
+	if r.TTL > 0 {
+		return r.TTL
+	}
+	return defaultTerminalSessionTTL
+}
+
+func (r *terminalSessionRegistry) pruneLocked(now time.Time) {
+	for token, entry := range r.entries {
+		if !entry.Grant.ExpiresAt.After(now) {
+			delete(r.entries, token)
+		}
+	}
+}
 
 type localAgentOptions struct {
 	Host         string
@@ -79,9 +305,9 @@ func validateLocalAgentRequestID(value string) (string, error) {
 	return value, nil
 }
 
-func (a App) runLocalAgent(ctx context.Context, args []string) int {
+func (a App) runLocalAgent(ctx context.Context, configPath string, args []string) int {
 	if len(args) > 0 && isLocalAgentServiceCommand(args[0]) {
-		return a.runLocalAgentService(ctx, args)
+		return a.runLocalAgentService(ctx, configPath, args)
 	}
 	opts, err := parseLocalAgentArgs(args)
 	if err != nil {
@@ -91,6 +317,14 @@ func (a App) runLocalAgent(ctx context.Context, args []string) int {
 	if opts.Force {
 		fmt.Fprintln(a.Err, "--force is only supported for local-agent stop, restart, and uninstall")
 		return 2
+	}
+	if cfg, loadErr := LoadConfig(configPath); loadErr == nil {
+		origins, originErr := localAgentBrowserOrigins(cfg.Server)
+		if originErr != nil {
+			fmt.Fprintf(a.Err, "local-agent browser origin config is invalid: %v\n", originErr)
+			return 1
+		}
+		a.LocalAgentBrowserOrigins = origins
 	}
 	addr := net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
 	home, err := os.UserHomeDir()
@@ -165,7 +399,7 @@ func parseLocalAgentArgs(args []string) (localAgentOptions, error) {
 	return opts, nil
 }
 
-func (a App) runLocalAgentService(ctx context.Context, args []string) int {
+func (a App) runLocalAgentService(ctx context.Context, configPath string, args []string) int {
 	if runtime.GOOS != "darwin" {
 		fmt.Fprintln(a.Err, "local-agent service management is only supported on macOS")
 		return 1
@@ -196,7 +430,7 @@ func (a App) runLocalAgentService(ctx context.Context, args []string) int {
 	}
 	switch command {
 	case "install":
-		return a.installLocalAgentLaunchAgent(ctx, opts)
+		return a.installLocalAgentLaunchAgent(ctx, configPath, opts)
 	case "start":
 		return a.startLocalAgentLaunchAgent(ctx)
 	case "stop":
@@ -313,10 +547,15 @@ func decodePlistStringArray(decoder *xml.Decoder) ([]string, error) {
 	}
 }
 
-func (a App) installLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptions) int {
+func (a App) installLocalAgentLaunchAgent(ctx context.Context, configPath string, opts localAgentOptions) int {
 	if err := validateLocalAgentTLSInstallHost(opts.Host); err != nil {
 		fmt.Fprintln(a.Err, err)
 		return 2
+	}
+	configPath, err := expandedAbsoluteConfigPath(configPath)
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve config path: %v\n", err)
+		return 1
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -354,7 +593,7 @@ func (a App) installLocalAgentLaunchAgent(ctx context.Context, opts localAgentOp
 		fmt.Fprintf(a.Err, "create launch agents dir: %v\n", err)
 		return 1
 	}
-	plist := localAgentLaunchAgentPlist(localAgentLaunchLabel, executable, opts, filepath.Join(logDir, "local-agent.out.log"), filepath.Join(logDir, "local-agent.err.log"))
+	plist := localAgentLaunchAgentPlist(localAgentLaunchLabel, executable, configPath, opts, filepath.Join(logDir, "local-agent.out.log"), filepath.Join(logDir, "local-agent.err.log"))
 	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
 		fmt.Fprintf(a.Err, "write %s: %v\n", path, err)
 		return 1
@@ -1222,8 +1461,22 @@ func localAgentLaunchDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
-func localAgentLaunchAgentPlist(label, executable string, opts localAgentOptions, stdoutPath, stderrPath string) string {
-	args := []string{executable, "local-agent", "--host", opts.Host, "--port", strconv.Itoa(opts.Port)}
+func expandedAbsoluteConfigPath(configPath string) (string, error) {
+	expanded, err := ExpandPath(configPath)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(expanded) {
+		expanded, err = filepath.Abs(expanded)
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Clean(expanded), nil
+}
+
+func localAgentLaunchAgentPlist(label, executable, configPath string, opts localAgentOptions, stdoutPath, stderrPath string) string {
+	args := []string{executable, "--config", configPath, "local-agent", "--host", opts.Host, "--port", strconv.Itoa(opts.Port)}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
@@ -1267,24 +1520,27 @@ func writePlistKeyBool(b *strings.Builder, key string, value bool) {
 	b.WriteString("  <false/>\n")
 }
 
-func (a App) newLocalAgentHandler() http.Handler {
+func (a *App) newLocalAgentHandler() http.Handler {
+	if a.TerminalSessions == nil {
+		a.TerminalSessions = newTerminalSessionRegistry(defaultTerminalSessionLimit, defaultTerminalSessionTTL)
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/icon.svg", localAgentCORS(localAgentIconHandler))
-	mux.HandleFunc("/health", localAgentCORS(a.localAgentHealthHandler()))
-	mux.HandleFunc("/start", localAgentCORS(a.localAgentCommandHandler("start")))
-	mux.HandleFunc("/open-vnc", localAgentCORS(a.localAgentCommandHandler("open-vnc")))
-	mux.HandleFunc("/ssh", localAgentCORS(a.localAgentSSHHandler()))
-	mux.HandleFunc("/terminal/check", localAgentCORS(a.localAgentTerminalCheckHandler()))
+	mux.HandleFunc("/icon.svg", a.localAgentCORS(localAgentIconHandler, false))
+	mux.HandleFunc("/health", a.localAgentCORS(a.localAgentHealthHandler(), false))
+	mux.HandleFunc("/start", a.localAgentCORS(a.localAgentCommandHandler("start"), true))
+	mux.HandleFunc("/open-vnc", a.localAgentCORS(a.localAgentCommandHandler("open-vnc"), true))
+	mux.HandleFunc("/ssh", a.localAgentCORS(a.localAgentSSHHandler(), true))
+	mux.HandleFunc("/terminal/check", a.localAgentCORS(a.localAgentTerminalCheckHandler(), true))
 	mux.HandleFunc("/terminal/ws", a.localAgentTerminalWSHandler())
-	mux.HandleFunc("/sync/push", localAgentCORS(a.localAgentTransferHandler("push")))
-	mux.HandleFunc("/sync/pull", localAgentCORS(a.localAgentTransferHandler("pull")))
-	mux.HandleFunc("/sync/job", localAgentCORS(a.localAgentTransferJobHandler()))
-	mux.HandleFunc("/sync/jobs", localAgentCORS(a.localAgentTransferJobsHandler()))
-	mux.HandleFunc("/activity", localAgentCORS(a.localAgentActivityHandler()))
-	mux.HandleFunc("/activity/drain", localAgentCORS(a.localAgentDrainHandler()))
-	mux.HandleFunc("/activity/resume", localAgentCORS(a.localAgentResumeHandler()))
-	mux.HandleFunc("/local/pick", localAgentCORS(a.localAgentPickHandler()))
-	mux.HandleFunc("/local/list", localAgentCORS(a.webLocalListHandler()))
+	mux.HandleFunc("/sync/push", a.localAgentCORS(a.localAgentTransferHandler("push"), true))
+	mux.HandleFunc("/sync/pull", a.localAgentCORS(a.localAgentTransferHandler("pull"), true))
+	mux.HandleFunc("/sync/job", a.localAgentCORS(a.localAgentTransferJobHandler(), true))
+	mux.HandleFunc("/sync/jobs", a.localAgentCORS(a.localAgentTransferJobsHandler(), true))
+	mux.HandleFunc("/activity", a.localAgentCORS(a.localAgentActivityHandler(), false))
+	mux.HandleFunc("/activity/drain", a.localAgentCORS(a.localAgentDrainHandler(), false))
+	mux.HandleFunc("/activity/resume", a.localAgentCORS(a.localAgentResumeHandler(), false))
+	mux.HandleFunc("/local/pick", a.localAgentCORS(a.localAgentPickHandler(), true))
+	mux.HandleFunc("/local/list", a.localAgentCORS(a.webLocalListHandler(), true))
 	return mux
 }
 
@@ -1444,7 +1700,7 @@ func (a App) writeLocalTransferEventWithRequest(event LocalTransferEvent, reques
 		Phase:      event.Phase,
 		Percent:    event.Percent,
 		ElapsedMS:  event.Elapsed.Milliseconds(),
-		DurationMS: event.Elapsed.Milliseconds(),
+		DurationMS: positiveDurationMS(event.Elapsed),
 		RequestID:  requestID,
 		Source:     "web-local",
 		Message:    message,
@@ -1525,10 +1781,14 @@ func (a App) localAgentResumeHandler() http.HandlerFunc {
 	}
 }
 
-func localAgentCORS(next http.HandlerFunc) http.HandlerFunc {
+func (a App) localAgentCORS(next http.HandlerFunc, requireOrigin bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if localAgentAllowedOrigin(origin) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" && requireOrigin {
+			writeWebError(w, http.StatusForbidden, "origin is required")
+			return
+		}
+		if origin != "" && a.localAgentAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
@@ -1548,17 +1808,46 @@ func localAgentCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func localAgentAllowedOrigin(origin string) bool {
-	if origin == "" {
-		return true
+func (a App) localAgentAllowedOrigin(origin string) bool {
+	_, ok := a.LocalAgentBrowserOrigins[strings.TrimSpace(origin)]
+	return ok
+}
+
+func localAgentBrowserOrigins(server ServerConfig) (map[string]struct{}, error) {
+	origins := map[string]struct{}{}
+	if strings.TrimSpace(server.UserAPI) != "" {
+		origin, err := canonicalBrowserOrigin(server.UserAPI, false)
+		if err != nil {
+			return nil, fmt.Errorf("server.user_api: %w", err)
+		}
+		origins[origin] = struct{}{}
 	}
-	if origin == "https://cm.hsgitlab.xyz" {
-		return true
+	if strings.TrimSpace(server.LocalAgentOrigin) != "" {
+		origin, err := canonicalBrowserOrigin(server.LocalAgentOrigin, true)
+		if err != nil {
+			return nil, fmt.Errorf("server.local_agent_origin: %w", err)
+		}
+		origins[origin] = struct{}{}
 	}
-	if strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "http://localhost:") {
-		return true
+	return origins, nil
+}
+
+func canonicalBrowserOrigin(raw string, exact bool) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
 	}
-	return false
+	scheme := strings.ToLower(parsed.Scheme)
+	if (scheme != "http" && scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return "", errors.New("must be an http or https URL without credentials")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("query and fragment are not allowed")
+	}
+	if exact && parsed.Path != "" && parsed.Path != "/" {
+		return "", errors.New("must contain only scheme and host")
+	}
+	return scheme + "://" + strings.ToLower(parsed.Host), nil
 }
 
 func (a App) localAgentHealthHandler() http.HandlerFunc {
@@ -1577,32 +1866,38 @@ func (a App) localAgentHealthHandler() http.HandlerFunc {
 
 func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
 		if r.Method != http.MethodPost {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		var req localAgentRequest
 		if err := decodeWebJSON(r, &req); err != nil {
-			a.writeLocalAgentVNCEarlyFailure(command)
+			ctx := a.localAgentFailureContext(r)
+			a.writeLocalAgentVNCEarlyFailure(ctx, command, Profile{}, startedAt, err)
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		requestedProfile := localAgentProfileFromRequest(req)
 		requestID, err := validatedLocalAgentRequestID(r, req.RequestID)
 		if err != nil {
+			ctx := a.localAgentFailureContext(r)
+			a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, err)
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
 		profileName, configPath, err := writeLocalAgentProfileConfig(req)
 		if err != nil {
-			a.writeLocalAgentVNCEarlyFailure(command)
+			a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, err)
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
 		}
+		requestedProfile.Name = profileName
 		args := []string{command, profileName, "--config", configPath}
 		switch command {
 		case "start", "open-vnc":
-			resp := a.localAgentRunVNC(ctx, command, profileName, configPath)
+			resp := a.localAgentRunVNC(ctx, command, requestedProfile, configPath)
 			writeWebJSON(w, resp)
 			return
 		case "push":
@@ -1707,11 +2002,17 @@ func (a App) localAgentTerminalCheckHandler() http.HandlerFunc {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("ssh host key scan failed for %s: %s", profile.Host, check.Message)})
 			return
 		}
+		token, err := a.TerminalSessions.Issue(profile.Name, requestID)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "create terminal session failed"})
+			return
+		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
-			"profile":          profile.Name,
-			"target":           fmt.Sprintf("%s@%s", profile.User, profile.Host),
-			"host_key_status":  string(check.Status),
-			"host_key_message": check.Message,
+			"profile":                profile.Name,
+			"target":                 fmt.Sprintf("%s@%s", profile.User, profile.Host),
+			"host_key_status":        string(check.Status),
+			"host_key_message":       check.Message,
+			"terminal_session_token": token,
 		}})
 	}
 }
@@ -1719,7 +2020,7 @@ func (a App) localAgentTerminalCheckHandler() http.HandlerFunc {
 func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if !localAgentAllowedOrigin(origin) {
+		if origin == "" || !a.localAgentAllowedOrigin(origin) {
 			writeWebError(w, http.StatusForbidden, "origin is not allowed")
 			return
 		}
@@ -1732,12 +2033,13 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
-		requestID, err := validateLocalAgentRequestID(strings.TrimSpace(r.URL.Query().Get("request_id")))
+		token := strings.TrimSpace(r.URL.Query().Get("terminal_session_token"))
+		grant, err := a.TerminalSessions.Validate(token, profileName)
 		if err != nil {
-			writeWebError(w, http.StatusBadRequest, err.Error())
+			writeWebError(w, http.StatusUnauthorized, err.Error())
 			return
 		}
-		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
+		ctx := withOperationContext(r.Context(), OperationContext{RequestID: grant.RequestID, Source: "web-local"})
 		configPath, err := localAgentProfileConfigPath(profileName)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
@@ -1766,37 +2068,61 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, fmt.Sprintf("ssh host key scan failed for %s: %s", profile.Host, check.Message))
 			return
 		}
+		grant, err = a.TerminalSessions.Reserve(token, profileName)
+		if err != nil {
+			writeWebError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(req *http.Request) bool {
-				return localAgentAllowedOrigin(req.Header.Get("Origin"))
+				return a.localAgentAllowedOrigin(req.Header.Get("Origin"))
 			},
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			_ = a.TerminalSessions.Release(token)
 			return
 		}
-		startedAt := time.Now()
-		a.logLocalCommand(ctx, "terminal.opened", profile, 0, startedAt, LogEntry{Phase: "opened"})
-		proxyErr := a.proxyWebTerminal(ctx, conn, profile)
-		code := 0
-		entry := LogEntry{Phase: "closed"}
-		if !normalTerminalClose(proxyErr) {
-			code = 1
-			entry.ErrorCode = classifyOperationalError(proxyErr).Code
+		grant, err = a.TerminalSessions.ConsumeReserved(token)
+		if err != nil {
+			_ = conn.Close()
+			return
 		}
-		a.logLocalCommand(ctx, "terminal.closed", profile, code, startedAt, entry)
+		ctx = withOperationContext(r.Context(), OperationContext{RequestID: grant.RequestID, Source: "web-local"})
+		_ = a.observeLocalTerminalSession(ctx, profile, func() error {
+			return a.proxyWebTerminal(ctx, conn, profile)
+		})
 	}
 }
 
+func (a App) observeLocalTerminalSession(ctx context.Context, profile Profile, run func() error) error {
+	startedAt := time.Now()
+	a.logLocalCommand(ctx, "terminal.opened", profile, 0, startedAt, LogEntry{Phase: "opened"})
+	proxyErr := run()
+	code := 0
+	entry := LogEntry{Phase: "closed"}
+	if !normalTerminalClose(proxyErr) {
+		code = 1
+		entry.ErrorCode = classifyOperationalError(proxyErr).Code
+	}
+	a.logLocalCommand(ctx, "terminal.closed", profile, code, startedAt, entry)
+	return proxyErr
+}
+
 func normalTerminalClose(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+	if err == nil {
 		return true
 	}
-	return websocket.IsCloseError(err,
-		websocket.CloseNormalClosure,
-		websocket.CloseGoingAway,
-		websocket.CloseNoStatusReceived,
-	)
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		return false
+	}
+	switch closeErr.Code {
+	case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a App) prepareLocalAgentTerminal(r *http.Request) (Profile, string, error) {
@@ -1879,11 +2205,12 @@ func (a App) localAgentRunInDir(ctx context.Context, dir string, args []string) 
 	return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
 }
 
-func (a App) localAgentRunVNC(ctx context.Context, command, profileName, configPath string) webAPIResponse {
-	return a.localAgentRunVNCWithBeforeLock(ctx, command, profileName, configPath, nil)
+func (a App) localAgentRunVNC(ctx context.Context, command string, profile Profile, configPath string) webAPIResponse {
+	return a.localAgentRunVNCWithBeforeLock(ctx, command, profile, configPath, nil)
 }
 
-func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profileName, configPath string, beforeLock func()) webAPIResponse {
+func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command string, requestedProfile Profile, configPath string, beforeLock func()) webAPIResponse {
+	startedAt := time.Now()
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	app := a
@@ -1897,16 +2224,18 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 	cfg, code := app.loadCommandConfig(ctx, configPath)
 	if code != 0 {
 		resp := webAPIResponse{OK: false, Code: code, Output: out.String(), Error: errOut.String()}
-		a.writeLocalAgentVNCLog(LogEntry{
-			Level: "error", Action: "local-agent.vnc", Profile: profileName,
-			Outcome: "failure", Message: "load local VNC profile failed",
-		})
+		a.writeLocalAgentVNCLog(ctx, LogEntry{
+			Level: "error", Action: "local-agent.vnc", Profile: requestedProfile.Name,
+			LocalPorts: profileLocalPorts(requestedProfile), Outcome: "failure",
+			ErrorCode: classifyOperationalError(errors.New(errOut.String())).Code,
+			Message:   "load local VNC profile failed",
+		}, startedAt)
 		return resp
 	}
-	profile, _ := cfg.Profile(profileName)
+	profile, _ := cfg.Profile(requestedProfile.Name)
 	entry := LogEntry{
 		Action:     "local-agent.vnc",
-		Profile:    profileName,
+		Profile:    requestedProfile.Name,
 		LocalPorts: profileLocalPorts(profile),
 		RequestID:  op.RequestID,
 		Source:     "web-local",
@@ -1914,7 +2243,7 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 
 	switch command {
 	case "start":
-		code, result := app.runStartResult(internalCtx, cfg, []string{profileName})
+		code, result := app.runStartResult(internalCtx, cfg, []string{requestedProfile.Name})
 		entry.Profile = result.Profile
 		entry.LocalPorts = result.LocalPorts
 		entry.TunnelAction = result.Action
@@ -1922,11 +2251,12 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 		entry.Outcome = outcomeForCode(code)
 		if code != 0 {
 			entry.Level = "error"
+			entry.ErrorCode = "command_failed"
 			entry.Message = "local VNC tunnel start failed"
 		} else {
 			entry.Message = "local VNC tunnel ready"
 		}
-		a.writeLocalAgentVNCLog(entry)
+		a.writeLocalAgentVNCLog(ctx, entry, startedAt)
 		return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
 	case "open-vnc":
 		code := 0
@@ -1934,26 +2264,32 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 			beforeLock()
 		}
 		err := app.StateManager.WithProfileLock(profile.Name, func() error {
-			code = app.runOpenVNC(internalCtx, cfg, []string{profileName})
+			code = app.runOpenVNC(internalCtx, cfg, []string{profile.Name})
 			entry.PID = app.verifiedTunnelPID(profile)
 			return nil
 		})
 		if err != nil {
 			fmt.Fprintf(app.Err, "lock open-vnc lifecycle: %v\n", err)
 			code = 1
+			entry.ErrorCode = classifyOperationalError(err).Code
 		}
 		entry.Outcome = outcomeForCode(code)
 		entry.LaunchResult = entry.Outcome
 		if code != 0 {
 			entry.Level = "error"
+			if entry.ErrorCode == "" {
+				entry.ErrorCode = "command_failed"
+			}
 			entry.Message = "local VNC launch failed"
 		} else {
 			entry.Message = "local VNC launched"
 		}
-		a.writeLocalAgentVNCLog(entry)
+		a.writeLocalAgentVNCLog(ctx, entry, startedAt)
 		return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
 	default:
-		return webAPIResponse{OK: false, Code: 2, Error: "unsupported local VNC command"}
+		err := errors.New("unsupported local VNC command")
+		a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, err)
+		return webAPIResponse{OK: false, Code: 2, Error: err.Error()}
 	}
 }
 
@@ -1964,19 +2300,43 @@ func outcomeForCode(code int) string {
 	return "failure"
 }
 
-func (a App) writeLocalAgentVNCLog(entry LogEntry) {
-	_ = a.LogManager.Write(entry)
+func (a App) writeLocalAgentVNCLog(ctx context.Context, entry LogEntry, startedAt time.Time) {
+	op := operationContextFrom(ctx)
+	entry.RequestID = op.RequestID
+	entry.Source = op.Source
+	if entry.Source == "" {
+		entry.Source = "web-local"
+	}
+	entry.DurationMS = elapsedDurationMS(startedAt)
+	a.writeRuntimeLog(entry)
 }
 
-func (a App) writeLocalAgentVNCEarlyFailure(command string) {
-	if command != "start" && command != "open-vnc" {
-		return
-	}
+func (a App) writeLocalAgentVNCEarlyFailure(ctx context.Context, command string, profile Profile, startedAt time.Time, cause error) {
 	entry := LogEntry{
-		Level: "error", Action: "local-agent.vnc", Outcome: "failure",
+		Level: "error", Action: "local-agent.vnc", Outcome: "failure", Profile: profile.Name,
+		LocalPorts: profileLocalPorts(profile), ErrorCode: classifyOperationalError(cause).Code,
 		Message: "local VNC request failed",
 	}
-	a.writeLocalAgentVNCLog(entry)
+	a.writeLocalAgentVNCLog(ctx, entry, startedAt)
+}
+
+func (a App) localAgentFailureContext(r *http.Request) context.Context {
+	requestID, err := validatedLocalAgentRequestID(r, "")
+	if err != nil {
+		requestID, _ = newRequestID(time.Now(), cryptorand.Reader)
+	}
+	return withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
+}
+
+func localAgentProfileFromRequest(req localAgentRequest) Profile {
+	profile, err := ParseSingleProfileYAML(strings.TrimSpace(req.ProfileYAML))
+	if err != nil {
+		return Profile{Name: strings.TrimSpace(req.Profile)}
+	}
+	if profile.Name == "" {
+		profile.Name = strings.TrimSpace(req.Profile)
+	}
+	return profile
 }
 
 func (a App) verifiedTunnelPID(profile Profile) int {

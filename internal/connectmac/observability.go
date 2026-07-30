@@ -170,3 +170,15 @@ func (a App) writeRuntimeLog(entry LogEntry) {
 		_, _ = fmt.Fprintln(writer, message)
 	}
 }
+
+func elapsedDurationMS(startedAt time.Time) int64 {
+	return positiveDurationMS(time.Since(startedAt))
+}
+
+func positiveDurationMS(duration time.Duration) int64 {
+	elapsed := duration.Milliseconds()
+	if elapsed < 1 {
+		return 1
+	}
+	return elapsed
+}

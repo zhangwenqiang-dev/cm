@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -25,22 +26,23 @@ import (
 )
 
 type fakeRunner struct {
-	foreground  []string
-	background  []string
-	startErr    error
-	rsync       []string
-	rsyncOutput []string
-	rsyncErr    error
-	rsyncWait   <-chan struct{}
-	forgotHost  string
-	knownHost   string
-	scannedKey  string
-	scanErr     error
-	openedURL   string
-	openedVNC   string
-	openVNCErr  error
-	stopPID     int
-	stopErr     error
+	foreground    []string
+	foregroundErr error
+	background    []string
+	startErr      error
+	rsync         []string
+	rsyncOutput   []string
+	rsyncErr      error
+	rsyncWait     <-chan struct{}
+	forgotHost    string
+	knownHost     string
+	scannedKey    string
+	scanErr       error
+	openedURL     string
+	openedVNC     string
+	openVNCErr    error
+	stopPID       int
+	stopErr       error
 }
 
 type synchronizedRunner struct {
@@ -78,7 +80,7 @@ func (r *synchronizedRunner) StartBackground(ctx context.Context, args []string)
 
 func (r *fakeRunner) RunForeground(ctx context.Context, args []string) error {
 	r.foreground = args
-	return nil
+	return r.foregroundErr
 }
 
 func (r *fakeRunner) StartBackground(ctx context.Context, args []string) (int, error) {
@@ -205,6 +207,7 @@ func TestLocalAgentVNCLogLifecycleAndLaunch(t *testing.T) {
 			}
 			body := strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":` + strconv.Quote(FormatProfileFile(profile)) + `}`)
 			req := httptest.NewRequest(http.MethodPost, "/"+tt.command, body)
+			req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
 			rec := httptest.NewRecorder()
 			app.newLocalAgentHandler().ServeHTTP(rec, req)
 			var resp webAPIResponse
@@ -221,7 +224,8 @@ func TestLocalAgentVNCLogLifecycleAndLaunch(t *testing.T) {
 			entry := entries[0]
 			if entry.Action != "local-agent.vnc" || entry.Profile != "xcode-vnc" ||
 				!reflect.DeepEqual(entry.LocalPorts, []int{5900}) || entry.TunnelAction != tt.wantAction ||
-				entry.PID != tt.wantPID || entry.Outcome != tt.wantOutcome || entry.LaunchResult != tt.wantLaunch {
+				entry.PID != tt.wantPID || entry.Outcome != tt.wantOutcome || entry.LaunchResult != tt.wantLaunch ||
+				entry.RequestID == "" || entry.Source != "web-local" || entry.DurationMS < 1 {
 				t.Fatalf("entry = %+v", entry)
 			}
 			raw := readTestLogsRaw(t, app.LogManager)
@@ -308,10 +312,11 @@ func TestLocalAgentVNCStartAccessFailureReportsExistingLiveStateConflict(t *test
 
 func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
 	tests := []struct {
-		name       string
-		command    string
-		body       string
-		wantStatus int
+		name        string
+		command     string
+		body        string
+		wantStatus  int
+		wantProfile string
 	}{
 		{
 			name: "start decode", command: "start",
@@ -320,8 +325,9 @@ func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
 		},
 		{
 			name: "open-vnc config", command: "open-vnc",
-			body:       `{"profile":"malicious-profile-token","profile_yaml":"password=hunter2 token=session-token"}`,
-			wantStatus: http.StatusOK,
+			body:        `{"profile":"malicious-profile-token","profile_yaml":"password=hunter2 token=session-token"}`,
+			wantStatus:  http.StatusOK,
+			wantProfile: "malicious-profile-token",
 		},
 	}
 	for _, tt := range tests {
@@ -331,6 +337,7 @@ func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
 			var out, errOut bytes.Buffer
 			app := testApp(&out, &errOut, dir)
 			req := httptest.NewRequest(http.MethodPost, "/"+tt.command, strings.NewReader(tt.body))
+			req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
 			rec := httptest.NewRecorder()
 			app.newLocalAgentHandler().ServeHTTP(rec, req)
 			if rec.Code != tt.wantStatus {
@@ -343,11 +350,11 @@ func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
 			entry := entries[0]
 			if entry.Action != "local-agent.vnc" || entry.Outcome != "failure" ||
 				entry.Message != "local VNC request failed" ||
-				entry.Profile != "" || entry.TunnelAction != "" || entry.LaunchResult != "" {
+				entry.Profile != tt.wantProfile || entry.TunnelAction != "" || entry.LaunchResult != "" {
 				t.Fatalf("entry = %+v", entry)
 			}
 			raw := readTestLogsRaw(t, app.LogManager)
-			for _, secret := range []string{"hunter2", "session-token", "secret-profile", "malicious-profile-token", "profile_yaml"} {
+			for _, secret := range []string{"hunter2", "session-token", "secret-profile", "profile_yaml"} {
 				if strings.Contains(raw, secret) {
 					t.Fatalf("log contains secret %q: %s", secret, raw)
 				}
@@ -389,7 +396,7 @@ func TestLocalAgentOpenVNCWaitsForConcurrentRestartAndLogsVerifiedPID(t *testing
 			t.Errorf("write profile config: %v", err)
 			return
 		}
-		openDone <- openApp.localAgentRunVNCWithBeforeLock(context.Background(), "open-vnc", profile.Name, configPath, func() {
+		openDone <- openApp.localAgentRunVNCWithBeforeLock(context.Background(), "open-vnc", profile, configPath, func() {
 			close(beforeLock)
 		})
 	}()
@@ -441,7 +448,7 @@ func TestLocalAgentOpenVNCLockFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := app.localAgentRunVNC(context.Background(), "open-vnc", profile.Name, configPath)
+	resp := app.localAgentRunVNC(context.Background(), "open-vnc", profile, configPath)
 	if resp.OK || resp.Code != 1 || !strings.Contains(resp.Error, "lock open-vnc lifecycle") {
 		t.Fatalf("response=%+v", resp)
 	}
@@ -471,6 +478,7 @@ func TestLocalAgentVNCLogFailureDoesNotChangeResponse(t *testing.T) {
 
 	body := strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":` + strconv.Quote(FormatProfileFile(profile)) + `}`)
 	req := httptest.NewRequest(http.MethodPost, "/open-vnc", body)
+	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
 	rec := httptest.NewRecorder()
 	app.newLocalAgentHandler().ServeHTTP(rec, req)
 	var resp webAPIResponse
@@ -887,6 +895,7 @@ profiles:
 	app.Runner = runner
 	body := strings.NewReader(`{"profile":"remote-usw2","profile_yaml":"profiles:\n  remote-usw2:\n    description: Apple account: remote@example.com\n    user: ec2-user\n    host: mac-host.example.com\n    tunnels:\n      - local_port: 5900\n        remote_host: localhost\n        remote_port: 5900\n"}`)
 	req := httptest.NewRequest(http.MethodPost, "/terminal/check", body)
+	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
 	rec := httptest.NewRecorder()
 	app.newLocalAgentHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -908,6 +917,17 @@ profiles:
 	}
 	if data["host_key_status"] != string(HostKeyMissing) {
 		t.Fatalf("host_key_status = %#v", data["host_key_status"])
+	}
+	if strings.TrimSpace(fmt.Sprint(data["terminal_session_token"])) == "" {
+		t.Fatalf("terminal_session_token = %#v", data["terminal_session_token"])
+	}
+	token := strings.TrimSpace(fmt.Sprint(data["terminal_session_token"]))
+	grant, err := app.TerminalSessions.Consume(token, "remote-usw2")
+	if err != nil {
+		t.Fatalf("consume terminal session token: %v", err)
+	}
+	if grant.Profile != "remote-usw2" || grant.RequestID == "" {
+		t.Fatalf("terminal session grant = %+v", grant)
 	}
 	generated, err := LoadConfig(filepath.Join(home, ".connectmac", "local-agent", "profiles", "remote-usw2.yaml"))
 	if err != nil {
@@ -941,7 +961,12 @@ func TestLocalAgentTerminalWSFixesHostKeyBeforeUpgrade(t *testing.T) {
 	runner := &fakeRunner{}
 	app := testApp(&out, &errOut, home)
 	app.Runner = runner
-	req := httptest.NewRequest(http.MethodGet, "/terminal/ws?profile=remote-usw2", nil)
+	app.TerminalSessions = newTerminalSessionRegistry(16, time.Minute)
+	token, err := app.TerminalSessions.Issue("remote-usw2", "terminal-ws-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/terminal/ws?profile=remote-usw2&terminal_session_token="+url.QueryEscape(token), nil)
 	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
 	rec := httptest.NewRecorder()
 	app.newLocalAgentHandler().ServeHTTP(rec, req)
@@ -952,20 +977,49 @@ func TestLocalAgentTerminalWSFixesHostKeyBeforeUpgrade(t *testing.T) {
 	if !strings.Contains(string(knownHosts), "mac-host.example.com ssh-ed25519 AAAACURRENT") {
 		t.Fatalf("known_hosts = %q", string(knownHosts))
 	}
+	if _, err := app.TerminalSessions.Reserve(token, "remote-usw2"); err != nil {
+		t.Fatalf("failed websocket upgrade must release token for retry: %v", err)
+	}
+	if err := app.TerminalSessions.Release(token); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLocalAgentLaunchAgentPlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath, err := expandedAbsoluteConfigPath("~/Connect Mac/config file.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
 	plist := localAgentLaunchAgentPlist(
 		localAgentLaunchLabel,
 		"/usr/local/bin/cm",
+		configPath,
 		localAgentOptions{Host: "127.0.0.1", Port: 18765},
 		"/tmp/connectmac.out.log",
 		"/tmp/connectmac.err.log",
 	)
+	args, err := decodePlistStringArray(xml.NewDecoder(strings.NewReader(plist)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := []string{
+		"/usr/local/bin/cm",
+		"--config", configPath,
+		"local-agent",
+		"--host", "127.0.0.1",
+		"--port", "18765",
+	}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("ProgramArguments = %#v, want %#v", args, wantArgs)
+	}
 	for _, want := range []string{
 		"<string>com.connectmac.local-agent</string>",
 		"<string>/usr/local/bin/cm</string>",
 		"<string>local-agent</string>",
+		"<string>--config</string>",
+		"<string>" + configPath + "</string>",
 		"<string>--host</string>",
 		"<string>127.0.0.1</string>",
 		"<string>--port</string>",
@@ -1159,7 +1213,7 @@ func TestLocalAgentManualStartupUsesTLSOrLegacyHTTP(t *testing.T) {
 			defer cancel()
 			result := make(chan int, 1)
 			go func() {
-				result <- app.runLocalAgent(ctx, []string{"--host", opts.Host, "--port", strconv.Itoa(opts.Port)})
+				result <- app.runLocalAgent(ctx, DefaultConfigPath, []string{"--host", opts.Host, "--port", strconv.Itoa(opts.Port)})
 			}()
 			if tt.wantCode != 0 {
 				if code := <-result; code != tt.wantCode {
@@ -1186,6 +1240,7 @@ func TestLocalAgentManualStartupUsesTLSOrLegacyHTTP(t *testing.T) {
 func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "Connect Mac", "custom config.yaml")
 	opts := localAgentUnusedOptions(t)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
@@ -1228,14 +1283,32 @@ func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
 		return nil, nil
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
+	if code := app.runLocalAgent(context.Background(), configPath, []string{"install", "--host", opts.Host, "--port", strconv.Itoa(opts.Port)}); code != 0 {
 		t.Fatalf("first install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	if !strings.Contains(out.String(), "ready at https://") {
 		t.Fatalf("install output = %q", out.String())
 	}
-	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
-		t.Fatalf("second install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	plistPath, err := ExpandPath(localAgentPlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedPlist, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(installedPlist), "<string>--config</string>\n    <string>"+configPath+"</string>") {
+		t.Fatalf("installed plist does not preserve config path:\n%s", installedPlist)
+	}
+	if code := app.runLocalAgent(context.Background(), configPath, []string{"restart", "--force"}); code != 0 {
+		t.Fatalf("restart code = %d, out = %q, err = %q", code, out.String(), errOut.String())
+	}
+	restartedPlist, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restartedPlist, installedPlist) {
+		t.Fatalf("restart changed installed plist:\n%s", restartedPlist)
 	}
 	if len(launchCalls) != 6 {
 		t.Fatalf("launchctl calls = %#v", launchCalls)
@@ -1250,7 +1323,7 @@ func TestLocalAgentInstallTLSLifecycleAndHealthFailure(t *testing.T) {
 	failing.LocalAgentSecurityCommand = app.LocalAgentSecurityCommand
 	out.Reset()
 	errOut.Reset()
-	if code := failing.installLocalAgentLaunchAgent(context.Background(), opts); code != 1 {
+	if code := failing.installLocalAgentLaunchAgent(context.Background(), configPath, opts); code != 1 {
 		t.Fatalf("health failure code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "https://") || !strings.Contains(errOut.String(), "local-agent.err.log") {
@@ -1265,7 +1338,7 @@ func TestLocalAgentInstallKeychainCancellationKeepsExistingServiceRunning(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	original := localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", localAgentOptions{Host: "127.0.0.9", Port: 29876}, "/tmp/out", "/tmp/err")
+	original := localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", DefaultConfigPath, localAgentOptions{Host: "127.0.0.9", Port: 29876}, "/tmp/out", "/tmp/err")
 	writeFile(t, path, original)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
@@ -1277,7 +1350,7 @@ func TestLocalAgentInstallKeychainCancellationKeepsExistingServiceRunning(t *tes
 		return nil, nil
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
 		t.Fatalf("install code = %d, err = %q", code, errOut.String())
 	}
 	got, err := os.ReadFile(path)
@@ -1344,7 +1417,7 @@ func TestLocalAgentInstallLaunchctlFailuresAreAuthoritative(t *testing.T) {
 				}
 			}
 
-			if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentUnusedOptions(t)); code != 1 {
+			if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, localAgentUnusedOptions(t)); code != 1 {
 				t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 			}
 			if !strings.Contains(errOut.String(), tt.want) {
@@ -1407,7 +1480,7 @@ func TestLocalAgentInstallRejectsOldHealthyVersion(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()
-	if code := app.installLocalAgentLaunchAgent(ctx, opts); code != 1 {
+	if code := app.installLocalAgentLaunchAgent(ctx, DefaultConfigPath, opts); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	if strings.Contains(out.String(), "ready at") || !strings.Contains(errOut.String(), "health check failed") {
@@ -1422,7 +1495,7 @@ func TestLocalAgentInstallHostMigrationAndRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, path, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", localAgentOptions{Host: "127.0.0.9", Port: 29876}, "/tmp/out", "/tmp/err"))
+	writeFile(t, path, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", DefaultConfigPath, localAgentOptions{Host: "127.0.0.9", Port: 29876}, "/tmp/out", "/tmp/err"))
 	opts, err := resolveInstalledLocalAgentOptions(localAgentOptions{Host: "127.0.0.1", Port: 18765})
 	if err != nil {
 		t.Fatal(err)
@@ -1458,7 +1531,7 @@ func TestLocalAgentInstallHostMigrationAndRejection(t *testing.T) {
 				t.Fatal("launchctl must not run for rejected host")
 				return nil, nil
 			}
-			if code := rejected.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: host, Port: 18765, HostExplicit: true}); code != 2 {
+			if code := rejected.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, localAgentOptions{Host: host, Port: 18765, HostExplicit: true}); code != 2 {
 				t.Fatalf("install code = %d, error = %q", code, rejectedErr.String())
 			}
 			if !strings.Contains(rejectedErr.String(), "localhost, 127.0.0.1, or ::1") {
@@ -1508,7 +1581,7 @@ func TestLocalAgentKeychainTrustInstallCommands(t *testing.T) {
 		return nil, nil
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, opts); code != 0 {
 		t.Fatalf("install code = %d, err = %q", code, errOut.String())
 	}
 	material := localAgentTLSPaths(home)
@@ -1552,7 +1625,7 @@ func TestLocalAgentKeychainTrustSkipsAlreadyTrustedCA(t *testing.T) {
 				return []byte(tt.output + "\n"), nil
 			}
 
-			if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
+			if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, opts); code != 0 {
 				t.Fatalf("install code = %d, err = %q", code, errOut.String())
 			}
 			want := [][]string{
@@ -1650,7 +1723,7 @@ func TestLocalAgentKeychainTrustFailsWhenVerificationStillFails(t *testing.T) {
 		}
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	ledger, err := os.ReadFile(localAgentTrustedCAFingerprintLedgerPath(home))
@@ -1761,7 +1834,7 @@ func TestLocalAgentKeychainTrustKeepsLedgerWhenStaleCleanupFails(t *testing.T) {
 		}
 	}
 
-	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 1 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, opts); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	ledger, err := readLocalAgentTrustedCAFingerprints(home)
@@ -1770,7 +1843,7 @@ func TestLocalAgentKeychainTrustKeepsLedgerWhenStaleCleanupFails(t *testing.T) {
 		(ledger[0] != currentFingerprint && ledger[1] != currentFingerprint) {
 		t.Fatalf("ledger after failed cleanup = %#v, err = %v", ledger, err)
 	}
-	if code := app.installLocalAgentLaunchAgent(context.Background(), opts); code != 0 {
+	if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, opts); code != 0 {
 		t.Fatalf("retry install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	currentFingerprint, err = localAgentCAFingerprint(material.CACertPath)
@@ -1814,7 +1887,7 @@ func TestLocalAgentKeychainTrustWritesAheadBeforeCanceledMutationAndRecoversWith
 		}
 	}
 
-	if code := app.installLocalAgentLaunchAgent(ctx, localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+	if code := app.installLocalAgentLaunchAgent(ctx, DefaultConfigPath, localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
 		t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	if !ledgerRecordedBeforeMutation {
@@ -1877,7 +1950,7 @@ func TestLocalAgentKeychainTrustInstallFailureAndCancellation(t *testing.T) {
 				return tt.command(args)
 			}
 
-			if code := app.installLocalAgentLaunchAgent(context.Background(), localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
+			if code := app.installLocalAgentLaunchAgent(context.Background(), DefaultConfigPath, localAgentOptions{Host: "127.0.0.1", Port: 18765}); code != 1 {
 				t.Fatalf("install code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 			}
 			if !strings.Contains(strings.ToLower(errOut.String()), strings.ToLower(tt.want)) || strings.Contains(out.String(), "installed") {
@@ -2147,6 +2220,7 @@ func TestLocalAgentRecoversInstalledAddressAndHonorsExplicitOptions(t *testing.T
 	plist := localAgentLaunchAgentPlist(
 		localAgentLaunchLabel,
 		"/usr/local/bin/cm",
+		DefaultConfigPath,
 		localAgentOptions{Host: "127.0.0.9", Port: 29876},
 		"/tmp/out.log",
 		"/tmp/err.log",
@@ -2194,10 +2268,10 @@ func TestLocalAgentStatusUsesInstalledAddressWithoutFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, path, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", opts, "/tmp/out", "/tmp/err"))
+	writeFile(t, path, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", DefaultConfigPath, opts, "/tmp/out", "/tmp/err"))
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)
-	if code := app.runLocalAgentService(context.Background(), []string{"status"}); code != 0 {
+	if code := app.runLocalAgentService(context.Background(), DefaultConfigPath, []string{"status"}); code != 0 {
 		t.Fatalf("status code = %d, out = %q, err = %q", code, out.String(), errOut.String())
 	}
 	if !strings.Contains(out.String(), net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))) {
@@ -2252,7 +2326,7 @@ func TestLocalAgentBootoutFailureResumesDraining(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, plistPath, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", localAgentOptions{Host: "127.0.0.1", Port: 18765}, "/tmp/out", "/tmp/err"))
+	writeFile(t, plistPath, localAgentLaunchAgentPlist(localAgentLaunchLabel, "/usr/local/bin/cm", DefaultConfigPath, localAgentOptions{Host: "127.0.0.1", Port: 18765}, "/tmp/out", "/tmp/err"))
 	binDir := t.TempDir()
 	launchctl := filepath.Join(binDir, "launchctl")
 	writeFile(t, launchctl, "#!/bin/sh\nexit 1\n")
@@ -2412,7 +2486,7 @@ func TestLocalAgentDrainEndpointsAreAtomic(t *testing.T) {
 	handler := app.newLocalAgentHandler()
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/activity/drain", nil))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodPost, "/activity/drain", nil))
 	var activeResp struct {
 		OK   bool `json:"ok"`
 		Data struct {
@@ -2430,7 +2504,7 @@ func TestLocalAgentDrainEndpointsAreAtomic(t *testing.T) {
 	waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
 
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/activity/drain", nil))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodPost, "/activity/drain", nil))
 	var drainedResp struct {
 		OK   bool `json:"ok"`
 		Data struct {
@@ -2448,7 +2522,7 @@ func TestLocalAgentDrainEndpointsAreAtomic(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/activity/resume", nil))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodPost, "/activity/resume", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resume status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -2495,7 +2569,7 @@ profiles:
 	}
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sync/job?id="+url.QueryEscape(job.ID), nil))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodGet, "/sync/job?id="+url.QueryEscape(job.ID), nil))
 	var jobResp struct {
 		OK   bool `json:"ok"`
 		Data struct {
@@ -2507,7 +2581,7 @@ profiles:
 	}
 
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sync/jobs?profile=remote-usw2", nil))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodGet, "/sync/jobs?profile=remote-usw2", nil))
 	var jobsResp struct {
 		OK   bool `json:"ok"`
 		Data struct {
@@ -2519,7 +2593,7 @@ profiles:
 	}
 
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/activity", nil))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodGet, "/activity", nil))
 	activity, activityErr := decodeLocalAgentActivityResponse(rec.Result())
 	if activityErr != nil || len(activity) != 1 || activity[0].ID != job.ID {
 		t.Fatalf("activity = %#v, error = %v, body = %s", activity, activityErr, rec.Body.String())
@@ -2831,7 +2905,7 @@ func TestLocalAgentActivityDecodeAndGuard(t *testing.T) {
 func postLocalTransferForTest(t *testing.T, handler http.Handler, path, body string) LocalTransferJob {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+	handler.ServeHTTP(rec, localAgentTestRequest(http.MethodPost, path, strings.NewReader(body)))
 	var resp struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
@@ -2846,6 +2920,12 @@ func postLocalTransferForTest(t *testing.T, handler http.Handler, path, body str
 		t.Fatalf("status = %d, error = %q, body = %s", rec.Code, resp.Error, rec.Body.String())
 	}
 	return resp.Data.Job
+}
+
+func localAgentTestRequest(method, path string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, path, body)
+	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
+	return req
 }
 
 func TestAppListRemoteProfilesRequiresSession(t *testing.T) {
@@ -5394,6 +5474,9 @@ async function localAgentAPI(path, options) {
     return scenario.opened;
   }
   throw new Error("unexpected API path: " + path);
+}
+async function recordLocalIntent(profile, operation) {
+  return {data:{request_id:"server-" + operation + "-request"}};
 }
 function setBusy(value, message) {
   busyTransitions.push([value, message]);
@@ -8864,6 +8947,9 @@ func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 		SyncHistory:    NewSyncHistoryStore(filepath.Join(stateDir, "sync-history.json")),
 		LocalTransfers: NewLocalTransferJobManager(),
 		KnownHosts:     filepath.Join(stateDir, ".ssh", "known_hosts"),
+		LocalAgentBrowserOrigins: map[string]struct{}{
+			"https://cm.hsgitlab.xyz": {},
+		},
 	}
 }
 

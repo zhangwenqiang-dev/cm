@@ -530,6 +530,9 @@ function setOutput() {}
 async function api() { return {data:{record:{id:"transfer-1"}}}; }
 function renderSyncHistory() {}
 function localAgentPayload(profileName, payload) { return {...payload, profile:profileName}; }
+async function recordLocalIntent(profileName, operation) {
+  return {data:{request_id:"server-" + operation + "-request"}};
+}
 async function localAgentAPI() {
   return {data:{job:{
     id:"job-1", transfer_id:"transfer-1", profile:"shared", direction:"pull",

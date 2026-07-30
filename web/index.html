@@ -781,6 +781,10 @@
               <button id="syncBtn" class="local-action">传输</button>
               <button id="terminalBtn" class="local-action">连接</button>
               <button id="eventsBtn">事件</button>
+              <label id="includeSystemEventsWrap" class="admin-only">
+                <input id="includeSystemEvents" type="checkbox">
+                包含系统事件
+              </label>
             </div>
           </div>
           <div class="details">
@@ -994,7 +998,7 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const transferMissingGraceMS = 10000;
     const transferMissingReloadDelayMS = 3000;
     const transferMissingMaxReloads = 4;
@@ -1096,13 +1100,16 @@
 
     function newLocalRequestID() {
       if (window.crypto?.randomUUID) return "local-" + window.crypto.randomUUID();
-      return "local-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+      if (!window.crypto?.getRandomValues) throw new Error("浏览器不支持安全随机请求标识");
+      const bytes = new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      return "local-" + Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
     }
 
-    async function recordLocalIntent(profile, operation, requestID) {
+    async function recordLocalIntent(profile, operation) {
       return api("/api/local-intent", {
         method: "POST",
-        body: JSON.stringify({ profile, operation, request_id: requestID })
+        body: JSON.stringify({ profile, operation })
       });
     }
 
@@ -1281,6 +1288,11 @@
       document.querySelectorAll(".admin-only").forEach((el) => {
         el.classList.toggle("hidden", !isAdmin());
       });
+      $("includeSystemEvents").disabled = !isAdmin();
+      if (!isAdmin()) {
+        $("includeSystemEvents").checked = false;
+        state.eventIncludeSystem = false;
+      }
       if (!isAdmin() && (state.view === "userManagementView" || state.view === "profilesAdminView")) {
         showView("profilesView", { history: "replace" });
       }
@@ -2312,8 +2324,9 @@
       setBusy(true, "正在打开 VNC...");
       setStatus("VNC 打开中...");
       try {
-        const requestID = typeof newLocalRequestID === "function" ? newLocalRequestID() : "local-vnc";
-        if (typeof recordLocalIntent === "function") await recordLocalIntent(profile, "vnc", requestID);
+        const intent = await recordLocalIntent(profile, "vnc");
+        const requestID = String(intent?.data?.request_id || "");
+        if (!requestID) throw new Error("服务端未返回本机操作请求标识");
         const start = await localAgentAPI("/start", {
           method: "POST",
           body: JSON.stringify(localAgentPayload(profile)),
@@ -3326,8 +3339,9 @@
         state.syncHistory.unshift(record);
         renderSyncHistory();
         payload.transfer_id = record.id;
-        const requestID = typeof newLocalRequestID === "function" ? newLocalRequestID() : "local-transfer";
-        if (typeof recordLocalIntent === "function") await recordLocalIntent(p.name, "transfer", requestID);
+        const intent = await recordLocalIntent(p.name, "transfer");
+        const requestID = String(intent?.data?.request_id || "");
+        if (!requestID) throw new Error("服务端未返回本机操作请求标识");
         const body = await localAgentAPI("/sync/" + direction, {
           method: "POST",
           body: JSON.stringify(localAgentPayload(p.name, payload)),
@@ -3463,18 +3477,21 @@
       terminalClear();
       terminalSetStatus("正在处理本机 SSH 指纹...");
       try {
-        const requestID = typeof newLocalRequestID === "function" ? newLocalRequestID() : "local-connect";
-        if (typeof recordLocalIntent === "function") await recordLocalIntent(profile, "connect", requestID);
+        const intent = await recordLocalIntent(profile, "connect");
+        const requestID = String(intent?.data?.request_id || "");
+        if (!requestID) throw new Error("服务端未返回本机操作请求标识");
         const check = await localAgentAPI("/terminal/check", {
           method: "POST",
           body: JSON.stringify(localAgentPayload(profile)),
           requestID
         });
         const data = check.data || {};
+        const terminalSessionToken = String(data.terminal_session_token || "");
+        if (!terminalSessionToken) throw new Error("本机代理未返回终端会话令牌");
         terminalAppend("Host key: " + (data.host_key_message || data.host_key_status || "ok") + "\r\n");
         terminalAppend("Connecting " + (data.target || profile) + "...\r\n");
         terminalSetStatus("正在连接本机网页终端...");
-        const wsURL = state.localAgent.url.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/terminal/ws?profile=" + encodeURIComponent(profile) + "&request_id=" + encodeURIComponent(requestID);
+        const wsURL = state.localAgent.url.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/terminal/ws?profile=" + encodeURIComponent(profile) + "&terminal_session_token=" + encodeURIComponent(terminalSessionToken);
         const socket = new WebSocket(wsURL);
         state.terminal.socket = socket;
         socket.binaryType = "arraybuffer";
@@ -4124,10 +4141,12 @@
     async function loadEvents(showStatus = true, append = false) {
       const p = selectedProfile();
       if (!p || !p.apple_email) return;
-      if (state.eventProfile !== p.name) {
+      const includeSystem = isAdmin() && $("includeSystemEvents").checked;
+      if (state.eventProfile !== p.name || state.eventIncludeSystem !== includeSystem) {
         state.eventItems = [];
         state.eventCursor = "";
         state.eventProfile = p.name;
+        state.eventIncludeSystem = includeSystem;
         append = false;
       }
       if (showStatus) {
@@ -4136,14 +4155,17 @@
       }
       try {
         const cursor = append ? state.eventCursor : "";
-        const body = await api("/api/events?limit=50&apple_email=" + encodeURIComponent(p.apple_email) + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
+        const body = await api("/api/events?limit=50&apple_email=" + encodeURIComponent(p.apple_email) +
+          (includeSystem ? "&include_system=1" : "") +
+          (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
         const events = body.data.events || [];
         state.eventItems = append ? state.eventItems.concat(events) : events;
         state.eventCursor = body.data.next_cursor || "";
         $("eventsBtn").textContent = state.eventCursor ? "更多事件" : "事件";
         if (showStatus) {
           setOutput(state.eventItems.length ? state.eventItems.map((event) =>
-            "[" + formatTime(event.created_at) + "] " + event.action + " " + event.status + " confirmed=" + String(!!event.confirmed) + "\n" + (event.message || "")
+            "[" + formatTime(event.created_at) + "] " + (event.source === "system" ? "[系统] " : "") +
+            event.action + " " + event.status + " confirmed=" + String(!!event.confirmed) + "\n" + (event.message || "")
           ).join("\n\n") : "No events.");
           setStatus("事件已加载");
         }
@@ -4390,6 +4412,14 @@
     });
     $("addMemberBtn").addEventListener("click", addMember);
     $("eventsBtn").addEventListener("click", () => loadEvents(true, !!state.eventCursor));
+    $("includeSystemEvents").addEventListener("change", () => {
+      if (!isAdmin()) {
+        $("includeSystemEvents").checked = false;
+        return;
+      }
+      state.eventCursor = "";
+      loadEvents(true, false);
+    });
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });

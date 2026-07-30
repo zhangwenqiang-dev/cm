@@ -262,6 +262,7 @@ func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
 	return 0
 }
 func (a App) runExec(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) >= 2 && args[1] == "--" {
 		args = append(args[:1], args[2:]...)
 	}
@@ -275,22 +276,27 @@ func (a App) runExec(ctx context.Context, cfg Config, args []string) int {
 		return 2
 	}
 	profile = a.promptMissingIdentityFile(profile)
+	a.logLocalCommand(ctx, "ssh.exec.attempted", profile, 0, startedAt, LogEntry{Phase: "attempted"})
 	errs := a.Validator.ValidateAccess(profile)
 	if len(errs) > 0 {
 		printErrors(a.Err, errs)
+		a.logLocalCommand(ctx, "ssh.exec.failed", profile, 1, startedAt, LogEntry{ErrorCode: "validation_error"})
 		return 1
 	}
 	command := args[1:]
 	sshArgs, err := ExecSSHArgs(profile, command)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
+		a.logLocalCommand(ctx, "ssh.exec.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
 	fmt.Fprintf(a.Out, "Exec: %s@%s %s\n", profile.User, profile.Host, strings.Join(command, " "))
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
 		fmt.Fprintf(a.Err, "ssh exec failed: %v\n", err)
+		a.logLocalCommand(ctx, "ssh.exec.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "ssh.exec.succeeded", profile, 0, startedAt, LogEntry{Phase: "closed"})
 	return 0
 }
 func (a App) runOpenVNC(ctx context.Context, cfg Config, args []string) int {
@@ -436,7 +442,7 @@ func (a App) logLocalCommand(ctx context.Context, action string, profile Profile
 	extra.RequestID = op.RequestID
 	extra.JobID = op.JobID
 	extra.Source = op.Source
-	extra.DurationMS = time.Since(startedAt).Milliseconds()
+	extra.DurationMS = elapsedDurationMS(startedAt)
 	extra.Outcome = outcomeForCode(code)
 	extra.Message = action
 	if code != 0 {

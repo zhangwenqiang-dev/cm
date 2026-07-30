@@ -93,9 +93,10 @@ func cleanupDefaultLocalConfigProfiles(configPath string, now time.Time) (string
 
 func formatLocalConfigWithoutProfiles(cfg Config) string {
 	var b strings.Builder
-	if cfg.Server.UserAPI != "" {
+	if cfg.Server.UserAPI != "" || cfg.Server.LocalAgentOrigin != "" {
 		fmt.Fprintln(&b, "server:")
 		writeStringField(&b, "  ", "user_api", cfg.Server.UserAPI)
+		writeStringField(&b, "  ", "local_agent_origin", cfg.Server.LocalAgentOrigin)
 		fmt.Fprintln(&b)
 	}
 	if !profileDefaultsEmpty(cfg.Defaults) {

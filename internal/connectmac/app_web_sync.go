@@ -1,12 +1,14 @@
 package connectmac
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type webSyncRequest struct {
@@ -24,7 +26,6 @@ func (a App) webLocalIntentHandler(configPath string) http.HandlerFunc {
 		var req struct {
 			Profile   string `json:"profile"`
 			Operation string `json:"operation"`
-			RequestID string `json:"request_id"`
 		}
 		if err := decodeWebJSON(r, &req); err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
@@ -37,10 +38,15 @@ func (a App) webLocalIntentHandler(configPath string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "operation must be connect, vnc, or transfer")
 			return
 		}
-		requestID, err := validateLocalAgentRequestID(req.RequestID)
-		if err != nil {
-			writeWebError(w, http.StatusBadRequest, err.Error())
-			return
+		op := a.operationContextForRequest(r)
+		requestID := strings.TrimSpace(op.RequestID)
+		if requestID == "" {
+			var err error
+			requestID, err = newRequestID(time.Now(), rand.Reader)
+			if err != nil {
+				writeWebError(w, http.StatusInternalServerError, "generate request ID failed")
+				return
+			}
 		}
 		member, ok := a.currentWebMember(r)
 		if !ok {

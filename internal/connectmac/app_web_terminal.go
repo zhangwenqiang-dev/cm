@@ -169,64 +169,97 @@ func (a App) proxyWebTerminal(ctx context.Context, conn *websocket.Conn, profile
 	if err := session.Shell(); err != nil {
 		return err
 	}
+	return proxyTerminalIO(ctx, conn, stdin, stdout, stderr, session.Wait)
+}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+type terminalWebSocket interface {
+	ReadMessage() (messageType int, data []byte, err error)
+	WriteMessage(messageType int, data []byte) error
+}
+
+func proxyTerminalIO(
+	ctx context.Context,
+	conn terminalWebSocket,
+	stdin io.Writer,
+	stdout io.Reader,
+	stderr io.Reader,
+	wait func() error,
+) error {
+	runCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	results := make(chan error, 4)
+	report := func(err error) {
+		results <- err
+		if err != nil {
+			cancel(err)
+		}
+	}
 	var writeMu sync.Mutex
 	writeOutput := func(data []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		return conn.WriteMessage(websocket.TextMessage, data)
 	}
-	copyOutput := func(r io.Reader) {
+	copyOutput := func(name string, reader io.Reader) {
 		buf := make([]byte, 4096)
 		for {
-			n, readErr := r.Read(buf)
+			n, readErr := reader.Read(buf)
 			if n > 0 {
 				if err := writeOutput(buf[:n]); err != nil {
-					cancel()
+					report(fmt.Errorf("terminal websocket write: %w", err))
 					return
 				}
 			}
 			if readErr != nil {
-				cancel()
+				if !errors.Is(readErr, io.EOF) {
+					report(fmt.Errorf("terminal %s read: %w", name, readErr))
+				}
 				return
 			}
 		}
 	}
-	go copyOutput(stdout)
-	go copyOutput(stderr)
-	waitDone := make(chan error, 1)
+	go copyOutput("stdout", stdout)
+	go copyOutput("stderr", stderr)
 	go func() {
-		waitDone <- session.Wait()
-		cancel()
+		err := wait()
+		if err != nil {
+			report(fmt.Errorf("terminal ssh session wait: %w", err))
+			return
+		}
+		report(nil)
 	}()
-	readDone := make(chan error, 1)
 	go func() {
 		for {
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
-				readDone <- err
-				cancel()
+				report(err)
 				return
 			}
 			if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 				continue
 			}
 			if _, err := stdin.Write(data); err != nil {
-				readDone <- err
-				cancel()
+				report(fmt.Errorf("terminal ssh stdin write: %w", err))
 				return
 			}
 		}
 	}()
+
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-waitDone:
+	case err := <-results:
 		return err
-	case err := <-readDone:
+	default:
+	}
+	select {
+	case err := <-results:
 		return err
+	case <-runCtx.Done():
+		select {
+		case err := <-results:
+			return err
+		default:
+		}
+		return context.Cause(runCtx)
 	}
 }
 

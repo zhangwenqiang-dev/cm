@@ -53,6 +53,8 @@ type App struct {
 	WebWorkerShutdownTimeout  time.Duration
 	LocalAgentSecurityCommand func(context.Context, ...string) ([]byte, error)
 	LocalAgentServiceCommand  func(context.Context, ...string) ([]byte, error)
+	TerminalSessions          *terminalSessionRegistry
+	LocalAgentBrowserOrigins  map[string]struct{}
 }
 
 func NewApp(out, err io.Writer) App {
@@ -70,6 +72,7 @@ func NewApp(out, err io.Writer) App {
 		LogManager:               NewLogManager(DefaultLogDir),
 		SyncHistory:              NewSyncHistoryStore(DefaultSyncHistoryPath),
 		LocalTransfers:           NewLocalTransferJobManager(),
+		TerminalSessions:         newTerminalSessionRegistry(256, 30*time.Second),
 		KnownHosts:               "~/.ssh/known_hosts",
 		LoginConfigCleanup:       true,
 		Listen:                   net.Listen,
@@ -229,7 +232,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	case "web":
 		return a.runWeb(ctx, configPath, args[1:])
 	case "local-agent":
-		return a.runLocalAgent(ctx, args[1:])
+		return a.runLocalAgent(ctx, configPath, args[1:])
 	case "mcp":
 		return a.runMCP(ctx, configPath, args[1:])
 	case "aws":
