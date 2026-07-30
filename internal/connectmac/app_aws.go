@@ -2,10 +2,12 @@ package connectmac
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func (a App) runAWS(ctx context.Context, cfg Config, args []string, configPath string) int {
@@ -72,6 +74,16 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string, configPath s
 		fmt.Fprintln(a.Err, "--background requires --confirm after preview approval")
 		return 2
 	}
+	run := func() int {
+		return a.runAWSProfileCommand(ctx, cfg, command, profileRef, confirm, hostID, includeTerminal, background, notify, configPath)
+	}
+	if command == "open" || command == "destroy" {
+		return a.runObservedAWSCLI(ctx, command, profileRef, confirm, background, run)
+	}
+	return run()
+}
+
+func (a App) runAWSProfileCommand(ctx context.Context, cfg Config, command, profileRef string, confirm bool, hostID string, includeTerminal, background, notify bool, configPath string) int {
 	profile, err := resolveProfileRef(cfg, profileRef)
 	if err != nil {
 		_ = writeCurrentJobOutcome(autoReleaseJobOutcome(TerminalAutoReleaseError(err), false, "profile"))
@@ -229,6 +241,92 @@ func (a App) runAWS(ctx context.Context, cfg Config, args []string, configPath s
 	default:
 		fmt.Fprintf(a.Err, "unknown aws command %q\n", command)
 		return 2
+	}
+}
+
+func (a App) runObservedAWSCLI(ctx context.Context, command, profileRef string, confirmed, queuedOnSuccess bool, run func() int) int {
+	op := operationContextFrom(ctx)
+	if op.JobID == "" {
+		envOp := operationContextFromJobEnvironment()
+		if envOp.JobID != "" {
+			op = envOp
+		}
+	}
+	if op.JobID == "" && op.Source != "" && op.Source != "cli" {
+		return run()
+	}
+	if op.RequestID == "" {
+		if requestID, err := newRequestID(time.Now(), rand.Reader); err == nil {
+			op.RequestID = requestID
+		}
+	}
+	if op.Source == "" {
+		op.Source = "cli"
+	}
+	operation := "aws.open"
+	if command == "destroy" {
+		operation = "aws.release"
+	}
+	startedAt := time.Now()
+	a.writeRuntimeLog(LogEntry{
+		Level:            "info",
+		Action:           operation + ".started",
+		Operation:        operation,
+		Profile:          profileRef,
+		RequestID:        op.RequestID,
+		JobID:            op.JobID,
+		Source:           op.Source,
+		Phase:            "started",
+		Status:           "running",
+		ActorMemberID:    op.Actor.MemberID,
+		ActorMemberEmail: op.Actor.MemberEmail,
+		ActorMemberName:  op.Actor.MemberName,
+		Message:          fmt.Sprintf("AWS CLI %s started; confirmed=%t", command, confirmed),
+	})
+	code := run()
+	phase := "succeeded"
+	level := "info"
+	errorCode := ""
+	status := "success"
+	if code == 0 && queuedOnSuccess {
+		phase = "queued"
+		status = "queued"
+	} else if code != 0 {
+		phase = "failed"
+		level = "error"
+		errorCode = "aws_api_error"
+		status = "failed"
+	}
+	a.writeRuntimeLog(LogEntry{
+		Level:            level,
+		Action:           operation + "." + phase,
+		Operation:        operation,
+		Profile:          profileRef,
+		RequestID:        op.RequestID,
+		JobID:            op.JobID,
+		Source:           op.Source,
+		Phase:            phase,
+		ErrorCode:        errorCode,
+		Status:           status,
+		ElapsedMS:        time.Since(startedAt).Milliseconds(),
+		ActorMemberID:    op.Actor.MemberID,
+		ActorMemberEmail: op.Actor.MemberEmail,
+		ActorMemberName:  op.Actor.MemberName,
+		Message:          fmt.Sprintf("AWS CLI %s finished with exit code %d", command, code),
+	})
+	return code
+}
+
+func operationContextFromJobEnvironment() OperationContext {
+	return OperationContext{
+		RequestID: strings.TrimSpace(os.Getenv(jobRequestIDEnv)),
+		JobID:     strings.TrimSpace(os.Getenv(jobIDEnv)),
+		Source:    strings.TrimSpace(os.Getenv(jobSourceEnv)),
+		Actor: AuditActor{
+			MemberID:    strings.TrimSpace(os.Getenv(jobActorMemberIDEnv)),
+			MemberEmail: strings.TrimSpace(os.Getenv(jobActorEmailEnv)),
+			MemberName:  strings.TrimSpace(os.Getenv(jobActorNameEnv)),
+		},
 	}
 }
 

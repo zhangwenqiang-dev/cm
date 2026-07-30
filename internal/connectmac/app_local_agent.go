@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -43,10 +44,39 @@ type localAgentOptions struct {
 
 type localAgentRequest struct {
 	TransferID  string `json:"transfer_id"`
+	RequestID   string `json:"request_id"`
 	Profile     string `json:"profile"`
 	ProfileYAML string `json:"profile_yaml"`
 	LocalPath   string `json:"local_path"`
 	RemotePath  string `json:"remote_path"`
+}
+
+var localAgentRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+func validatedLocalAgentRequestID(r *http.Request, bodyValue string) (string, error) {
+	headerValue := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	bodyValue = strings.TrimSpace(bodyValue)
+	if headerValue != "" && bodyValue != "" && headerValue != bodyValue {
+		return "", fmt.Errorf("request_id does not match X-Request-ID")
+	}
+	if bodyValue != "" {
+		return validateLocalAgentRequestID(bodyValue)
+	}
+	if headerValue == "" {
+		return newRequestID(time.Now(), cryptorand.Reader)
+	}
+	return validateLocalAgentRequestID(headerValue)
+}
+
+func validateLocalAgentRequestID(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return newRequestID(time.Now(), cryptorand.Reader)
+	}
+	if !localAgentRequestIDPattern.MatchString(value) {
+		return "", fmt.Errorf("request_id must be 1-128 letters, numbers, dots, underscores, colons, or hyphens")
+	}
+	return value, nil
 }
 
 func (a App) runLocalAgent(ctx context.Context, args []string) int {
@@ -1290,7 +1320,12 @@ func (a App) localAgentTransferHandler(direction string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		job, err := a.startLocalAgentTransfer(req, direction)
+		requestID, err := validatedLocalAgentRequestID(r, req.RequestID)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		job, err := a.startLocalAgentTransfer(req, direction, requestID)
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
@@ -1299,7 +1334,7 @@ func (a App) localAgentTransferHandler(direction string) http.HandlerFunc {
 	}
 }
 
-func (a App) startLocalAgentTransfer(req localAgentRequest, direction string) (LocalTransferJob, error) {
+func (a App) startLocalAgentTransfer(req localAgentRequest, direction, requestID string) (LocalTransferJob, error) {
 	if a.LocalTransfers == nil {
 		return LocalTransferJob{}, fmt.Errorf("local transfer manager is not configured")
 	}
@@ -1363,13 +1398,19 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction string) (L
 		return LocalTransferJob{}, err
 	}
 
-	job, err := a.LocalTransfers.StartWithEvents(strings.TrimSpace(req.TransferID), profileName, direction, a.writeLocalTransferEvent, func(onOutput func(string)) error {
+	job, err := a.LocalTransfers.StartWithEvents(strings.TrimSpace(req.TransferID), profileName, direction, func(event LocalTransferEvent) {
+		a.writeLocalTransferEventWithRequest(event, requestID)
+	}, func(onOutput func(string)) error {
 		return a.Runner.RunRsyncProgress(context.Background(), rsyncArgs, onOutput)
 	})
 	return job, err
 }
 
 func (a App) writeLocalTransferEvent(event LocalTransferEvent) {
+	a.writeLocalTransferEventWithRequest(event, "")
+}
+
+func (a App) writeLocalTransferEventWithRequest(event LocalTransferEvent, requestID string) {
 	action := "transfer.progress"
 	level := "info"
 	message := "local transfer progress"
@@ -1391,8 +1432,8 @@ func (a App) writeLocalTransferEvent(event LocalTransferEvent) {
 		level = "warn"
 		message = sanitizedLocalTransferError(event.Error)
 	}
-	message = fmt.Sprintf("%s; percent=%d elapsed=%s", message, event.Percent, event.Elapsed)
-	_ = a.LogManager.Write(LogEntry{
+	message = fmt.Sprintf("%s; phase=%s percent=%d elapsed=%s", message, event.Phase, event.Percent, event.Elapsed)
+	a.writeRuntimeLog(LogEntry{
 		Level:      level,
 		Action:     action,
 		TransferID: event.TransferID,
@@ -1400,8 +1441,12 @@ func (a App) writeLocalTransferEvent(event LocalTransferEvent) {
 		Profile:    event.Profile,
 		Direction:  event.Direction,
 		Status:     event.Status,
+		Phase:      event.Phase,
 		Percent:    event.Percent,
 		ElapsedMS:  event.Elapsed.Milliseconds(),
+		DurationMS: event.Elapsed.Milliseconds(),
+		RequestID:  requestID,
+		Source:     "web-local",
 		Message:    message,
 	})
 }
@@ -1486,7 +1531,7 @@ func localAgentCORS(next http.HandlerFunc) http.HandlerFunc {
 		if localAgentAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
 				w.Header().Set("Access-Control-Allow-Private-Network", "true")
@@ -1542,6 +1587,12 @@ func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		requestID, err := validatedLocalAgentRequestID(r, req.RequestID)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
 		profileName, configPath, err := writeLocalAgentProfileConfig(req)
 		if err != nil {
 			a.writeLocalAgentVNCEarlyFailure(command)
@@ -1551,7 +1602,7 @@ func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 		args := []string{command, profileName, "--config", configPath}
 		switch command {
 		case "start", "open-vnc":
-			resp := a.localAgentRunVNC(r.Context(), command, profileName, configPath)
+			resp := a.localAgentRunVNC(ctx, command, profileName, configPath)
 			writeWebJSON(w, resp)
 			return
 		case "push":
@@ -1576,11 +1627,11 @@ func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 			}
 			args = []string{"pull", profileName, remotePath, "--config", configPath}
 			// Existing cm pull writes to the current directory. Run it from localPath.
-			resp := a.localAgentRunInDir(r.Context(), localPath, args)
+			resp := a.localAgentRunInDir(ctx, localPath, args)
 			writeWebJSON(w, resp)
 			return
 		}
-		writeWebJSON(w, a.localAgentRun(r.Context(), args))
+		writeWebJSON(w, a.localAgentRun(ctx, args))
 	}
 }
 
@@ -1595,6 +1646,12 @@ func (a App) localAgentSSHHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		requestID, err := validatedLocalAgentRequestID(r, req.RequestID)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
 		profileName, configPath, err := writeLocalAgentProfileConfig(req)
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
@@ -1609,7 +1666,7 @@ func (a App) localAgentSSHHandler() http.HandlerFunc {
 	activate
 	do script %q
 end tell`, command)
-		cmd := exec.CommandContext(r.Context(), "osascript", "-e", script)
+		cmd := exec.CommandContext(ctx, "osascript", "-e", script)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Output: string(out), Error: err.Error()})
@@ -1625,12 +1682,23 @@ func (a App) localAgentTerminalCheckHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		profile, _, err := a.prepareLocalAgentTerminal(r)
+		var req localAgentRequest
+		if err := decodeWebJSON(r, &req); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		requestID, err := validatedLocalAgentRequestID(r, req.RequestID)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
+		profile, _, err := a.prepareLocalAgentTerminalRequest(req)
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
 		}
-		check, err := a.fixHostKey(r.Context(), profile)
+		check, err := a.fixHostKey(ctx, profile)
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
@@ -1664,6 +1732,12 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
+		requestID, err := validateLocalAgentRequestID(strings.TrimSpace(r.URL.Query().Get("request_id")))
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
 		configPath, err := localAgentProfileConfigPath(profileName)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
@@ -1683,7 +1757,7 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, strings.Join(validationMessages(errs), "\n"))
 			return
 		}
-		check, err := a.fixHostKey(r.Context(), profile)
+		check, err := a.fixHostKey(ctx, profile)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
@@ -1701,10 +1775,28 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 		if err != nil {
 			return
 		}
-		if err := a.proxyWebTerminal(r.Context(), conn, profile); err != nil && !errors.Is(err, context.Canceled) {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "local-agent.terminal", Profile: profile.Name, Message: err.Error()})
+		startedAt := time.Now()
+		a.logLocalCommand(ctx, "terminal.opened", profile, 0, startedAt, LogEntry{Phase: "opened"})
+		proxyErr := a.proxyWebTerminal(ctx, conn, profile)
+		code := 0
+		entry := LogEntry{Phase: "closed"}
+		if !normalTerminalClose(proxyErr) {
+			code = 1
+			entry.ErrorCode = classifyOperationalError(proxyErr).Code
 		}
+		a.logLocalCommand(ctx, "terminal.closed", profile, code, startedAt, entry)
 	}
+}
+
+func normalTerminalClose(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+		return true
+	}
+	return websocket.IsCloseError(err,
+		websocket.CloseNormalClosure,
+		websocket.CloseGoingAway,
+		websocket.CloseNoStatusReceived,
+	)
 }
 
 func (a App) prepareLocalAgentTerminal(r *http.Request) (Profile, string, error) {
@@ -1712,6 +1804,10 @@ func (a App) prepareLocalAgentTerminal(r *http.Request) (Profile, string, error)
 	if err := decodeWebJSON(r, &req); err != nil {
 		return Profile{}, "", err
 	}
+	return a.prepareLocalAgentTerminalRequest(req)
+}
+
+func (a App) prepareLocalAgentTerminalRequest(req localAgentRequest) (Profile, string, error) {
 	profileName, configPath, err := writeLocalAgentProfileConfig(req)
 	if err != nil {
 		return Profile{}, "", err
@@ -1793,6 +1889,10 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 	app := a
 	app.Out = &out
 	app.Err = &errOut
+	op := operationContextFrom(ctx)
+	internalOp := op
+	internalOp.Source = "local-agent-internal"
+	internalCtx := withOperationContext(ctx, internalOp)
 
 	cfg, code := app.loadCommandConfig(ctx, configPath)
 	if code != 0 {
@@ -1808,11 +1908,13 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 		Action:     "local-agent.vnc",
 		Profile:    profileName,
 		LocalPorts: profileLocalPorts(profile),
+		RequestID:  op.RequestID,
+		Source:     "web-local",
 	}
 
 	switch command {
 	case "start":
-		code, result := app.runStartResult(ctx, cfg, []string{profileName})
+		code, result := app.runStartResult(internalCtx, cfg, []string{profileName})
 		entry.Profile = result.Profile
 		entry.LocalPorts = result.LocalPorts
 		entry.TunnelAction = result.Action
@@ -1832,7 +1934,7 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command, profil
 			beforeLock()
 		}
 		err := app.StateManager.WithProfileLock(profile.Name, func() error {
-			code = app.runOpenVNC(ctx, cfg, []string{profileName})
+			code = app.runOpenVNC(internalCtx, cfg, []string{profileName})
 			entry.PID = app.verifiedTunnelPID(profile)
 			return nil
 		})

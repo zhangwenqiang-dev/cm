@@ -102,8 +102,11 @@ func TestCleanupProfileLocalRecordsIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("events after first cleanup: %v", err)
 	}
-	if len(events) != 1 || events[0].Action != "cleanup-records" {
+	if len(events) != 1 || events[0].Action != "system.cleanup.completed" {
 		t.Fatalf("events after first cleanup = %+v", events)
+	}
+	if events[0].Source != "system" {
+		t.Fatalf("cleanup event source = %q, want system", events[0].Source)
 	}
 	if events[0].Message != "marked release reminder released (auto-status)" {
 		t.Fatalf("first cleanup event message = %q", events[0].Message)
@@ -122,6 +125,309 @@ func TestCleanupProfileLocalRecordsIsIdempotent(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("repeated cleanup recorded duplicate events: %+v", events)
+	}
+}
+
+func TestCleanupDefaultLocalConfigProfilesMissingFileIsNoop(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	backup, err := cleanupDefaultLocalConfigProfiles(
+		filepath.Join(home, ".connectmac", "config.yaml"),
+		time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("missing default config should be ignored: %v", err)
+	}
+	if backup != "" {
+		t.Fatalf("backup = %q, want empty", backup)
+	}
+}
+
+func TestCleanupDefaultLocalConfigProfilesInvalidFileRemainsObservable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".connectmac", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("profiles:\n  broken: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanupDefaultLocalConfigProfiles(path, time.Now()); err == nil {
+		t.Fatal("invalid existing config must return an observable error")
+	}
+}
+
+func TestCleanupDefaultLocalConfigProfilesUnreadablePathRemainsObservable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".connectmac", "config.yaml")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanupDefaultLocalConfigProfiles(path, time.Now()); err == nil {
+		t.Fatal("existing unreadable config path must return an observable error")
+	}
+}
+
+func TestCleanupLocalConfigAfterLoginLogsInvalidAsErrorAndMissingSilently(t *testing.T) {
+	tests := []struct {
+		name      string
+		create    func(t *testing.T, path string)
+		wantLogs  int
+		wantLevel string
+	}{
+		{name: "missing", create: func(*testing.T, string) {}, wantLogs: 0},
+		{
+			name: "invalid",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("profiles:\n  broken: ["), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantLogs:  1,
+			wantLevel: "error",
+		},
+		{
+			name: "unreadable",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantLogs:  1,
+			wantLevel: "error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, ".connectmac", "config.yaml")
+			tt.create(t, path)
+			app := newWebAutoReleaseTestApp(t)
+			app.LoginConfigCleanup = true
+			app.cleanupLocalConfigAfterLogin(path)
+			files, err := app.LogManager.List()
+			if err != nil {
+				t.Fatalf("list logs: %v", err)
+			}
+			if tt.wantLogs == 0 {
+				if len(files) != 0 {
+					t.Fatalf("missing config produced logs: %+v", files)
+				}
+				return
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != tt.wantLogs || entries[0].Action != "web.auth.cleanup" || entries[0].Level != tt.wantLevel {
+				t.Fatalf("cleanup logs = %+v", entries)
+			}
+		})
+	}
+}
+
+func TestManualCleanupRecordsAttributedAdminEvent(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	if _, err := app.MemberStore.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName: "xcode-vnc",
+		AppleEmail:  "user@example.com",
+		Status:      ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/release-reminder/cleanup", strings.NewReader(`{"profile":"xcode-vnc"}`))
+	addWebAuth(t, &app, req, "admin")
+	rec := httptest.NewRecorder()
+	app.newWebHandler("").ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cleanup status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: "xcode-vnc", Limit: 20})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if len(page.Events) != 1 {
+		t.Fatalf("manual cleanup events = %+v", page.Events)
+	}
+	event := page.Events[0]
+	if event.Action != "profile.cleanup.completed" || event.Source != "web" ||
+		event.MemberEmail != "admin@example.com" || event.MemberName != "Test Admin" {
+		t.Fatalf("manual cleanup attribution = %+v", event)
+	}
+}
+
+func TestManualCleanupAuditFailureRollsBackFileMutation(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	if _, err := store.UpsertReleaseReminder(ReleaseReminder{
+		ProfileName: "xcode-vnc",
+		AppleEmail:  "user@example.com",
+		Status:      ReleaseReminderStatusActive,
+	}); err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	if _, _, err := store.CleanupProfileRecordsAndRecordEvent(
+		"xcode-vnc",
+		"2026-07-30T12:00:00Z",
+		"manual",
+		OperationEvent{Action: "", Source: "web", Status: "success"},
+	); err == nil {
+		t.Fatal("invalid audit event should fail atomic cleanup")
+	}
+	reminder, ok, err := store.ReleaseReminder("xcode-vnc")
+	if err != nil || !ok {
+		t.Fatalf("load reminder: ok=%t err=%v", ok, err)
+	}
+	if reminder.Status != ReleaseReminderStatusActive {
+		t.Fatalf("cleanup mutation committed despite audit failure: %+v", reminder)
+	}
+	page, err := store.QueryEvents(EventQuery{Profile: "xcode-vnc", IncludeSystem: true, Limit: 10})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if len(page.Events) != 0 {
+		t.Fatalf("audit failure persisted events: %+v", page.Events)
+	}
+}
+
+func TestDefaultEventQueryExcludesOnlySystemSource(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	for _, event := range []OperationEvent{
+		{Action: "system.cleanup.completed", Profile: "xcode-vnc", Source: "system", Status: "success"},
+		{Action: "legacy.manual", Profile: "xcode-vnc", Source: "web", Status: "success"},
+	} {
+		if err := app.MemberStore.RecordEvent(event); err != nil {
+			t.Fatalf("record event: %v", err)
+		}
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: "xcode-vnc", Limit: 20})
+	if err != nil {
+		t.Fatalf("query default events: %v", err)
+	}
+	if len(page.Events) != 1 || page.Events[0].Action != "legacy.manual" {
+		t.Fatalf("default events = %+v", page.Events)
+	}
+	all, err := app.MemberStore.QueryEvents(EventQuery{Profile: "xcode-vnc", Limit: 20, IncludeSystem: true})
+	if err != nil {
+		t.Fatalf("query all events: %v", err)
+	}
+	if len(all.Events) != 2 {
+		t.Fatalf("all events = %+v", all.Events)
+	}
+}
+
+type pruneTrackingRepository struct {
+	MemberRepository
+	mu      sync.Mutex
+	calls   int
+	removed int64
+	err     error
+}
+
+func (r *pruneTrackingRepository) PruneEvents(time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	return r.removed, r.err
+}
+
+func (r *pruneTrackingRepository) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func TestWebBackgroundWorkerPrunesEventsDailyAndLogsSummary(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	tracking := &pruneTrackingRepository{MemberRepository: app.MemberStore, removed: 7}
+	app.MemberStore = tracking
+	app.WebAWSLifecycleScan = func(context.Context, string) error { return nil }
+	lifecycleTicks := make(chan time.Time)
+	reminderTicks := make(chan time.Time)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.runWebBackgroundWorker(ctx, "config.yaml", lifecycleTicks, reminderTicks)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for tracking.callCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if tracking.callCount() != 1 {
+		cancel()
+		t.Fatalf("initial prune calls = %d, want 1", tracking.callCount())
+	}
+	reminderTicks <- time.Now().Add(time.Hour)
+	time.Sleep(10 * time.Millisecond)
+	if tracking.callCount() != 1 {
+		cancel()
+		t.Fatalf("same-day prune calls = %d, want 1", tracking.callCount())
+	}
+	reminderTicks <- time.Now().Add(25 * time.Hour)
+	deadline = time.Now().Add(time.Second)
+	for tracking.callCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	if tracking.callCount() != 2 {
+		t.Fatalf("next-day prune calls = %d, want 2", tracking.callCount())
+	}
+	var summaries int
+	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		if entry.Action == "audit.prune" {
+			summaries++
+		}
+	}
+	if summaries != 2 {
+		t.Fatalf("prune summary logs = %d, want 2", summaries)
+	}
+}
+
+func TestPruneWebAuditEventsLogsOnlyDeletionOrFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		removed   int64
+		err       error
+		wantLogs  int
+		wantLevel string
+		wantPhase string
+	}{
+		{name: "nothing deleted", wantLogs: 0},
+		{name: "deleted", removed: 3, wantLogs: 1, wantLevel: "info", wantPhase: "completed"},
+		{name: "failed", err: errors.New("storage unavailable"), wantLogs: 1, wantLevel: "error", wantPhase: "failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := newWebAutoReleaseTestApp(t)
+			tracking := &pruneTrackingRepository{
+				MemberRepository: app.MemberStore,
+				removed:          tt.removed,
+				err:              tt.err,
+			}
+			app.MemberStore = tracking
+			app.pruneWebAuditEvents(time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC))
+			files, err := app.LogManager.List()
+			if err != nil {
+				t.Fatalf("list logs: %v", err)
+			}
+			if tt.wantLogs == 0 {
+				if len(files) != 0 {
+					t.Fatalf("unexpected prune logs: %+v", files)
+				}
+				return
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 1 || entries[0].Action != "audit.prune" ||
+				entries[0].Level != tt.wantLevel || entries[0].Phase != tt.wantPhase {
+				t.Fatalf("prune logs = %+v", entries)
+			}
+		})
 	}
 }
 

@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,6 +41,9 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 	if result.Skipped {
 		t.Fatalf("result skipped: %+v", result)
 	}
+	if result.HTTPStatus != http.StatusOK || result.ErrorCode != 0 || result.ErrorMessage != "ok" {
+		t.Fatalf("result metadata = %+v", result)
+	}
 	if got["msgtype"] != "markdown" {
 		t.Fatalf("msgtype = %#v", got["msgtype"])
 	}
@@ -70,14 +74,99 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 	}
 }
 
+func TestWechatNotifierReturnsFailureMetadataWithoutLeakingBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"errcode":93000,"errmsg":"temporary failure","secret":"must-not-appear"}`))
+	}))
+	defer server.Close()
+	result, err := (WechatNotifier{WebhookURL: server.URL}).Send(WechatNotification{Event: "open", Profile: "p"})
+	if err == nil {
+		t.Fatal("send should fail")
+	}
+	if result.HTTPStatus != http.StatusBadGateway || result.ErrorCode != 93000 || result.ErrorMessage != "temporary failure" {
+		t.Fatalf("failure metadata = %+v", result)
+	}
+	if strings.Contains(err.Error(), "must-not-appear") {
+		t.Fatalf("raw response body leaked: %v", err)
+	}
+}
+
+func TestGeneralWechatDeliveryFailureIsSingleAttemptExhausted(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	err := app.deliverWechatNotification(wechatDeliveryContext{
+		RequestID:  "req-due",
+		Profile:    "apple-usw2",
+		AppleEmail: "apple@example.com",
+		Source:     "system",
+		Event:      "due",
+		Attempt:    1,
+	}, func() (WechatNotifyResult, error) {
+		return WechatNotifyResult{HTTPStatus: http.StatusBadGateway, ErrorCode: 93000}, errors.New("temporary webhook failure")
+	})
+	if err == nil {
+		t.Fatal("delivery should fail")
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: "apple-usw2", IncludeSystem: true, Limit: 20})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range page.Events {
+		counts[event.Action]++
+		if !strings.Contains(event.Message, "notification_event=due") {
+			t.Fatalf("notification type missing from audit event: %+v", event)
+		}
+	}
+	if counts["wechat.pending"] != 1 || counts["wechat.failed"] != 1 || counts["wechat.retrying"] != 0 {
+		t.Fatalf("general delivery events = %+v", counts)
+	}
+	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		if entry.Operation != "wechat.notify.due" {
+			t.Fatalf("notification type missing from runtime log: %+v", entry)
+		}
+	}
+}
+
 func TestWechatNotifierMissingWebhookSkips(t *testing.T) {
 	notifier := WechatNotifier{}
 	result, err := notifier.Send(WechatNotification{Event: "due", Profile: "apple-usw2"})
-	if err != nil {
-		t.Fatalf("send missing webhook: %v", err)
+	if !errors.Is(err, errWechatWebhookNotConfigured) {
+		t.Fatalf("missing webhook error = %v", err)
 	}
 	if !result.Skipped {
 		t.Fatalf("result should be skipped: %+v", result)
+	}
+}
+
+func TestGeneralWechatDeliveryMissingWebhookFailsWithoutSent(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	err := app.deliverWechatNotification(wechatDeliveryContext{
+		RequestID:  "req-missing-webhook",
+		Profile:    "apple-usw2",
+		AppleEmail: "apple@example.com",
+		Source:     "system",
+		Event:      "due",
+		Attempt:    1,
+	}, func() (WechatNotifyResult, error) {
+		return WechatNotifyResult{Skipped: true, Message: "wechat webhook not configured"}, nil
+	})
+	if err == nil {
+		t.Fatal("missing webhook must be a terminal notification failure")
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: "apple-usw2", IncludeSystem: true, Limit: 20})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range page.Events {
+		counts[event.Action]++
+		if event.Action == "wechat.failed" && event.ErrorCode != "notification_error" {
+			t.Fatalf("missing webhook error code = %q", event.ErrorCode)
+		}
+	}
+	if counts["wechat.pending"] != 1 || counts["wechat.failed"] != 1 || counts["wechat.sent"] != 0 {
+		t.Fatalf("missing webhook events = %+v", counts)
 	}
 }
 

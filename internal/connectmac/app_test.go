@@ -408,7 +408,13 @@ func TestLocalAgentOpenVNCWaitsForConcurrentRestartAndLogsVerifiedPID(t *testing
 		t.Fatalf("open response=%+v", resp)
 	}
 	entries := readTestLogEntries(t, openApp.LogManager)
-	if len(entries) != 1 || entries[0].PID != 55 || entries[0].LaunchResult != "success" {
+	var launch LogEntry
+	for _, entry := range entries {
+		if entry.Action == "local-agent.vnc" {
+			launch = entry
+		}
+	}
+	if launch.PID != 55 || launch.LaunchResult != "success" {
 		t.Fatalf("entries=%+v", entries)
 	}
 }
@@ -2535,7 +2541,7 @@ profiles:
 	pullBody := `{"profile":"remote-usw2","profile_yaml":"profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n"}`
 	pull := postLocalTransferForTest(t, handler, "/sync/pull", pullBody)
 	failed := waitForLocalTransferJob(t, app.LocalTransfers, pull.ID)
-	if failed.Status != LocalTransferFailed || failed.Percent != 41 || !strings.Contains(failed.Error, "exit status 23") {
+	if failed.Status != LocalTransferFailed || failed.Phase != TransferPhaseFailed || failed.Percent != 39 || !strings.Contains(failed.Error, "exit status 23") {
 		t.Fatalf("failed pull = %#v", failed)
 	}
 	if got := runner.rsync[len(runner.rsync)-1]; got != "." {
@@ -2624,7 +2630,7 @@ func TestLocalTransferFailedLogSanitizesError(t *testing.T) {
 	job := postLocalTransferForTest(t, app.newLocalAgentHandler(), "/sync/push", body)
 	waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
 
-	entries := waitForLocalTransferLogs(t, app.LogManager, 4)
+	entries := waitForLocalTransferLogs(t, app.LogManager, 3)
 	var failed LogEntry
 	for _, entry := range entries {
 		if entry.Action == "transfer.local.failed" {
@@ -2632,7 +2638,7 @@ func TestLocalTransferFailedLogSanitizesError(t *testing.T) {
 			break
 		}
 	}
-	if failed.Action == "" || failed.Status != LocalTransferFailed || failed.Percent != 25 {
+	if failed.Action == "" || failed.Status != LocalTransferFailed || failed.Phase != TransferPhaseFailed || failed.Percent != 24 {
 		t.Fatalf("failed log = %+v, entries = %+v", failed, entries)
 	}
 	raw := readTestLogsRaw(t, app.LogManager)
@@ -2664,11 +2670,11 @@ func TestLocalTransferInterruptedLifecycleLog(t *testing.T) {
 	body := fmt.Sprintf(`{"transfer_id":"member-transfer-interrupted","profile":"remote-usw2","local_path":%q,"profile_yaml":"profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n    identity_file: %s\n"}`, localPath, key)
 	job := postLocalTransferForTest(t, app.newLocalAgentHandler(), "/sync/push", body)
 	finished := waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
-	if finished.Status != LocalTransferInterrupted || finished.Percent != 50 {
+	if finished.Status != LocalTransferInterrupted || finished.Phase != TransferPhaseInterrupted || finished.Percent != 48 {
 		t.Fatalf("interrupted job = %+v", finished)
 	}
 
-	entries := waitForLocalTransferLogs(t, app.LogManager, 5)
+	entries := waitForLocalTransferLogs(t, app.LogManager, 4)
 	var interrupted LogEntry
 	for _, entry := range entries {
 		if entry.Action == "transfer.local.interrupted" {
@@ -2679,7 +2685,7 @@ func TestLocalTransferInterruptedLifecycleLog(t *testing.T) {
 	if interrupted.Action == "" || interrupted.Level != "warn" ||
 		interrupted.TransferID != "member-transfer-interrupted" ||
 		interrupted.LocalJobID != job.ID || interrupted.Status != LocalTransferInterrupted ||
-		interrupted.Percent != 50 {
+		interrupted.Phase != TransferPhaseInterrupted || interrupted.Percent != 48 {
 		t.Fatalf("interrupted log = %+v, entries = %+v", interrupted, entries)
 	}
 	raw := readTestLogsRaw(t, app.LogManager)
@@ -4048,7 +4054,17 @@ func TestAppWebBackgroundDestroyDefersLifecycleMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recent events: %v", err)
 	}
-	if len(events) != 1 || events[0].Action != "destroy" || !events[0].Confirmed || events[0].Profile != "xcode-vnc" {
+	if len(events) != 2 ||
+		events[0].Action != "aws.release.started" ||
+		events[1].Action != "aws.release.requested" ||
+		!events[0].Confirmed ||
+		!events[1].Confirmed ||
+		events[0].Profile != "xcode-vnc" ||
+		events[1].Profile != "xcode-vnc" ||
+		events[0].JobID == "" ||
+		events[0].JobID != events[1].JobID ||
+		events[0].RequestID == "" ||
+		events[0].RequestID != events[1].RequestID {
 		t.Fatalf("events = %+v", events)
 	}
 	if owner, ok, err := app.MemberStore.ProfileOwner("xcode-vnc"); err != nil {
@@ -5018,7 +5034,7 @@ func TestAppWebTransferStartContract(t *testing.T) {
 	localStart := `await localAgentAPI("/sync/" + direction, {`
 	saveJob := `const savedJob = storeSyncJob(key, job);`
 	pollJob := `scheduleSyncPoll(savedJob);`
-	bind := `await updateTransferRecord(record.id, job, true)`
+	bind := `await updateTransferRecord(record.id, savedJob, true)`
 	reconcileRetry := `loadSyncJobs(p.name);`
 	for _, want := range []string{
 		recordStart,

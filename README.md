@@ -584,3 +584,31 @@ Example tool arguments:
 ```
 
 `cm_ssh`, `cm_start`, `cm_stop`, and `cm_open_vnc` are intentionally not exposed through MCP.
+
+## Logs And Audit Events
+
+ConnectMac keeps operational logs in these locations:
+
+```text
+Local JSONL: ~/.connectmac/logs/cm-YYYY-MM-DD.log, retained for 30 days
+Server JSONL: /var/lib/connectmac/.connectmac/logs, retained for 30 days
+MySQL audit: cm_events, retained for 90 days
+Job metadata/logs: /var/lib/connectmac/.connectmac/jobs
+Service log: journalctl -u connectmac
+```
+
+JSONL and audit records include correlation fields such as `request_id`,
+`job_id`, `profile`, `source`, `phase`, `duration_ms`, and `error_code`.
+Passwords, tokens, webhook URLs, PEM contents, SSH commands, terminal contents,
+and transferred file contents are not logged.
+
+The authenticated event API returns newest events first and preserves the
+legacy `data.events` field:
+
+```text
+GET /api/events?limit=50&profile=<profile>&apple_email=<email>&cursor=<cursor>
+```
+
+Use `data.next_cursor` to request the next page. The maximum page size is 200.
+Administrators may add `include_system=1`; other members only receive events
+for Profiles assigned to them.

@@ -45,7 +45,7 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 		}
 
 		finished := waitForLocalTransferJob(t, manager, job.ID)
-		if finished.Status != LocalTransferFailed || finished.Percent != 41 {
+		if finished.Status != LocalTransferFailed || finished.Percent != 39 {
 			t.Fatalf("job = %#v", finished)
 		}
 		if !strings.Contains(finished.Error, "connection unexpectedly closed") ||
@@ -282,7 +282,7 @@ func TestParseRsyncProgress(t *testing.T) {
 		{name: "to-chk", output: "file (xfr#3, to-chk=2/10)", want: 80, ok: true},
 		{name: "to-check", output: "file (xfr#3, to-check=1/4)", want: 75, ok: true},
 		{name: "invalid to-check does not use file percent", output: "  1,024 100% (xfr#1, to-chk=0/0)", ok: false},
-		{name: "running cap", output: "  5,242,880 100%  12.34MB/s  0:00:01", want: 99, ok: true},
+		{name: "raw completion", output: "  5,242,880 100%  12.34MB/s  0:00:01", want: 100, ok: true},
 		{
 			name: "multi-file uses final overall to-check",
 			output: "file-one\n  1,024 100%  1.00MB/s  0:00:01 (xfr#1, to-chk=3/4)\n" +
@@ -302,6 +302,32 @@ func TestParseRsyncProgress(t *testing.T) {
 	}
 }
 
+func TestMapRsyncProgress(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         int
+		processDone bool
+		wantPhase   string
+		wantPercent int
+	}{
+		{name: "preparing", raw: 0, wantPhase: TransferPhasePreparing, wantPercent: 0},
+		{name: "started", raw: 1, wantPhase: TransferPhaseTransferring, wantPercent: 1},
+		{name: "middle", raw: 50, wantPhase: TransferPhaseTransferring, wantPercent: 48},
+		{name: "data complete", raw: 99, wantPhase: TransferPhaseTransferring, wantPercent: 95},
+		{name: "process active finalizing", raw: 100, wantPhase: TransferPhaseFinalizing, wantPercent: 99},
+		{name: "process complete", raw: 100, processDone: true, wantPhase: TransferPhaseSucceeded, wantPercent: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			phase, percent := mapRsyncProgress(tt.raw, tt.processDone)
+			if phase != tt.wantPhase || percent != tt.wantPercent {
+				t.Fatalf("mapRsyncProgress(%d, %v) = (%q, %d), want (%q, %d)",
+					tt.raw, tt.processDone, phase, percent, tt.wantPhase, tt.wantPercent)
+			}
+		})
+	}
+}
+
 func TestLocalTransferJobManagerParsesProgressAcrossOutputChunks(t *testing.T) {
 	manager := NewLocalTransferJobManager()
 	job, err := manager.Start("mac-one", "push", func(onOutput func(string)) error {
@@ -313,9 +339,258 @@ func TestLocalTransferJobManagerParsesProgressAcrossOutputChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	finished := waitForLocalTransferJob(t, manager, job.ID)
-	if finished.Percent != 58 {
+	if finished.Percent != 56 {
 		t.Fatalf("percent = %d, output = %q", finished.Percent, finished.Output)
 	}
+}
+
+func TestLocalTransferJobManagerFinalizingAndFailurePhases(t *testing.T) {
+	t.Run("active raw completion waits for process exit", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		release := make(chan struct{})
+		outputWritten := make(chan struct{})
+		job, err := manager.Start("mac-one", "push", func(onOutput func(string)) error {
+			onOutput("  1,024 100%  1.00MB/s  0:00:01\n")
+			close(outputWritten)
+			<-release
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-outputWritten
+		active, ok := manager.Get(job.ID)
+		if !ok {
+			t.Fatalf("job %q not found", job.ID)
+		}
+		if active.Phase != TransferPhaseFinalizing || active.Percent != 99 {
+			t.Fatalf("active job = %+v", active)
+		}
+		close(release)
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Phase != TransferPhaseSucceeded || finished.Percent != 100 {
+			t.Fatalf("finished job = %+v", finished)
+		}
+	})
+
+	t.Run("failure preserves mapped progress", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job, err := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
+			onOutput("  1,024 50%  1.00MB/s  0:00:01\n")
+			return errors.New("exit status 23")
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Phase != TransferPhaseFailed || finished.Percent != 48 {
+			t.Fatalf("failed job = %+v", finished)
+		}
+	})
+}
+
+func TestLocalTransferJobManagerPublishesTerminalStateAfterCallback(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	callbackEntered := make(chan LocalTransferEvent, 1)
+	releaseCallback := make(chan struct{})
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "pull", func(event LocalTransferEvent) {
+		if event.Status == LocalTransferFailed {
+			callbackEntered <- event
+			<-releaseCallback
+		}
+	}, func(onOutput func(string)) error {
+		onOutput("  1,024 50%  1.00MB/s  0:00:01\n")
+		return errors.New("exit status 23")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var terminalEvent LocalTransferEvent
+	select {
+	case terminalEvent = <-callbackEntered:
+	case <-time.After(time.Second):
+		t.Fatal("terminal callback was not entered")
+	}
+	if terminalEvent.Status != LocalTransferFailed || terminalEvent.Phase != TransferPhaseFailed || terminalEvent.Percent != 48 {
+		t.Fatalf("terminal callback event = %+v", terminalEvent)
+	}
+
+	visible, ok := manager.Get(job.ID)
+	if !ok {
+		t.Fatalf("job %q not found", job.ID)
+	}
+	if !visible.Active() || visible.Status != LocalTransferRunning || visible.FinishedAt != nil {
+		t.Fatalf("terminal state became visible before callback completed: %+v", visible)
+	}
+	listed := manager.List("mac-one")
+	if len(listed) != 1 || !listed[0].Active() || listed[0].Status != LocalTransferRunning {
+		t.Fatalf("listed jobs before callback completion = %+v", listed)
+	}
+
+	close(releaseCallback)
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.Status != LocalTransferFailed || finished.Phase != TransferPhaseFailed || finished.Percent != 48 {
+		t.Fatalf("published terminal job = %+v", finished)
+	}
+}
+
+func TestLocalTransferJobManagerTerminalCallbackPanicDoesNotBlockPublication(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "pull", func(event LocalTransferEvent) {
+		if event.Status == LocalTransferFailed {
+			panic("terminal callback panic")
+		}
+	}, func(onOutput func(string)) error {
+		onOutput("  1,024 50%  1.00MB/s  0:00:01\n")
+		return errors.New("exit status 23")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.Status != LocalTransferFailed || finished.Phase != TransferPhaseFailed || finished.Percent != 48 {
+		t.Fatalf("published terminal job = %+v", finished)
+	}
+}
+
+func TestLocalTransferJobManagerTerminalCallbackIsBounded(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	manager.terminalCallbackTimeout = 20 * time.Millisecond
+	callbackEntered := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "pull", func(event LocalTransferEvent) {
+		if event.Status != LocalTransferFailed {
+			return
+		}
+		close(callbackEntered)
+		<-releaseCallback
+	}, func(onOutput func(string)) error {
+		return errors.New("exit status 23")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-callbackEntered:
+	case <-time.After(time.Second):
+		t.Fatal("terminal callback was not entered")
+	}
+
+	beforeTimeout, ok := manager.Get(job.ID)
+	if !ok || !beforeTimeout.Active() {
+		t.Fatalf("job before callback timeout = %+v, %v", beforeTimeout, ok)
+	}
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	close(releaseCallback)
+	if finished.Status != LocalTransferFailed || finished.FinishedAt == nil {
+		t.Fatalf("job after callback timeout = %+v", finished)
+	}
+}
+
+func TestLocalTransferJobManagerStartedCallbackPanicIsContained(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+		if event.Status == LocalTransferRunning && event.Percent == 0 {
+			panic("started callback panic with secret output")
+		}
+	}, func(onOutput func(string)) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.Status != LocalTransferSucceeded {
+		t.Fatalf("job = %+v", finished)
+	}
+	if finished.CallbackWarning != localTransferCallbackPanicWarning {
+		t.Fatalf("callback warning = %q", finished.CallbackWarning)
+	}
+	if strings.Contains(finished.CallbackWarning, "secret") {
+		t.Fatalf("callback warning leaked callback content: %q", finished.CallbackWarning)
+	}
+}
+
+func TestLocalTransferJobManagerStartedCallbackBlockIsBoundedPerJob(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	manager.terminalCallbackTimeout = 20 * time.Millisecond
+	startedEntered := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	var once sync.Once
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+		if event.Status == LocalTransferRunning && event.Percent == 0 {
+			once.Do(func() { close(startedEntered) })
+			<-releaseCallback
+		}
+	}, func(onOutput func(string)) error {
+		onOutput("  1,024 100%  1.00MB/s  0:00:01\n")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-startedEntered:
+	case <-time.After(time.Second):
+		t.Fatal("started callback was not entered")
+	}
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	close(releaseCallback)
+	if finished.Status != LocalTransferSucceeded || finished.CallbackWarning != localTransferCallbackTimeoutWarning {
+		t.Fatalf("job = %+v", finished)
+	}
+}
+
+func TestLocalTransferJobManagerProgressCallbackPanicAndBlockAreContained(t *testing.T) {
+	t.Run("panic", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+			if event.Percent == 10 {
+				panic("progress callback panic")
+			}
+		}, func(onOutput func(string)) error {
+			onOutput("file (xfr#1, to-chk=8/10)\n")
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Status != LocalTransferSucceeded || finished.CallbackWarning != localTransferCallbackPanicWarning {
+			t.Fatalf("job = %+v", finished)
+		}
+	})
+
+	t.Run("block", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		manager.terminalCallbackTimeout = 20 * time.Millisecond
+		progressEntered := make(chan struct{})
+		releaseCallback := make(chan struct{})
+		job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+			if event.Percent == 10 {
+				close(progressEntered)
+				<-releaseCallback
+			}
+		}, func(onOutput func(string)) error {
+			onOutput("file (xfr#1, to-chk=8/10)\n")
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-progressEntered:
+		case <-time.After(time.Second):
+			t.Fatal("progress callback was not entered")
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		close(releaseCallback)
+		if finished.Status != LocalTransferSucceeded || finished.CallbackWarning != localTransferCallbackTimeoutWarning {
+			t.Fatalf("job = %+v", finished)
+		}
+	})
 }
 
 func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
@@ -359,15 +634,53 @@ func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
 			event.Profile != "mac-one" || event.Direction != "push" || event.Elapsed < 0 {
 			t.Fatalf("event = %+v", event)
 		}
-		got = append(got, fmt.Sprintf("%s:%d", event.Status, event.Percent))
+		got = append(got, fmt.Sprintf("%s:%s:%d", event.Status, event.Phase, event.Percent))
 	}
 	want := []string{
-		"running:0",
-		"running:10", "running:25", "running:50", "running:75", "running:90", "running:99",
-		"succeeded:100",
+		"running:preparing:0",
+		"running:transferring:10",
+		"running:transferring:25",
+		"running:transferring:50",
+		"running:transferring:75",
+		"running:transferring:90",
+		"running:finalizing:99",
+		"succeeded:succeeded:100",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+}
+
+func TestLocalTransferJobManagerDoesNotJumpFromZeroToFinalizing(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	var (
+		mu     sync.Mutex
+		events []LocalTransferEvent
+	)
+	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}, func(onOutput func(string)) error {
+		onOutput("file-one 100%\n")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForLocalTransferJob(t, manager, job.ID)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 8 {
+		t.Fatalf("events = %+v", events)
+	}
+	var got []int
+	for _, event := range events {
+		got = append(got, event.Percent)
+	}
+	want := []int{0, 10, 25, 50, 75, 90, 99, 100}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("event percentages = %v, want %v", got, want)
 	}
 }
 

@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,68 @@ type webSyncRequest struct {
 	Profile    string `json:"profile"`
 	LocalPath  string `json:"local_path"`
 	RemotePath string `json:"remote_path"`
+}
+
+func (a App) webLocalIntentHandler(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Profile   string `json:"profile"`
+			Operation string `json:"operation"`
+			RequestID string `json:"request_id"`
+		}
+		if err := decodeWebJSON(r, &req); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.Operation = strings.TrimSpace(req.Operation)
+		switch req.Operation {
+		case "connect", "vnc", "transfer":
+		default:
+			writeWebError(w, http.StatusBadRequest, "operation must be connect, vnc, or transfer")
+			return
+		}
+		requestID, err := validateLocalAgentRequestID(req.RequestID)
+		if err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		profile, err := a.transferProfileForMember(member, strings.TrimSpace(req.Profile))
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, errTransferProfileAccessDenied) {
+				status = http.StatusForbidden
+			}
+			writeWebError(w, status, err.Error())
+			return
+		}
+		event := OperationEvent{
+			Action:      "local." + req.Operation + ".requested",
+			Profile:     profile.Name,
+			AppleEmail:  profile.AWS.AccountEmail,
+			MemberID:    member.ID,
+			MemberEmail: member.Email,
+			MemberName:  member.Name,
+			RequestID:   requestID,
+			Source:      "web",
+			Phase:       "requested",
+			Status:      "requested",
+			Message:     "local " + req.Operation + " requested",
+		}
+		if err := a.MemberStore.RecordEvent(event); err != nil {
+			writeWebError(w, http.StatusInternalServerError, "record local operation intent failed")
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]string{"request_id": requestID}})
+	}
 }
 
 func (a App) webSyncHistoryHandler() http.HandlerFunc {

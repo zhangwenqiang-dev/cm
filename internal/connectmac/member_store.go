@@ -79,6 +79,7 @@ type MemberRepository interface {
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error)
 	CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error)
+	CleanupProfileRecordsAndRecordEvent(profileName, releasedAt, reason string, event OperationEvent) (ReleaseReminder, bool, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
@@ -86,6 +87,8 @@ type MemberRepository interface {
 	UpdateWebSettings(update WebSettings) (WebSettings, error)
 	EnsureAuthSecret() (string, error)
 	RecordEvent(event OperationEvent) error
+	QueryEvents(query EventQuery) (EventPage, error)
+	PruneEvents(before time.Time) (int64, error)
 	RecentEvents(appleEmail string, limit int) ([]OperationEvent, error)
 }
 
@@ -162,6 +165,13 @@ const (
 	TransferStatusFailed      = "failed"
 	TransferStatusInterrupted = "interrupted"
 	TransferStatusUnconfirmed = "unconfirmed"
+
+	TransferPhasePreparing    = "preparing"
+	TransferPhaseTransferring = "transferring"
+	TransferPhaseFinalizing   = "finalizing"
+	TransferPhaseSucceeded    = "succeeded"
+	TransferPhaseFailed       = "failed"
+	TransferPhaseInterrupted  = "interrupted"
 )
 
 type TransferRecord struct {
@@ -175,6 +185,7 @@ type TransferRecord struct {
 	RemotePath   string `json:"remote_path"`
 	LocalJobID   string `json:"local_job_id,omitempty"`
 	Status       string `json:"status"`
+	Phase        string `json:"phase,omitempty"`
 	Percent      int    `json:"percent"`
 	ErrorSummary string `json:"error_summary,omitempty"`
 	CreatedAt    string `json:"created_at"`
@@ -241,17 +252,24 @@ var (
 )
 
 type OperationEvent struct {
-	ID          string `json:"id"`
-	Action      string `json:"action"`
-	Profile     string `json:"profile"`
-	AppleEmail  string `json:"apple_email,omitempty"`
-	MemberID    string `json:"member_id,omitempty"`
-	MemberEmail string `json:"member_email,omitempty"`
-	MemberName  string `json:"member_name,omitempty"`
-	Confirmed   bool   `json:"confirmed"`
-	Status      string `json:"status"`
-	Message     string `json:"message,omitempty"`
-	CreatedAt   string `json:"created_at"`
+	ID                string `json:"id"`
+	Action            string `json:"action"`
+	Profile           string `json:"profile"`
+	AppleEmail        string `json:"apple_email,omitempty"`
+	MemberID          string `json:"member_id,omitempty"`
+	MemberEmail       string `json:"member_email,omitempty"`
+	MemberName        string `json:"member_name,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	JobID             string `json:"job_id,omitempty"`
+	Source            string `json:"source,omitempty"`
+	Phase             string `json:"phase,omitempty"`
+	TargetMemberEmail string `json:"target_member_email,omitempty"`
+	ErrorCode         string `json:"error_code,omitempty"`
+	DurationMS        int64  `json:"duration_ms,omitempty"`
+	Confirmed         bool   `json:"confirmed"`
+	Status            string `json:"status"`
+	Message           string `json:"message,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }
 
 type WebSettings struct {
@@ -371,6 +389,7 @@ func (s MemberStore) Save(db MemberData) error {
 	if db.mutationRevision != current.mutationRevision {
 		db.Reminders = current.Reminders
 		db.TransferRecords = current.TransferRecords
+		db.Events = mergeOperationEvents(current.Events, db.Events)
 	}
 	return s.saveUnlocked(db)
 }
@@ -412,6 +431,7 @@ func (s MemberStore) DeleteTransferRecord(memberID, recordID string) error {
 func (s MemberStore) saveUnlocked(db MemberData) error {
 	s = s.normalize()
 	normalizeMemberData(&db)
+	db.Events = retainFileEventsForSave(db.Events, s.Now())
 	path, err := ExpandPath(s.Path)
 	if err != nil {
 		return err
@@ -973,6 +993,14 @@ func markReleaseReminderReleased(releasedAt string) func(ReleaseReminder) (Relea
 }
 
 func (s MemberStore) CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error) {
+	return s.cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason, nil)
+}
+
+func (s MemberStore) CleanupProfileRecordsAndRecordEvent(profileName, releasedAt, reason string, event OperationEvent) (ReleaseReminder, bool, error) {
+	return s.cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason, &event)
+}
+
+func (s MemberStore) cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason string, event *OperationEvent) (ReleaseReminder, bool, error) {
 	unlock, err := s.lockMutation()
 	if err != nil {
 		return ReleaseReminder{}, false, err
@@ -985,7 +1013,14 @@ func (s MemberStore) CleanupProfileRecords(profileName, releasedAt, reason strin
 	if err != nil {
 		return ReleaseReminder{}, false, err
 	}
-	reminder, changed, err := cleanupProfileRecordsInData(&db, profileName, releasedAt, reason, s.currentTime().Format(time.RFC3339))
+	reminder, changed, err := cleanupProfileRecordsInData(
+		&db,
+		profileName,
+		releasedAt,
+		reason,
+		s.currentTime().Format(time.RFC3339),
+		event,
+	)
 	if err != nil || !changed {
 		return reminder, changed, err
 	}
@@ -995,7 +1030,7 @@ func (s MemberStore) CleanupProfileRecords(profileName, releasedAt, reason strin
 	return reminder, true, nil
 }
 
-func cleanupProfileRecordsInData(db *MemberData, profileName, releasedAt, reason, updatedAt string) (ReleaseReminder, bool, error) {
+func cleanupProfileRecordsInData(db *MemberData, profileName, releasedAt, reason, updatedAt string, explicitEvent *OperationEvent) (ReleaseReminder, bool, error) {
 	profileName = strings.TrimSpace(profileName)
 	if profileName == "" {
 		return ReleaseReminder{}, false, errors.New("profile is required")
@@ -1033,9 +1068,18 @@ func cleanupProfileRecordsInData(db *MemberData, profileName, releasedAt, reason
 		reminder.UpdatedAt = updatedAt
 		db.Reminders[reminderIndex] = reminder
 	}
-	event := cleanupProfileRecordsEvent(reminder, reminderIndex >= 0, ownerChanged, reminderChanged, reason)
-	if err := appendOperationEvent(db, event, updatedAt); err != nil {
-		return ReleaseReminder{}, false, err
+	if explicitEvent != nil {
+		event := *explicitEvent
+		event.Profile = reminder.ProfileName
+		event.AppleEmail = reminder.AppleEmail
+		if err := appendOperationEvent(db, event, updatedAt); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+	} else if shouldRecordAutomaticCleanupEvent(reason) {
+		event := cleanupProfileRecordsEvent(reminder, reminderIndex >= 0, ownerChanged, reminderChanged, reason)
+		if err := appendOperationEvent(db, event, updatedAt); err != nil {
+			return ReleaseReminder{}, false, err
+		}
 	}
 	return reminder, true, nil
 }
@@ -1059,13 +1103,19 @@ func cleanupProfileRecordsEvent(reminder ReleaseReminder, reminderFound, ownerCh
 		message += "; no release reminder found"
 	}
 	return OperationEvent{
-		Action:     "cleanup-records",
+		Action:     "system.cleanup.completed",
 		Profile:    reminder.ProfileName,
 		AppleEmail: reminder.AppleEmail,
+		Source:     "system",
+		Phase:      "completed",
 		Confirmed:  true,
 		Status:     "success",
 		Message:    message + " (" + reason + ")",
 	}
+}
+
+func shouldRecordAutomaticCleanupEvent(reason string) bool {
+	return !strings.EqualFold(strings.TrimSpace(reason), "manual")
 }
 
 func (s MemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {
@@ -1210,6 +1260,14 @@ func (s MemberStore) RecordEvent(event OperationEvent) error {
 	if err != nil {
 		return err
 	}
+	event.ID = strings.TrimSpace(event.ID)
+	if event.ID != "" {
+		for _, existing := range db.Events {
+			if existing.ID == event.ID {
+				return nil
+			}
+		}
+	}
 	if err := appendOperationEvent(&db, event, s.normalize().Now().Format(time.RFC3339)); err != nil {
 		return err
 	}
@@ -1217,6 +1275,7 @@ func (s MemberStore) RecordEvent(event OperationEvent) error {
 }
 
 func appendOperationEvent(db *MemberData, event OperationEvent, now string) error {
+	event.ID = strings.TrimSpace(event.ID)
 	event.Action = strings.TrimSpace(event.Action)
 	if event.Action == "" {
 		return errors.New("operation event action is required")
@@ -1225,37 +1284,43 @@ func appendOperationEvent(db *MemberData, event OperationEvent, now string) erro
 	event.AppleEmail = normalizeEmail(event.AppleEmail)
 	event.MemberEmail = normalizeEmail(event.MemberEmail)
 	event.MemberName = strings.TrimSpace(event.MemberName)
-	if event.ID == "" {
-		event.ID = "event-" + strings.ReplaceAll(now, ":", "") + "-" + slugPart(event.Action+"-"+event.Profile)
-	}
+	event.RequestID = strings.TrimSpace(event.RequestID)
+	event.JobID = strings.TrimSpace(event.JobID)
+	event.Source = strings.TrimSpace(event.Source)
+	event.Phase = strings.TrimSpace(event.Phase)
+	event.TargetMemberEmail = normalizeEmail(event.TargetMemberEmail)
+	event.ErrorCode = strings.TrimSpace(event.ErrorCode)
 	if event.CreatedAt == "" {
-		event.CreatedAt = now
+		createdAt, err := canonicalEventTimestamp(now)
+		if err != nil {
+			return fmt.Errorf("invalid operation event time: %w", err)
+		}
+		event.CreatedAt = createdAt
+	} else {
+		createdAt, err := canonicalEventTimestamp(event.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("invalid operation event created_at: %w", err)
+		}
+		event.CreatedAt = createdAt
+	}
+	if event.ID == "" {
+		suffix, err := randomToken(9)
+		if err != nil {
+			return fmt.Errorf("generate operation event ID: %w", err)
+		}
+		slug := slugPart(event.Action + "-" + event.Profile)
+		if len(slug) > 96 {
+			slug = strings.TrimRight(slug[:96], "-")
+		}
+		event.ID = "event-" + strings.ReplaceAll(event.CreatedAt, ":", "") + "-" + slug + "-" + suffix
 	}
 	db.Events = append(db.Events, event)
-	if len(db.Events) > 500 {
-		db.Events = db.Events[len(db.Events)-500:]
-	}
 	return nil
 }
 
 func (s MemberStore) RecentEvents(appleEmail string, limit int) ([]OperationEvent, error) {
-	db, err := s.Load()
-	if err != nil {
-		return nil, err
-	}
-	appleEmail = normalizeEmail(appleEmail)
-	var out []OperationEvent
-	for i := len(db.Events) - 1; i >= 0; i-- {
-		event := db.Events[i]
-		if appleEmail != "" && !strings.EqualFold(event.AppleEmail, appleEmail) {
-			continue
-		}
-		out = append(out, event)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
+	page, err := s.QueryEvents(EventQuery{AppleEmail: appleEmail, Limit: limit, IncludeSystem: true})
+	return page.Events, err
 }
 
 func normalizeMemberData(db *MemberData) {
@@ -1423,6 +1488,7 @@ func createTransferRecordInStore(s memberDataStore, memberID string, record Tran
 	record.AppleEmail = normalizeEmail(record.AppleEmail)
 	record.Direction = strings.TrimSpace(strings.ToLower(record.Direction))
 	record.Status = strings.TrimSpace(strings.ToLower(record.Status))
+	record.Phase = strings.TrimSpace(strings.ToLower(record.Phase))
 	if err := validateTransferRecord(record); err != nil {
 		return TransferRecord{}, err
 	}
@@ -1488,9 +1554,6 @@ func updateTransferRecordInStore(s memberDataStore, memberID, recordID, localJob
 		if current.ID != recordID || current.MemberID != memberID {
 			continue
 		}
-		if isTerminalTransferStatus(current.Status) {
-			return TransferRecord{}, errors.New("terminal transfer record cannot be updated")
-		}
 		if current.LocalJobID != "" && current.LocalJobID != localJobID {
 			return TransferRecord{}, ErrTransferRecordNotFound
 		}
@@ -1514,8 +1577,16 @@ func updateTransferRecordInStore(s memberDataStore, memberID, recordID, localJob
 		}
 		next.Direction = strings.TrimSpace(strings.ToLower(next.Direction))
 		next.Status = strings.TrimSpace(strings.ToLower(next.Status))
+		next.Phase = strings.TrimSpace(strings.ToLower(next.Phase))
+		next.ErrorSummary = strings.TrimSpace(next.ErrorSummary)
 		if err := validateTransferRecord(next); err != nil {
 			return TransferRecord{}, err
+		}
+		if isTerminalTransferStatus(current.Status) {
+			if terminalTransferSemanticallyEqual(current, next) {
+				return current, nil
+			}
+			return TransferRecord{}, errors.New("terminal transfer record cannot be updated")
 		}
 		if next.Percent < current.Percent {
 			return TransferRecord{}, errors.New("transfer percent cannot regress")
@@ -1561,8 +1632,34 @@ func validateTransferRecord(record TransferRecord) error {
 	default:
 		return errors.New("invalid transfer status")
 	}
+	switch record.Phase {
+	case "", TransferPhasePreparing, TransferPhaseTransferring, TransferPhaseFinalizing,
+		TransferPhaseSucceeded, TransferPhaseFailed, TransferPhaseInterrupted:
+	default:
+		return errors.New("invalid transfer phase")
+	}
 	if record.Percent < 0 || record.Percent > 100 {
 		return errors.New("transfer percent must be between 0 and 100")
+	}
+	phase := semanticTransferPhase(record)
+	validCombination := false
+	switch record.Status {
+	case TransferStatusCreated, TransferStatusQueued:
+		validCombination = phase == TransferPhasePreparing && record.Percent == 0
+	case TransferStatusRunning:
+		validCombination =
+			phase == TransferPhasePreparing && record.Percent == 0 ||
+				phase == TransferPhaseTransferring && record.Percent >= 1 && record.Percent <= 95 ||
+				phase == TransferPhaseFinalizing && record.Percent == 99
+	case TransferStatusSucceeded:
+		validCombination = phase == TransferPhaseSucceeded && record.Percent == 100
+	case TransferStatusFailed:
+		validCombination = phase == TransferPhaseFailed && record.Percent <= 99
+	case TransferStatusInterrupted, TransferStatusUnconfirmed:
+		validCombination = phase == TransferPhaseInterrupted && record.Percent <= 99
+	}
+	if !validCombination {
+		return errors.New("invalid transfer status/phase/percent combination")
 	}
 	return nil
 }
@@ -1573,6 +1670,37 @@ func isActiveTransferStatus(status string) bool {
 
 func isTerminalTransferStatus(status string) bool {
 	return status == TransferStatusSucceeded || status == TransferStatusFailed || status == TransferStatusInterrupted || status == TransferStatusUnconfirmed
+}
+
+func terminalTransferSemanticallyEqual(current, requested TransferRecord) bool {
+	return current.LocalJobID == requested.LocalJobID &&
+		current.Status == requested.Status &&
+		semanticTransferPhase(current) == semanticTransferPhase(requested) &&
+		current.Percent == requested.Percent &&
+		strings.TrimSpace(current.ErrorSummary) == strings.TrimSpace(requested.ErrorSummary) &&
+		transferTimestampEqual(current.StartedAt, requested.StartedAt) &&
+		transferTimestampEqual(current.FinishedAt, requested.FinishedAt)
+}
+
+func semanticTransferPhase(record TransferRecord) string {
+	if strings.TrimSpace(record.Phase) != "" {
+		return strings.TrimSpace(record.Phase)
+	}
+	return inferredTransferPhase(record.Status, record.Percent)
+}
+
+func transferTimestampEqual(left, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == right {
+		return true
+	}
+	if left == "" || right == "" {
+		return false
+	}
+	leftTime, leftErr := time.Parse(time.RFC3339Nano, left)
+	rightTime, rightErr := time.Parse(time.RFC3339Nano, right)
+	return leftErr == nil && rightErr == nil && leftTime.Equal(rightTime)
 }
 
 type unlockedMemberStore struct {
@@ -2476,37 +2604,6 @@ func ensureAuthSecretInStore(s memberDataStore) (string, error) {
 		}
 	}
 	return db.Settings.AuthSecret, nil
-}
-
-func recordEventInStore(s memberDataStore, event OperationEvent) error {
-	db, err := s.Load()
-	if err != nil {
-		return err
-	}
-	if err := appendOperationEvent(&db, event, s.currentTime().Format(time.RFC3339)); err != nil {
-		return err
-	}
-	return s.Save(db)
-}
-
-func recentEventsInStore(s memberDataStore, appleEmail string, limit int) ([]OperationEvent, error) {
-	db, err := s.Load()
-	if err != nil {
-		return nil, err
-	}
-	appleEmail = normalizeEmail(appleEmail)
-	var out []OperationEvent
-	for i := len(db.Events) - 1; i >= 0; i-- {
-		event := db.Events[i]
-		if appleEmail != "" && !strings.EqualFold(event.AppleEmail, appleEmail) {
-			continue
-		}
-		out = append(out, event)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
 }
 
 func (s MemberStore) currentTime() time.Time {

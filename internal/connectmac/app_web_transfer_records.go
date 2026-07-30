@@ -32,6 +32,11 @@ func (a App) webTransferRecordsHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		for index := range records {
+			if records[index].Phase == "" {
+				records[index].Phase = inferredTransferPhase(records[index].Status, records[index].Percent)
+			}
+		}
 		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"records": records}})
 	}
 }
@@ -78,7 +83,7 @@ func (a App) webTransferRecordStartHandler(configPath string) http.HandlerFunc {
 			MemberID: member.ID, MemberEmail: member.Email, ProfileName: profile.Name,
 			AppleEmail: profile.AWS.AccountEmail, Direction: req.Direction,
 			LocalPath: strings.TrimSpace(req.LocalPath), RemotePath: strings.TrimSpace(req.RemotePath),
-			Status: TransferStatusCreated,
+			Status: TransferStatusCreated, Phase: TransferPhasePreparing,
 		}
 		record, err := a.MemberStore.CreateTransferRecord(member.ID, attemptedRecord)
 		if err != nil {
@@ -111,6 +116,7 @@ func (a App) webTransferRecordUpdateHandler() http.HandlerFunc {
 			ID           string `json:"id"`
 			LocalJobID   string `json:"local_job_id"`
 			Status       string `json:"status"`
+			Phase        string `json:"phase"`
 			Percent      int    `json:"percent"`
 			ErrorSummary string `json:"error_summary"`
 			ElapsedMS    int64  `json:"elapsed_ms"`
@@ -121,14 +127,19 @@ func (a App) webTransferRecordUpdateHandler() http.HandlerFunc {
 		}
 		now := time.Now().Format(time.RFC3339)
 		record, err := a.MemberStore.UpdateTransferRecord(member.ID, req.ID, req.LocalJobID, func(current TransferRecord) (TransferRecord, error) {
+			wasTerminal := isTerminalTransferStatus(current.Status)
 			current.LocalJobID = strings.TrimSpace(req.LocalJobID)
 			current.Status = strings.TrimSpace(req.Status)
 			current.Percent = req.Percent
+			current.Phase = strings.TrimSpace(req.Phase)
+			if current.Phase == "" {
+				current.Phase = inferredTransferPhase(current.Status, current.Percent)
+			}
 			current.ErrorSummary = strings.TrimSpace(req.ErrorSummary)
-			if current.StartedAt == "" && current.Status != TransferStatusCreated {
+			if !wasTerminal && current.StartedAt == "" && current.Status != TransferStatusCreated {
 				current.StartedAt = now
 			}
-			if isTerminalTransferStatus(current.Status) {
+			if !wasTerminal && isTerminalTransferStatus(current.Status) {
 				current.FinishedAt = now
 			}
 			return current, nil
@@ -143,7 +154,7 @@ func (a App) webTransferRecordUpdateHandler() http.HandlerFunc {
 				writeWebError(w, http.StatusBadRequest, err.Error())
 				return
 			}
-			a.logTransferPersistenceError(member, TransferRecord{ID: req.ID, LocalJobID: req.LocalJobID, Status: req.Status, Percent: req.Percent}, err)
+			a.logTransferPersistenceError(member, TransferRecord{ID: req.ID, LocalJobID: req.LocalJobID, Status: req.Status, Phase: req.Phase, Percent: req.Percent}, err)
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -210,7 +221,9 @@ func isTransferRecordDomainError(err error) bool {
 		"transfer record local job ID cannot change",
 		"transfer direction must be push or pull",
 		"invalid transfer status",
+		"invalid transfer phase",
 		"transfer percent must be between 0 and 100",
+		"invalid transfer status/phase/percent combination",
 		"transfer percent cannot regress",
 		"terminal transfer status cannot return to active":
 		return true
@@ -243,6 +256,7 @@ func (a App) writeTransferLog(level, message string, member Member, record Trans
 		Profile: record.ProfileName, AppleEmail: record.AppleEmail, MemberEmail: member.Email,
 		TransferID: record.ID, LocalJobID: record.LocalJobID, Direction: record.Direction,
 		Status: record.Status, Percent: record.Percent, ElapsedMS: elapsedMS,
+		Phase: record.Phase,
 	})
 }
 

@@ -2,7 +2,9 @@ package connectmac
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 type fakeMySQLReleaseReminderRow struct {
@@ -285,15 +288,22 @@ func TestMySQLReleaseReminderAutoReleaseSchemaMigrations(t *testing.T) {
 	}
 }
 
-func TestMySQLOperationEventActorSchemaMigrations(t *testing.T) {
+func TestMySQLOperationEventSchemaMigrations(t *testing.T) {
 	joined := strings.Join(mysqlOperationEventMigrationStatements, "\n")
-	for _, column := range []string{"member_email", "member_name"} {
+	for _, column := range []string{
+		"member_email", "member_name", "request_id", "job_id", "source", "phase",
+		"target_member_email", "error_code", "duration_ms",
+	} {
 		if !strings.Contains(joined, "ADD COLUMN "+column) {
 			t.Errorf("operation event migration missing %s", column)
 		}
 	}
 	if strings.Contains(strings.ToUpper(joined), "DROP ") || strings.Contains(strings.ToUpper(joined), "DELETE ") {
 		t.Fatalf("operation event migrations are destructive: %s", joined)
+	}
+	indexes := strings.Join(mysqlOperationEventIndexStatements, "\n")
+	if !strings.Contains(indexes, "(apple_email, created_at, id)") {
+		t.Fatalf("operation event migrations missing apple pagination index: %s", indexes)
 	}
 }
 
@@ -466,9 +476,6 @@ func TestMySQLMemberStoreLoadScansMembersAndTransferRecords(t *testing.T) {
 		WillReturnRows(mysqlTransferRows(record))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT setting_key, COALESCE(setting_value, '') FROM cm_settings`)).
 		WillReturnRows(sqlmock.NewRows([]string{"setting_key", "setting_value"}))
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), COALESCE(member_email, ''), COALESCE(member_name, ''), confirmed, status, COALESCE(message, ''), created_at FROM cm_events ORDER BY created_at ASC LIMIT 500`)).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}))
-
 	data, err := store.Load()
 	if err != nil {
 		t.Fatalf("load member store: %v", err)
@@ -524,7 +531,7 @@ func TestMySQLMemberStoreLoadReturnsTransferIterationError(t *testing.T) {
 	}
 }
 
-func TestMySQLMemberStoreSaveDeletesAndReinsertsMembersAndTransferRecords(t *testing.T) {
+func TestMySQLMemberStoreSaveDoesNotRewriteEvents(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -552,7 +559,7 @@ func TestMySQLMemberStoreSaveDeletesAndReinsertsMembersAndTransferRecords(t *tes
 	mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
 		WithArgs(mysqlStoreLockName).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(12))
-	for _, table := range []string{"cm_events", "cm_transfer_records", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+	for _, table := range []string{"cm_transfer_records", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
 		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM " + table)).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 	}
@@ -588,6 +595,7 @@ func TestMySQLMemberStoreSaveDeletesAndReinsertsMembersAndTransferRecords(t *tes
 	err = store.Save(MemberData{
 		Members:          []Member{member},
 		TransferRecords:  []TransferRecord{record},
+		Events:           []OperationEvent{{ID: "loaded-event", Action: "existing", Status: "success"}},
 		Settings:         defaultWebSettings(),
 		mutationRevision: 12,
 	})
@@ -687,6 +695,10 @@ func TestMySQLUpdateTransferLocksMemberRowAndEnforcesSemantics(t *testing.T) {
 				record.Status = TransferStatusFailed
 				return record
 			}(),
+			update: func(record TransferRecord) (TransferRecord, error) {
+				record.Percent++
+				return record, nil
+			},
 			wantErr: "terminal transfer record cannot be updated",
 		},
 	} {
@@ -716,6 +728,136 @@ func TestMySQLUpdateTransferLocksMemberRowAndEnforcesSemantics(t *testing.T) {
 			_, err = store.UpdateTransferRecord(test.memberID, current.ID, test.localJobID, update)
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("update error = %v, want %q", err, test.wantErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMySQLTerminalTransferUpdateIsIdempotent(t *testing.T) {
+	current := TransferRecord{
+		ID: "transfer-1", MemberID: "member-a", MemberEmail: "a@example.com",
+		ProfileName: "iossupport-usw2", Direction: TransferDirectionPull,
+		LocalPath: "/tmp/App", RemotePath: "~/Documents/", LocalJobID: "job-a",
+		Status: TransferStatusInterrupted, Phase: TransferPhaseInterrupted, Percent: 48,
+		ErrorSummary: "context canceled", CreatedAt: "2026-07-16T08:00:00Z",
+		StartedAt: "2026-07-16T08:01:00Z", FinishedAt: "2026-07-16T08:03:00Z",
+		UpdatedAt: "2026-07-16T08:03:00Z",
+	}
+	now := time.Date(2026, 7, 16, 8, 4, 0, 0, time.UTC)
+
+	t.Run("identical retry commits without rewrite", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		store := mysqlTransferTestStore(db, now)
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+			WithArgs(mysqlStoreLockName).
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(8))
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferSelectForUpdateQuery)).
+			WithArgs(current.ID, current.MemberID).
+			WillReturnRows(mysqlTransferRows(current))
+		mock.ExpectCommit()
+
+		got, err := store.UpdateTransferRecord(current.MemberID, current.ID, current.LocalJobID, func(record TransferRecord) (TransferRecord, error) {
+			return record, nil
+		})
+		if err != nil {
+			t.Fatalf("retry identical terminal transfer: %v", err)
+		}
+		if !reflect.DeepEqual(got, current) {
+			t.Fatalf("retried transfer = %+v, want %+v", got, current)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("conflicting retry rolls back", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		store := mysqlTransferTestStore(db, now)
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+			WithArgs(mysqlStoreLockName).
+			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(9))
+		mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferSelectForUpdateQuery)).
+			WithArgs(current.ID, current.MemberID).
+			WillReturnRows(mysqlTransferRows(current))
+		mock.ExpectRollback()
+
+		_, err = store.UpdateTransferRecord(current.MemberID, current.ID, current.LocalJobID, func(record TransferRecord) (TransferRecord, error) {
+			record.Percent = 49
+			return record, nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "terminal transfer record cannot be updated") {
+			t.Fatalf("conflicting terminal update error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestMySQLTransferUpdateRejectsContradictoryState(t *testing.T) {
+	current := TransferRecord{
+		ID: "transfer-1", MemberID: "member-a", MemberEmail: "a@example.com",
+		ProfileName: "iossupport-usw2", Direction: TransferDirectionPull,
+		LocalPath: "/tmp/App", RemotePath: "~/Documents/", LocalJobID: "job-a",
+		Status: TransferStatusRunning, Phase: TransferPhaseTransferring, Percent: 48,
+		CreatedAt: "2026-07-16T08:00:00Z", StartedAt: "2026-07-16T08:01:00Z",
+		UpdatedAt: "2026-07-16T08:02:00Z",
+	}
+	now := time.Date(2026, 7, 16, 8, 4, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		mutate func(*TransferRecord)
+	}{
+		{name: "succeeded below one hundred", mutate: func(record *TransferRecord) {
+			record.Status = TransferStatusSucceeded
+			record.Phase = TransferPhaseSucceeded
+			record.Percent = 99
+		}},
+		{name: "failed at one hundred", mutate: func(record *TransferRecord) {
+			record.Status = TransferStatusFailed
+			record.Phase = TransferPhaseFailed
+			record.Percent = 100
+		}},
+		{name: "running finalizing below ninety nine", mutate: func(record *TransferRecord) {
+			record.Phase = TransferPhaseFinalizing
+			record.Percent = 95
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			store := mysqlTransferTestStore(db, now)
+			mock.ExpectBegin()
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlStoreLockForUpdateQuery)).
+				WithArgs(mysqlStoreLockName).
+				WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(10))
+			mock.ExpectQuery(regexp.QuoteMeta(mysqlTransferSelectForUpdateQuery)).
+				WithArgs(current.ID, current.MemberID).
+				WillReturnRows(mysqlTransferRows(current))
+			mock.ExpectRollback()
+
+			_, err = store.UpdateTransferRecord(current.MemberID, current.ID, current.LocalJobID, func(record TransferRecord) (TransferRecord, error) {
+				test.mutate(&record)
+				return record, nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "invalid transfer status/phase/percent combination") {
+				t.Fatalf("contradictory transfer update error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
@@ -778,7 +920,7 @@ func mysqlTransferTestStore(db *sql.DB, now time.Time) MySQLMemberStore {
 func mysqlTransferRows(record TransferRecord) *sqlmock.Rows {
 	return sqlmock.NewRows(mysqlTransferColumnNames).AddRow(
 		record.ID, record.MemberID, record.MemberEmail, record.ProfileName, record.AppleEmail,
-		record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status,
+		record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status+"|"+record.Phase,
 		record.Percent, record.ErrorSummary, record.CreatedAt, record.StartedAt, record.FinishedAt, record.UpdatedAt,
 	)
 }
@@ -989,6 +1131,43 @@ func TestMySQLCleanupProfileRecordsRollsBackOwnerReminderAndEventTogether(t *tes
 	}
 }
 
+func TestMySQLManualCleanupAuditFailureRollsBackTransaction(t *testing.T) {
+	current := ReleaseReminder{
+		ProfileName: "apple-usw2",
+		AppleEmail:  "apple@example.com",
+		Status:      ReleaseReminderStatusActive,
+		CreatedAt:   "2026-07-01T08:00:00Z",
+		UpdatedAt:   "2026-07-02T08:00:00Z",
+	}
+	tx := &fakeMySQLReleaseReminderTransaction{
+		row:          fakeMySQLReleaseReminderRow{reminder: current},
+		ownerRow:     fakeMySQLProfileOwnerRow{memberID: "member-1", email: "owner@example.com"},
+		eventExecErr: errors.New("manual audit insert failed"),
+	}
+	_, _, err := cleanupProfileRecordsAndMaybeEventInMySQLTransaction(
+		tx,
+		current.ProfileName,
+		"2026-07-30T12:00:00Z",
+		"manual",
+		time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+		&OperationEvent{
+			Action:      "profile.cleanup.completed",
+			MemberEmail: "admin@example.com",
+			Source:      "web",
+			Status:      "success",
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "manual audit insert failed") {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	if !tx.rolledBack || tx.committed {
+		t.Fatalf("manual cleanup committed=%t rolledBack=%t", tx.committed, tx.rolledBack)
+	}
+	if !tx.ownerDeleted {
+		t.Fatal("test did not reach owner deletion before audit failure")
+	}
+}
+
 func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testing.T) {
 	current := ReleaseReminder{
 		ProfileName:         "apple-usw2",
@@ -1032,8 +1211,408 @@ func TestMySQLWholeStoreSaveLocksAndReloadsStaleRemindersBeforeDeletes(t *testin
 	if tx.operations[2] != wantTransferQuery {
 		t.Fatalf("third whole-store operation = %q, want %q", tx.operations[2], wantTransferQuery)
 	}
-	if tx.operations[3] != "exec:DELETE FROM cm_events" {
+	if tx.operations[3] != "exec:DELETE FROM cm_transfer_records" {
 		t.Fatalf("first delete operation = %q", tx.operations[3])
+	}
+	for _, operation := range tx.operations {
+		if operation == "exec:DELETE FROM cm_events" {
+			t.Fatalf("whole-store save rewrote audit events: %v", tx.operations)
+		}
+	}
+}
+
+func TestMySQLMemberStoreQueryEventsUsesDescendingKeysetPagination(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC))
+	cursor := encodeEventCursor(OperationEvent{ID: "event-050", CreatedAt: "2026-07-30T10:00:00.000000000Z"})
+	query := `SELECT ` + mysqlOperationEventSelectColumns + ` FROM cm_events WHERE (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`
+	rows := sqlmock.NewRows([]string{
+		"id", "action", "profile", "apple_email", "member_id", "member_email", "member_name",
+		"request_id", "job_id", "source", "phase", "target_member_email", "error_code",
+		"duration_ms", "confirmed", "status", "message", "created_at",
+	}).
+		AddRow("event-049", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "web", "ready", "", "", int64(123), true, "success", "", "2026-07-30T09:59:00Z").
+		AddRow("event-048", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "web", "ready", "", "", int64(124), true, "success", "", "2026-07-30T09:58:00Z").
+		AddRow("event-047", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "web", "ready", "", "", int64(125), true, "success", "", "2026-07-30T09:57:00Z")
+	mock.ExpectQuery(regexp.QuoteMeta(query)).
+		WithArgs("2026-07-30T10:00:00.000000000Z", "2026-07-30T10:00:00.000000000Z", "event-050", 3).
+		WillReturnRows(rows)
+
+	page, err := store.QueryEvents(EventQuery{Limit: 2, Cursor: cursor, IncludeSystem: true})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if len(page.Events) != 2 || page.Events[0].ID != "event-049" || page.NextCursor == "" {
+		t.Fatalf("event page = %+v", page)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStoreEventFiltersDoNotWrapCollatedColumns(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	query := `SELECT ` + mysqlOperationEventSelectColumns + ` FROM cm_events WHERE apple_email = ? AND member_email = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+	mock.ExpectQuery(regexp.QuoteMeta(query)).
+		WithArgs("apple@example.com", "actor@example.com", 11).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "action", "profile", "apple_email", "member_id", "member_email", "member_name",
+			"request_id", "job_id", "source", "phase", "target_member_email", "error_code",
+			"duration_ms", "confirmed", "status", "message", "created_at",
+		}))
+	if _, err := store.QueryEvents(EventQuery{
+		AppleEmail: "APPLE@example.com", ActorEmail: "ACTOR@example.com",
+		Limit: 10, IncludeSystem: true,
+	}); err != nil {
+		t.Fatalf("query filtered events: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStorePruneEventsBeforeCutoff(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	before := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(mysqlCanonicalOperationEventPruneQuery)).
+		WithArgs("2026-05-01T00:00:00.000000000Z", mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 17))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlNoncanonicalOperationEventSelectQuery)).
+		WithArgs(mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}))
+	mock.ExpectCommit()
+	removed, err := store.PruneEvents(before)
+	if err != nil {
+		t.Fatalf("prune events: %v", err)
+	}
+	if removed != 17 {
+		t.Fatalf("removed = %d, want 17", removed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStoreRecordEventAppendsDirectly(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	store := mysqlTransferTestStore(db, now)
+	event := OperationEvent{
+		ID: "event-direct", Action: "aws.open.ready", Profile: "iossupport-usw2",
+		AppleEmail: " Apple@Example.com ", MemberID: "member-1",
+		MemberEmail: " Actor@Example.com ", MemberName: " Actor ",
+		RequestID: " request-1 ", JobID: " job-1 ", Source: " web ", Phase: " ready ",
+		TargetMemberEmail: " Target@Example.com ", ErrorCode: " none ", DurationMS: 1234,
+		Confirmed: true, Status: "success", Message: "ready",
+	}
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
+		WithArgs(
+			event.ID, event.Action, event.Profile, "apple@example.com", event.MemberID,
+			"actor@example.com", "Actor", "request-1", "job-1", "web", "ready",
+			"target@example.com", "none", event.DurationMS, event.Confirmed, event.Status,
+			event.Message, "2026-07-30T12:00:00.000000000Z",
+		).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	if err := store.RecordEvent(event); err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStoreRecordEventDuplicateExplicitIDIsIdempotent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	store := mysqlTransferTestStore(db, now)
+	event := OperationEvent{
+		ID: "event-idempotent", Action: "aws.open.ready", Profile: "iossupport-usw2",
+		Status: "success",
+	}
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
+		WithArgs(
+			event.ID, event.Action, event.Profile, "", "", "", "", "", "", "", "", "", "",
+			int64(0), false, event.Status, "", "2026-07-30T12:00:00.000000000Z",
+		).
+		WillReturnError(&mysqlDriver.MySQLError{Number: 1062, Message: "Duplicate entry"})
+	if err := store.RecordEvent(event); err != nil {
+		t.Fatalf("duplicate explicit event ID should be idempotent: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNormalizeMySQLOperationEventUniqueIDAndCanonicalTime(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	first, err := normalizeOperationEvent(OperationEvent{
+		Action: "aws.open.ready", Profile: "iossupport-usw2", Status: "success",
+		CreatedAt: "2026-07-30T20:00:00+08:00",
+	}, now)
+	if err != nil {
+		t.Fatalf("normalize first event: %v", err)
+	}
+	second, err := normalizeOperationEvent(OperationEvent{
+		Action: "aws.open.ready", Profile: "iossupport-usw2", Status: "success",
+		CreatedAt: "2026-07-30T20:00:00+08:00",
+	}, now)
+	if err != nil {
+		t.Fatalf("normalize second event: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("normalized event IDs collided: %q", first.ID)
+	}
+	if first.CreatedAt != "2026-07-30T12:00:00.000000000Z" {
+		t.Fatalf("canonical created_at = %q", first.CreatedAt)
+	}
+	if _, err := normalizeOperationEvent(OperationEvent{
+		Action: "test", Status: "success", CreatedAt: "invalid",
+	}, now); err == nil {
+		t.Fatal("invalid MySQL event timestamp was accepted")
+	}
+}
+
+func TestMySQLMemberStorePruneEventsCanonicalizesCutoffUTC(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	before := time.Date(2026, 5, 1, 8, 30, 0, 123000000, time.FixedZone("UTC+8", 8*60*60))
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(mysqlCanonicalOperationEventPruneQuery)).
+		WithArgs("2026-05-01T00:30:00.123000000Z", mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlNoncanonicalOperationEventSelectQuery)).
+		WithArgs(mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}))
+	mock.ExpectCommit()
+	if _, err := store.PruneEvents(before); err != nil {
+		t.Fatalf("prune events: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStorePruneEventsSafelyHandlesMixedTimestampFormats(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	before := time.Date(2026, 7, 30, 12, 0, 5, 100000000, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(mysqlCanonicalOperationEventPruneQuery)).
+		WithArgs("2026-07-30T12:00:05.100000000Z", mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlNoncanonicalOperationEventSelectQuery)).
+		WithArgs(mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).
+			AddRow("legacy-offset-before", "2026-07-30T20:00:05+08:00").
+			AddRow("legacy-offset-after", "2026-07-30T20:00:06+08:00").
+			AddRow("legacy-fraction-before", "2026-07-30T12:00:05.09Z").
+			AddRow("legacy-fraction-after", "2026-07-30T12:00:05.2Z").
+			AddRow("invalid-offset", "2026-07-30T12:00:05+99:99"))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventDeleteByIDQuery)).
+		WithArgs("legacy-offset-before").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventCanonicalizeByIDQuery)).
+		WithArgs("2026-07-30T12:00:06.000000000Z", "legacy-offset-after", "2026-07-30T20:00:06+08:00").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventDeleteByIDQuery)).
+		WithArgs("legacy-fraction-before").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventCanonicalizeByIDQuery)).
+		WithArgs("2026-07-30T12:00:05.200000000Z", "legacy-fraction-after", "2026-07-30T12:00:05.2Z").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventDeleteByIDQuery)).
+		WithArgs("invalid-offset").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	removed, err := store.PruneEvents(before)
+	if err != nil {
+		t.Fatalf("prune events: %v", err)
+	}
+	if removed != 4 {
+		t.Fatalf("removed = %d, want 4", removed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStorePruneEventsCommitsBoundedBatchesAndAdvancesLegacyRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	before := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	cutoff := "2026-07-30T12:00:00.000000000Z"
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(mysqlCanonicalOperationEventPruneQuery)).
+		WithArgs(cutoff, mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, mysqlOperationEventPruneBatchSize))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(mysqlCanonicalOperationEventPruneQuery)).
+		WithArgs(cutoff, mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectCommit()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlNoncanonicalOperationEventSelectQuery)).
+		WithArgs(mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}).
+			AddRow("legacy-newer", "2026-07-30T20:00:01+08:00"))
+	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventCanonicalizeByIDQuery)).
+		WithArgs("2026-07-30T12:00:01.000000000Z", "legacy-newer", "2026-07-30T20:00:01+08:00").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	removed, err := store.PruneEvents(before)
+	if err != nil {
+		t.Fatalf("prune events: %v", err)
+	}
+	if removed != mysqlOperationEventPruneBatchSize+2 {
+		t.Fatalf("removed = %d, want %d", removed, mysqlOperationEventPruneBatchSize+2)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLMemberStorePruneEventsContinuesAfterFullLegacyBatch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlTransferTestStore(db, time.Time{})
+	before := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	cutoff := "2026-07-30T12:00:00.000000000Z"
+	legacyCreatedAt := "2026-07-30T20:00:01+08:00"
+	canonicalCreatedAt := "2026-07-30T12:00:01.000000000Z"
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(mysqlCanonicalOperationEventPruneQuery)).
+		WithArgs(cutoff, mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	rows := sqlmock.NewRows([]string{"id", "created_at"})
+	for index := 0; index < mysqlOperationEventPruneBatchSize; index++ {
+		id := fmt.Sprintf("legacy-newer-%03d", index)
+		rows.AddRow(id, legacyCreatedAt)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlNoncanonicalOperationEventSelectQuery)).
+		WithArgs(mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnRows(rows)
+	for index := 0; index < mysqlOperationEventPruneBatchSize; index++ {
+		id := fmt.Sprintf("legacy-newer-%03d", index)
+		mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventCanonicalizeByIDQuery)).
+			WithArgs(canonicalCreatedAt, id, legacyCreatedAt).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectCommit()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(mysqlNoncanonicalOperationEventSelectQuery)).
+		WithArgs(mysqlCanonicalEventTimestampPattern, mysqlOperationEventPruneBatchSize).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "created_at"}))
+	mock.ExpectCommit()
+
+	removed, err := store.PruneEvents(before)
+	if err != nil {
+		t.Fatalf("prune events: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d, want 0 after canonicalizing retained legacy rows", removed)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type distinctEventIDArgument struct {
+	first string
+	calls int
+}
+
+func (argument *distinctEventIDArgument) Match(value driver.Value) bool {
+	id, ok := value.(string)
+	if !ok || id == "" {
+		return false
+	}
+	argument.calls++
+	if argument.calls == 1 {
+		argument.first = id
+		return true
+	}
+	return id != argument.first
+}
+
+func TestMySQLMemberStoreDirectAppendsGenerateDistinctIDs(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	idArgument := &distinctEventIDArgument{}
+	for i := 0; i < 2; i++ {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		store := mysqlTransferTestStore(db, now)
+		mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
+			WithArgs(
+				idArgument, "test", "iossupport-usw2", "", "", "", "", "", "", "", "", "", "",
+				int64(0), false, "success", "", "2026-07-30T12:00:00.000000000Z",
+			).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		if err := store.RecordEvent(OperationEvent{
+			Action: "test", Profile: "iossupport-usw2", Status: "success",
+		}); err != nil {
+			t.Fatalf("record event %d: %v", i, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if idArgument.calls != 2 {
+		t.Fatalf("captured event IDs = %d, want 2", idArgument.calls)
 	}
 }
 
@@ -1368,7 +1947,12 @@ func TestMySQLSetProfileOwnerAndRecordEventTransaction(t *testing.T) {
 				WithArgs("apple-usw2", member.ID, now.Format(time.RFC3339)).
 				WillReturnResult(sqlmock.NewResult(1, 1))
 			eventInsert := mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
-				WithArgs(sqlmock.AnyArg(), event.Action, "apple-usw2", "apple@example.com", event.MemberID, event.MemberEmail, event.MemberName, event.Confirmed, event.Status, event.Message, now.Format(time.RFC3339))
+				WithArgs(
+					sqlmock.AnyArg(), event.Action, "apple-usw2", "apple@example.com",
+					event.MemberID, event.MemberEmail, event.MemberName,
+					"", "", "", "", "", "", int64(0),
+					event.Confirmed, event.Status, event.Message, "2026-07-29T08:00:00.000000000Z",
+				)
 			if test.eventErr != nil {
 				eventInsert.WillReturnError(test.eventErr)
 				mock.ExpectRollback()

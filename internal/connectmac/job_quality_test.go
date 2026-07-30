@@ -41,11 +41,23 @@ func TestJobLifecycleMetadataIsBackwardCompatible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load legacy job: %v", err)
 	}
-	if loaded.LifecycleState != "" || loaded.LifecycleOwnerEmail != "" || !loaded.LifecycleFinalizedAt.IsZero() || !loaded.LifecycleNotifyClaimedAt.IsZero() || !loaded.LifecycleNotifiedAt.IsZero() || loaded.LifecycleError != "" {
+	if loaded.RequestID != "" || loaded.Source != "" || loaded.ActorMemberID != "" || loaded.ActorEmail != "" || loaded.ActorName != "" {
+		t.Fatalf("legacy correlation metadata = %#v", loaded)
+	}
+	if loaded.LifecycleState != "" || loaded.LifecycleOwnerEmail != "" || !loaded.LifecycleFinalizedAt.IsZero() ||
+		!loaded.LifecycleNotifyClaimedAt.IsZero() || !loaded.LifecycleNotifiedAt.IsZero() ||
+		loaded.LifecycleNotifyAttempts != 0 || !loaded.LifecycleNotifyNextAttemptAt.IsZero() ||
+		loaded.LifecycleNotifyConfigFingerprint != "" || !loaded.LifecycleNotifyExhaustedAt.IsZero() ||
+		!loaded.LifecycleNotifyFailureRecordedAt.IsZero() || loaded.LifecycleError != "" {
 		t.Fatalf("legacy lifecycle metadata = %#v", loaded)
 	}
 
 	updated, err := manager.Update(legacy.ID, func(current Job) (Job, error) {
+		current.RequestID = "req-legacy"
+		current.Source = "web"
+		current.ActorMemberID = "member-1"
+		current.ActorEmail = "owner@example.com"
+		current.ActorName = "Owner"
 		current.LifecycleOwnerEmail = "owner@example.com"
 		current.LifecycleState = JobLifecyclePending
 		return current, nil
@@ -62,6 +74,11 @@ func TestJobLifecycleMetadataIsBackwardCompatible(t *testing.T) {
 	}
 	if persisted.LifecycleOwnerEmail != updated.LifecycleOwnerEmail || persisted.LifecycleState != updated.LifecycleState {
 		t.Fatalf("persisted job = %#v, updated = %#v", persisted, updated)
+	}
+	if persisted.RequestID != updated.RequestID || persisted.Source != updated.Source ||
+		persisted.ActorMemberID != updated.ActorMemberID || persisted.ActorEmail != updated.ActorEmail ||
+		persisted.ActorName != updated.ActorName {
+		t.Fatalf("persisted correlation metadata = %#v, updated = %#v", persisted, updated)
 	}
 }
 
@@ -116,6 +133,203 @@ func TestJobManagerUpdatePreservesExistingFields(t *testing.T) {
 	}); err == nil {
 		t.Fatal("changing job ID must fail")
 	}
+}
+
+func TestAWSCLIOperationWritesBestEffortStartAndResultLogs(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		code    int
+	}{
+		{command: "open", code: 0},
+		{command: "destroy", code: 1},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, t.TempDir())
+			profile := validAWSProfile()
+			got := app.runObservedAWSCLI(context.Background(), test.command, profile.Name, true, false, func() int {
+				return test.code
+			})
+			if got != test.code {
+				t.Fatalf("exit code = %d, want %d", got, test.code)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 2 {
+				t.Fatalf("entries = %+v", entries)
+			}
+			if entries[0].Source != "cli" || entries[0].Phase != "started" ||
+				entries[0].RequestID == "" || entries[1].RequestID != entries[0].RequestID {
+				t.Fatalf("uncorrelated CLI entries = %+v", entries)
+			}
+			wantPhase := "succeeded"
+			if test.code != 0 {
+				wantPhase = "failed"
+			}
+			if entries[1].Phase != wantPhase {
+				t.Fatalf("result phase = %q, want %q", entries[1].Phase, wantPhase)
+			}
+		})
+	}
+}
+
+func TestRunAWSOpenAndDestroyLogEarlyFailuresFromRealEntry(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		cfg     Config
+		ref     string
+	}{
+		{
+			name:    "open unknown profile",
+			command: "open",
+			cfg:     Config{Profiles: map[string]Profile{}},
+			ref:     "missing-profile",
+		},
+		{
+			name:    "destroy validation failure",
+			command: "destroy",
+			cfg: func() Config {
+				profile := validAWSProfile()
+				profile.AWS.SecurityGroupID = ""
+				return Config{Profiles: map[string]Profile{profile.Name: profile}}
+			}(),
+			ref: "xcode-vnc",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, t.TempDir())
+			code := app.runAWS(context.Background(), test.cfg, []string{test.command, test.ref}, "unused.yaml")
+			if code == 0 {
+				t.Fatalf("runAWS code = 0, stderr = %s", errOut.String())
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 2 || entries[0].Phase != "started" || entries[1].Phase != "failed" {
+				t.Fatalf("early failure logs = %+v", entries)
+			}
+			if entries[0].Profile != test.ref || entries[1].Profile != test.ref ||
+				entries[0].RequestID == "" || entries[1].RequestID != entries[0].RequestID {
+				t.Fatalf("uncorrelated early failure logs = %+v", entries)
+			}
+		})
+	}
+}
+
+func TestRunAWSPlanDoesNotCreateOpenOrDestroyLogs(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	profile := validAWSProfile()
+	cfg := Config{Profiles: map[string]Profile{profile.Name: profile}}
+	if code := app.runAWS(context.Background(), cfg, []string{"plan", profile.Name}, "unused.yaml"); code != 0 {
+		t.Fatalf("plan code = %d, stderr = %s", code, errOut.String())
+	}
+	files, err := app.LogManager.List()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("list logs: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("plan unexpectedly wrote runtime logs: %+v", files)
+	}
+}
+
+func TestAWSCLIBackgroundDestroySuccessIsQueuedNotCompleted(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	code := app.runObservedAWSCLI(context.Background(), "destroy", "xcode-vnc", true, true, func() int {
+		return 0
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	entries := readTestLogEntries(t, app.LogManager)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	result := entries[1]
+	if result.Action != "aws.release.queued" || result.Phase != "queued" || result.Status != "queued" ||
+		result.Action == "aws.release.succeeded" || result.Status == "success" {
+		t.Fatalf("background destroy result = %+v", result)
+	}
+}
+
+func TestJobManagerRunJobPropagatesOperationCorrelationEnvironment(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	job, err := manager.Create(Job{
+		ID:            "correlated-child",
+		Status:        JobStatusRunning,
+		RunnerToken:   "correlated-runner-token",
+		RequestID:     "req-child",
+		Source:        "web",
+		ActorMemberID: "member-1",
+		ActorEmail:    "actor@example.com",
+		ActorName:     "Actor Name",
+		Command: []string{"/bin/sh", "-c", strings.Join([]string{
+			`test "$` + jobRequestIDEnv + `" = "req-child"`,
+			`test "$` + jobIDEnv + `" = "correlated-child"`,
+			`test "$` + jobSourceEnv + `" = "web"`,
+			`test "$` + jobActorMemberIDEnv + `" = "member-1"`,
+			`test "$` + jobActorEmailEnv + `" = "actor@example.com"`,
+			`test "$` + jobActorNameEnv + `" = "Actor Name"`,
+		}, " && ")},
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	t.Setenv(jobRunnerTokenEnv, job.RunnerToken)
+	completed, err := manager.RunJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("run correlated child: %v", err)
+	}
+	if completed.Status != JobStatusSuccess {
+		t.Fatalf("completed job = %+v", completed)
+	}
+}
+
+func TestAWSCLIChildLogsReuseJobCorrelationAndWebDirectCallStaysSuppressed(t *testing.T) {
+	t.Run("child correlation", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		t.Setenv(jobRequestIDEnv, "req-child")
+		t.Setenv(jobIDEnv, "job-child")
+		t.Setenv(jobSourceEnv, "web")
+		t.Setenv(jobActorMemberIDEnv, "member-1")
+		t.Setenv(jobActorEmailEnv, "actor@example.com")
+		t.Setenv(jobActorNameEnv, "Actor Name")
+		if code := app.runObservedAWSCLI(context.Background(), "open", "xcode-vnc", true, false, func() int { return 0 }); code != 0 {
+			t.Fatalf("exit code = %d", code)
+		}
+		entries := readTestLogEntries(t, app.LogManager)
+		if len(entries) != 2 {
+			t.Fatalf("entries = %+v", entries)
+		}
+		for _, entry := range entries {
+			if entry.RequestID != "req-child" || entry.JobID != "job-child" || entry.Source != "web" ||
+				entry.ActorMemberID != "member-1" || entry.ActorMemberEmail != "actor@example.com" ||
+				entry.ActorMemberName != "Actor Name" {
+				t.Fatalf("uncorrelated child log = %+v", entry)
+			}
+		}
+	})
+
+	t.Run("direct web call suppressed", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		app := testApp(&out, &errOut, t.TempDir())
+		ctx := withOperationContext(context.Background(), OperationContext{
+			RequestID: "req-web-direct",
+			Source:    "web",
+		})
+		if code := app.runObservedAWSCLI(ctx, "open", "xcode-vnc", true, false, func() int { return 0 }); code != 0 {
+			t.Fatalf("exit code = %d", code)
+		}
+		files, err := app.LogManager.List()
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("list logs: %v", err)
+		}
+		if len(files) != 0 {
+			t.Fatalf("direct Web command wrote duplicate CLI logs: %+v", files)
+		}
+	})
 }
 
 func TestManualAndAutomaticDestroyPathsShareAtomicUniqueness(t *testing.T) {

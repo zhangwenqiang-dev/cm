@@ -19,8 +19,14 @@ const (
 	LocalTransferFailed      = "failed"
 	LocalTransferInterrupted = "interrupted"
 
-	localTransferOutputLimit = 64 * 1024
-	localTransferRetention   = 24 * time.Hour
+	localTransferOutputLimit       = 64 * 1024
+	localTransferRetention         = 24 * time.Hour
+	terminalCallbackTimeout        = 5 * time.Second
+	localTransferCallbackQueueSize = 16
+
+	localTransferCallbackPanicWarning   = "transfer event callback panicked"
+	localTransferCallbackTimeoutWarning = "transfer event callback timed out"
+	localTransferCallbackQueueWarning   = "transfer event callback queue is full"
 )
 
 var (
@@ -36,14 +42,16 @@ type LocalTransferJob struct {
 	Profile           string     `json:"profile"`
 	Direction         string     `json:"direction"`
 	Status            string     `json:"status"`
+	Phase             string     `json:"phase"`
 	Percent           int        `json:"percent"`
 	Output            string     `json:"output"`
 	Error             string     `json:"error"`
+	CallbackWarning   string     `json:"callback_warning,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	StartedAt         *time.Time `json:"started_at"`
 	FinishedAt        *time.Time `json:"finished_at"`
-	onEvent           func(LocalTransferEvent)
-	emittedMilestones map[int]bool
+	callbackEvents    chan localTransferCallbackDispatch
+	emittedMilestones map[string]bool
 }
 
 func (j LocalTransferJob) Active() bool {
@@ -56,25 +64,34 @@ type LocalTransferEvent struct {
 	Profile    string
 	Direction  string
 	Status     string
+	Phase      string
 	Percent    int
 	Elapsed    time.Duration
 	Error      string
 }
 
+type localTransferCallbackDispatch struct {
+	event    LocalTransferEvent
+	terminal bool
+	done     chan struct{}
+}
+
 type LocalTransferJobManager struct {
-	mu        sync.Mutex
-	jobs      map[string]*LocalTransferJob
-	now       func() time.Time
-	retention time.Duration
-	sequence  uint64
-	draining  bool
+	mu                      sync.Mutex
+	jobs                    map[string]*LocalTransferJob
+	now                     func() time.Time
+	retention               time.Duration
+	sequence                uint64
+	draining                bool
+	terminalCallbackTimeout time.Duration
 }
 
 func NewLocalTransferJobManager() *LocalTransferJobManager {
 	return &LocalTransferJobManager{
-		jobs:      make(map[string]*LocalTransferJob),
-		now:       time.Now,
-		retention: localTransferRetention,
+		jobs:                    make(map[string]*LocalTransferJob),
+		now:                     time.Now,
+		retention:               localTransferRetention,
+		terminalCallbackTimeout: terminalCallbackTimeout,
 	}
 }
 
@@ -108,14 +125,22 @@ func (m *LocalTransferJobManager) StartWithEvents(transferID, profile, direction
 		Profile:           profile,
 		Direction:         direction,
 		Status:            LocalTransferQueued,
+		Phase:             TransferPhasePreparing,
 		CreatedAt:         created,
-		onEvent:           onEvent,
-		emittedMilestones: make(map[int]bool),
+		emittedMilestones: make(map[string]bool),
+	}
+	if onEvent != nil {
+		job.callbackEvents = make(chan localTransferCallbackDispatch, localTransferCallbackQueueSize)
 	}
 	m.jobs[job.ID] = job
 	result := *job
 	m.mu.Unlock()
 
+	if onEvent != nil {
+		// Production callbacks are internal bounded JSONL writes. The dispatcher still
+		// isolates callback failures so transfer execution never depends on that contract.
+		go m.runCallbackDispatcher(job.ID, onEvent, job.callbackEvents)
+	}
 	go m.run(job.ID, run)
 	return result, nil
 }
@@ -191,11 +216,12 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 	}
 	started := m.now()
 	job.Status = LocalTransferRunning
+	job.Phase = TransferPhasePreparing
 	job.StartedAt = &started
-	job.emittedMilestones[0] = true
+	job.emittedMilestones[transferMilestoneKey(job.Phase, 0)] = true
 	event := localTransferEvent(*job, started)
 	m.mu.Unlock()
-	emitLocalTransferEvent(job.onEvent, event)
+	m.dispatchLocalTransferEvent(id, event, false)
 
 	err := run(func(output string) {
 		m.appendOutput(id, output)
@@ -208,22 +234,35 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 		return
 	}
 	finished := m.now()
-	job.FinishedAt = &finished
+	terminal := *job
+	terminal.FinishedAt = &finished
 	switch {
 	case err == nil:
-		job.Status = LocalTransferSucceeded
-		job.Percent = 100
+		terminal.Status = LocalTransferSucceeded
+		terminal.Phase, terminal.Percent = mapRsyncProgress(100, true)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		job.Status = LocalTransferInterrupted
-		job.Error = localTransferFailureError(job.Output, err)
+		terminal.Status = LocalTransferInterrupted
+		terminal.Phase = TransferPhaseInterrupted
+		terminal.Error = localTransferFailureError(terminal.Output, err)
 	default:
-		job.Status = LocalTransferFailed
-		job.Error = localTransferFailureError(job.Output, err)
+		terminal.Status = LocalTransferFailed
+		terminal.Phase = TransferPhaseFailed
+		terminal.Error = localTransferFailureError(terminal.Output, err)
 	}
-	event = localTransferEvent(*job, finished)
-	onEvent := job.onEvent
+	event = localTransferEvent(terminal, finished)
 	m.mu.Unlock()
-	emitLocalTransferEvent(onEvent, event)
+	m.dispatchLocalTransferEvent(id, event, true)
+
+	m.mu.Lock()
+	job, ok = m.jobs[id]
+	if ok {
+		job.Status = terminal.Status
+		job.Phase = terminal.Phase
+		job.Percent = terminal.Percent
+		job.Error = terminal.Error
+		job.FinishedAt = terminal.FinishedAt
+	}
+	m.mu.Unlock()
 }
 
 func localTransferFailureError(output string, err error) string {
@@ -257,29 +296,45 @@ func (m *LocalTransferJobManager) appendOutput(id, output string) {
 	if len(job.Output) > localTransferOutputLimit {
 		job.Output = job.Output[len(job.Output)-localTransferOutputLimit:]
 	}
-	if progress, ok := parseRsyncProgress(job.Output); ok && progress > job.Percent {
-		job.Percent = progress
+	if raw, ok := parseRsyncProgress(job.Output); ok {
+		phase, progress := mapRsyncProgress(raw, false)
+		if progress > job.Percent || phase == TransferPhaseFinalizing && job.Phase != TransferPhaseFinalizing {
+			job.Phase = phase
+			job.Percent = progress
+		}
 	}
 	events := job.milestoneEvents(m.now())
-	onEvent := job.onEvent
 	m.mu.Unlock()
 	for _, event := range events {
-		emitLocalTransferEvent(onEvent, event)
+		m.dispatchLocalTransferEvent(id, event, false)
 	}
 }
 
 func (j *LocalTransferJob) milestoneEvents(now time.Time) []LocalTransferEvent {
 	var events []LocalTransferEvent
 	for _, milestone := range []int{10, 25, 50, 75, 90, 99} {
-		if j.Percent < milestone || j.emittedMilestones[milestone] {
+		if j.Percent < milestone {
 			continue
 		}
-		j.emittedMilestones[milestone] = true
+		phase := TransferPhaseTransferring
+		if milestone == 99 {
+			phase = TransferPhaseFinalizing
+		}
+		key := transferMilestoneKey(phase, milestone)
+		if j.emittedMilestones[key] {
+			continue
+		}
+		j.emittedMilestones[key] = true
 		event := localTransferEvent(*j, now)
+		event.Phase = phase
 		event.Percent = milestone
 		events = append(events, event)
 	}
 	return events
+}
+
+func transferMilestoneKey(phase string, percent int) string {
+	return fmt.Sprintf("%s:%d", phase, percent)
 }
 
 func localTransferEvent(job LocalTransferJob, now time.Time) LocalTransferEvent {
@@ -296,16 +351,82 @@ func localTransferEvent(job LocalTransferJob, now time.Time) LocalTransferEvent 
 		Profile:    job.Profile,
 		Direction:  job.Direction,
 		Status:     job.Status,
+		Phase:      job.Phase,
 		Percent:    job.Percent,
 		Elapsed:    elapsed,
 		Error:      job.Error,
 	}
 }
 
-func emitLocalTransferEvent(callback func(LocalTransferEvent), event LocalTransferEvent) {
-	if callback != nil {
-		callback(event)
+func (m *LocalTransferJobManager) runCallbackDispatcher(id string, callback func(LocalTransferEvent), events <-chan localTransferCallbackDispatch) {
+	for dispatch := range events {
+		panicked := func() (panicked bool) {
+			defer func() {
+				if recover() != nil {
+					panicked = true
+				}
+			}()
+			callback(dispatch.event)
+			return false
+		}()
+		if panicked {
+			m.setLocalTransferCallbackWarning(id, localTransferCallbackPanicWarning)
+		}
+		if dispatch.done != nil {
+			close(dispatch.done)
+		}
+		if dispatch.terminal {
+			return
+		}
 	}
+}
+
+func (m *LocalTransferJobManager) dispatchLocalTransferEvent(id string, event LocalTransferEvent, terminal bool) {
+	m.mu.Lock()
+	job, ok := m.jobs[id]
+	var events chan localTransferCallbackDispatch
+	if ok {
+		events = job.callbackEvents
+	}
+	m.mu.Unlock()
+	if events == nil {
+		return
+	}
+	dispatch := localTransferCallbackDispatch{event: event, terminal: terminal}
+	if !terminal {
+		select {
+		case events <- dispatch:
+		default:
+			m.setLocalTransferCallbackWarning(id, localTransferCallbackQueueWarning)
+		}
+		return
+	}
+	dispatch.done = make(chan struct{})
+	timeout := m.terminalCallbackTimeout
+	if timeout <= 0 {
+		timeout = terminalCallbackTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case events <- dispatch:
+	case <-timer.C:
+		m.setLocalTransferCallbackWarning(id, localTransferCallbackTimeoutWarning)
+		return
+	}
+	select {
+	case <-dispatch.done:
+	case <-timer.C:
+		m.setLocalTransferCallbackWarning(id, localTransferCallbackTimeoutWarning)
+	}
+}
+
+func (m *LocalTransferJobManager) setLocalTransferCallbackWarning(id, warning string) {
+	m.mu.Lock()
+	if job := m.jobs[id]; job != nil {
+		job.CallbackWarning = warning
+	}
+	m.mu.Unlock()
 }
 
 func (m *LocalTransferJobManager) cleanupLocked() {
@@ -327,7 +448,7 @@ func parseRsyncProgress(output string) (int, bool) {
 		remaining, errRemaining := strconv.Atoi(match[1])
 		total, errTotal := strconv.Atoi(match[2])
 		if errRemaining == nil && errTotal == nil && total > 0 {
-			return capRunningTransferProgress((total - remaining) * 100 / total), true
+			return clampRsyncProgress((total - remaining) * 100 / total), true
 		}
 		return 0, false
 	}
@@ -339,15 +460,37 @@ func parseRsyncProgress(output string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	return capRunningTransferProgress(progress), true
+	return clampRsyncProgress(progress), true
 }
 
-func capRunningTransferProgress(progress int) int {
-	if progress > 99 {
-		progress = 99
+func clampRsyncProgress(progress int) int {
+	if progress > 100 {
+		progress = 100
 	}
 	if progress < 0 {
 		progress = 0
 	}
 	return progress
+}
+
+func mapRsyncProgress(raw int, processDone bool) (phase string, displayed int) {
+	raw = clampRsyncProgress(raw)
+	if processDone {
+		return TransferPhaseSucceeded, 100
+	}
+	switch {
+	case raw == 0:
+		return TransferPhasePreparing, 0
+	case raw >= 100:
+		return TransferPhaseFinalizing, 99
+	default:
+		displayed = (raw*95 + 49) / 99
+		if displayed < 1 {
+			displayed = 1
+		}
+		if displayed > 95 {
+			displayed = 95
+		}
+		return TransferPhaseTransferring, displayed
+	}
 }

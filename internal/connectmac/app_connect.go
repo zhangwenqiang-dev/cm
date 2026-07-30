@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type TunnelStartResult struct {
@@ -20,27 +21,54 @@ func (r TunnelStartResult) existingLiveStateConflict(pid int) TunnelStartResult 
 }
 
 func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	profile, ok := requireProfileArg(a.Err, cfg, args)
 	if !ok {
 		return 2
 	}
 	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateAndSummarize(profile) {
+		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: "validation_error"})
 		return 1
 	}
 	sshArgs, err := SSHArgs(profile)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
+		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "ssh.attempted", profile, 0, startedAt, LogEntry{Phase: "attempted"})
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
 		fmt.Fprintf(a.Err, "ssh failed: %v\n", err)
+		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "ssh.succeeded", profile, 0, startedAt, LogEntry{Phase: "closed"})
 	return 0
 }
 func (a App) runStart(ctx context.Context, cfg Config, args []string) int {
-	code, _ := a.runStartResult(ctx, cfg, args)
+	startedAt := time.Now()
+	code, result := a.runStartResult(ctx, cfg, args)
+	profile := Profile{}
+	if len(args) == 1 {
+		profile, _ = cfg.Profile(args[0])
+	}
+	action := "tunnel.failed"
+	if code == 0 {
+		switch result.Action {
+		case "reused":
+			action = "tunnel.reused"
+		case "restarted":
+			action = "tunnel.replaced"
+		default:
+			action = "tunnel.started"
+		}
+	}
+	a.logLocalCommand(ctx, action, profile, code, startedAt, LogEntry{
+		TunnelAction: result.Action,
+		PID:          result.PID,
+		LocalPorts:   result.LocalPorts,
+	})
 	return code
 }
 
@@ -200,6 +228,7 @@ func profileLocalPorts(profile Profile) []int {
 	return ports
 }
 func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) != 1 {
 		fmt.Fprintln(a.Err, "usage: cm ssh <profile>")
 		return 2
@@ -213,18 +242,23 @@ func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
 	errs := a.Validator.ValidateAccess(profile)
 	if len(errs) > 0 {
 		printErrors(a.Err, errs)
+		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: "validation_error"})
 		return 1
 	}
 	sshArgs, err := InteractiveSSHArgs(profile)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
+		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
 	fmt.Fprintf(a.Out, "SSH: %s@%s\n", profile.User, profile.Host)
+	a.logLocalCommand(ctx, "ssh.attempted", profile, 0, startedAt, LogEntry{Phase: "attempted"})
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
 		fmt.Fprintf(a.Err, "ssh failed: %v\n", err)
+		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "ssh.succeeded", profile, 0, startedAt, LogEntry{Phase: "closed"})
 	return 0
 }
 func (a App) runExec(ctx context.Context, cfg Config, args []string) int {
@@ -260,6 +294,7 @@ func (a App) runExec(ctx context.Context, cfg Config, args []string) int {
 	return 0
 }
 func (a App) runOpenVNC(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) != 1 {
 		fmt.Fprintln(a.Err, "usage: cm open-vnc <profile>")
 		return 2
@@ -272,16 +307,21 @@ func (a App) runOpenVNC(ctx context.Context, cfg Config, args []string) int {
 	target, err := VNCURL(profile)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
+		a.logLocalCommand(ctx, "vnc.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
 	fmt.Fprintf(a.Out, "Opening %s\n", target)
+	a.logLocalCommand(ctx, "vnc.requested", profile, 0, startedAt, LogEntry{Phase: "requested"})
 	if err := a.Runner.OpenVNC(ctx, target); err != nil {
 		fmt.Fprintf(a.Err, "open failed: %v\n", err)
+		a.logLocalCommand(ctx, "vnc.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "vnc.launched", profile, 0, startedAt, LogEntry{Phase: "launched"})
 	return 0
 }
 func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) != 1 {
 		fmt.Fprintln(a.Err, "usage: cm forget-host <profile>")
 		return 2
@@ -298,11 +338,14 @@ func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
 	fmt.Fprintf(a.Out, "Removing known_hosts entries for %s\n", profile.Host)
 	if err := a.Runner.ForgetHost(ctx, profile.Host); err != nil {
 		fmt.Fprintf(a.Err, "ssh-keygen failed: %v\n", err)
+		a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "known-host.forgotten", profile, 0, startedAt, LogEntry{})
 	return 0
 }
 func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) != 2 {
 		fmt.Fprintln(a.Err, "usage: cm host-key <check|fix> <profile>")
 		return 2
@@ -318,23 +361,29 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 		check, err := a.checkHostKey(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "host key check failed: %v\n", err)
+			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 			return 1
 		}
 		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
 		if check.Status == HostKeyScanFailed {
+			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed"})
 			return 1
 		}
+		a.logLocalCommand(ctx, "known-host.checked", profile, 0, startedAt, LogEntry{})
 		return 0
 	case "fix":
 		check, err := a.fixHostKey(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
+			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 			return 1
 		}
 		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
 		if check.Status == HostKeyScanFailed {
+			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed"})
 			return 1
 		}
+		a.logLocalCommand(ctx, "known-host.fixed", profile, 0, startedAt, LogEntry{})
 		return 0
 	default:
 		fmt.Fprintf(a.Err, "unknown host-key command %q\n", action)
@@ -342,9 +391,17 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 	}
 }
 func (a App) runStop(args []string) int {
+	startedAt := time.Now()
 	if len(args) != 1 {
 		fmt.Fprintln(a.Err, "usage: cm stop <profile>")
 		return 2
+	}
+	extra := LogEntry{}
+	if state, ok, err := a.StateManager.Load(args[0]); err == nil && ok {
+		extra.PID = state.PID
+		for _, tunnel := range state.Tunnels {
+			extra.LocalPorts = append(extra.LocalPorts, tunnel.LocalPort)
+		}
 	}
 	code := 0
 	err := a.StateManager.WithProfileLock(args[0], func() error {
@@ -353,9 +410,42 @@ func (a App) runStop(args []string) int {
 	})
 	if err != nil {
 		fmt.Fprintf(a.Err, "lock stop lifecycle: %v\n", err)
+		extra.ErrorCode = classifyOperationalError(err).Code
+		a.logLocalCommand(context.Background(), "tunnel.failed", Profile{Name: args[0]}, 1, startedAt, extra)
 		return 1
 	}
+	action := "tunnel.stopped"
+	if code != 0 {
+		action = "tunnel.failed"
+	}
+	a.logLocalCommand(context.Background(), action, Profile{Name: args[0]}, code, startedAt, extra)
 	return code
+}
+
+func (a App) logLocalCommand(ctx context.Context, action string, profile Profile, code int, startedAt time.Time, extra LogEntry) {
+	op := operationContextFrom(ctx)
+	if op.Source == "local-agent-internal" {
+		return
+	}
+	if op.Source == "" {
+		op.Source = "cli"
+	}
+	extra.Action = action
+	extra.Profile = profile.Name
+	extra.AppleEmail = profile.AWS.AccountEmail
+	extra.RequestID = op.RequestID
+	extra.JobID = op.JobID
+	extra.Source = op.Source
+	extra.DurationMS = time.Since(startedAt).Milliseconds()
+	extra.Outcome = outcomeForCode(code)
+	extra.Message = action
+	if code != 0 {
+		extra.Level = "error"
+		if extra.ErrorCode == "" {
+			extra.ErrorCode = "command_failed"
+		}
+	}
+	a.writeRuntimeLog(extra)
 }
 
 func (a App) runStopLocked(profile string) int {

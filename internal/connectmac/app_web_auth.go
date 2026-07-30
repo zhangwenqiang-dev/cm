@@ -284,6 +284,7 @@ func (a App) webSettingsHandler() http.HandlerFunc {
 			writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"settings": settings}})
 		case http.MethodPost:
 			if _, ok := a.requireWebRoleValue(r, "admin"); !ok {
+				a.recordAuthorizationDenied(r, "administrator role is required")
 				writeWebError(w, http.StatusForbidden, "admin login required")
 				return
 			}
@@ -311,6 +312,7 @@ func (a App) requireWebRole(next http.HandlerFunc, roles ...string) http.Handler
 			return
 		}
 		if _, ok := a.requireWebRoleValue(r, roles...); !ok {
+			a.recordAuthorizationDenied(r, "login or required role is missing")
 			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
 		}

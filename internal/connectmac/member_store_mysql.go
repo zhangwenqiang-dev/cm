@@ -27,9 +27,11 @@ var mysqlTransferColumnNames = []string{
 	"created_at", "started_at", "finished_at", "updated_at",
 }
 
-const mysqlTransferSelectColumns = `id, member_id, member_email, profile_name, COALESCE(apple_email, ''), direction, local_path, remote_path, COALESCE(local_job_id, ''), status, percent, COALESCE(error_summary, ''), created_at, COALESCE(started_at, ''), COALESCE(finished_at, ''), updated_at`
+const mysqlTransferSelectColumns = `id, member_id, member_email, profile_name, COALESCE(apple_email, ''), direction, local_path, remote_path, COALESCE(local_job_id, ''), CONCAT(status, '|', COALESCE(phase, '')), percent, COALESCE(error_summary, ''), created_at, COALESCE(started_at, ''), COALESCE(finished_at, ''), updated_at`
 
 const mysqlTransferInsertQuery = `INSERT INTO cm_transfer_records (id, member_id, member_email, profile_name, apple_email, direction, local_path, remote_path, local_job_id, status, percent, error_summary, created_at, started_at, finished_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+const mysqlTransferInsertWithPhaseQuery = `INSERT INTO cm_transfer_records (id, member_id, member_email, profile_name, apple_email, direction, local_path, remote_path, local_job_id, status, phase, percent, error_summary, created_at, started_at, finished_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 const mysqlTransferListQuery = `SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records WHERE member_id = ? ORDER BY updated_at DESC, id DESC`
 
@@ -38,6 +40,8 @@ const mysqlTransferListByProfileQuery = `SELECT ` + mysqlTransferSelectColumns +
 const mysqlTransferSelectForUpdateQuery = `SELECT ` + mysqlTransferSelectColumns + ` FROM cm_transfer_records WHERE id = ? AND member_id = ? FOR UPDATE`
 
 const mysqlTransferUpdateQuery = `UPDATE cm_transfer_records SET member_email = ?, profile_name = ?, apple_email = ?, direction = ?, local_path = ?, remote_path = ?, local_job_id = ?, status = ?, percent = ?, error_summary = ?, started_at = ?, finished_at = ?, updated_at = ? WHERE id = ? AND member_id = ?`
+
+const mysqlTransferPhaseUpdateQuery = `UPDATE cm_transfer_records SET phase = ? WHERE id = ? AND member_id = ?`
 
 const mysqlTransferDeleteQuery = `DELETE FROM cm_transfer_records WHERE id = ? AND member_id = ?`
 
@@ -48,8 +52,6 @@ const mysqlReleaseReminderSelectForUpdate = `SELECT ` + mysqlReleaseReminderSele
 const mysqlReleaseReminderInsertQuery = `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 const mysqlReleaseReminderUpdateQuery = `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
-
-const mysqlOperationEventInsertQuery = `INSERT INTO cm_events (id, action, profile, apple_email, member_id, member_email, member_name, confirmed, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 const mysqlProfileOwnerForUpdateQuery = `SELECT o.member_id, COALESCE(m.email, '') FROM cm_profile_owners o LEFT JOIN cm_members m ON m.id = o.member_id WHERE o.profile_name = ? FOR UPDATE`
 
@@ -89,6 +91,24 @@ var mysqlReleaseReminderMigrationStatements = []string{
 var mysqlOperationEventMigrationStatements = []string{
 	`ALTER TABLE cm_events ADD COLUMN member_email VARCHAR(255) NULL`,
 	`ALTER TABLE cm_events ADD COLUMN member_name VARCHAR(255) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN request_id VARCHAR(160) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN job_id VARCHAR(160) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN source VARCHAR(64) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN phase VARCHAR(64) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN target_member_email VARCHAR(255) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN error_code VARCHAR(128) NULL`,
+	`ALTER TABLE cm_events ADD COLUMN duration_ms BIGINT NOT NULL DEFAULT 0`,
+}
+
+var mysqlTransferMigrationStatements = []string{
+	`ALTER TABLE cm_transfer_records ADD COLUMN phase VARCHAR(32) NOT NULL DEFAULT ''`,
+}
+
+var mysqlOperationEventIndexStatements = []string{
+	`CREATE INDEX idx_cm_events_apple_created_id ON cm_events (apple_email, created_at, id)`,
+	`CREATE INDEX idx_cm_events_profile_created_id ON cm_events (profile, created_at, id)`,
+	`CREATE INDEX idx_cm_events_member_email_created_id ON cm_events (member_email, created_at, id)`,
+	`CREATE INDEX idx_cm_events_created_id ON cm_events (created_at, id)`,
 }
 
 type mysqlSchemaGuard struct {
@@ -192,6 +212,11 @@ func mysqlColumnExistsError(err error) bool {
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1060
 }
 
+func mysqlIndexExistsError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1061
+}
+
 func (s MySQLMemberStore) EnsureSchema() error {
 	s = s.normalize()
 	return s.schemaGuard.run(s.ensureSchema)
@@ -214,8 +239,14 @@ func (s MySQLMemberStore) ensureSchema() error {
 	}
 	migrations = append(migrations, mysqlReleaseReminderMigrationStatements...)
 	migrations = append(migrations, mysqlOperationEventMigrationStatements...)
+	migrations = append(migrations, mysqlTransferMigrationStatements...)
 	for _, stmt := range migrations {
 		if _, err := db.Exec(stmt); err != nil && !mysqlColumnExistsError(err) {
+			return err
+		}
+	}
+	for _, stmt := range mysqlOperationEventIndexStatements {
+		if _, err := db.Exec(stmt); err != nil && !mysqlIndexExistsError(err) {
 			return err
 		}
 	}
@@ -308,6 +339,7 @@ func mysqlSchemaStatements() []string {
 			remote_path TEXT NOT NULL,
 			local_job_id VARCHAR(255) NULL,
 			status VARCHAR(32) NOT NULL,
+			phase VARCHAR(32) NOT NULL DEFAULT '',
 			percent INT NOT NULL DEFAULT 0,
 			error_summary TEXT NULL,
 			created_at VARCHAR(64) NOT NULL,
@@ -330,12 +362,23 @@ func mysqlSchemaStatements() []string {
 			member_id VARCHAR(128) NULL,
 			member_email VARCHAR(255) NULL,
 			member_name VARCHAR(255) NULL,
+			request_id VARCHAR(160) NULL,
+			job_id VARCHAR(160) NULL,
+			source VARCHAR(64) NULL,
+			phase VARCHAR(64) NULL,
+			target_member_email VARCHAR(255) NULL,
+			error_code VARCHAR(128) NULL,
+			duration_ms BIGINT NOT NULL DEFAULT 0,
 			confirmed BOOLEAN NOT NULL DEFAULT FALSE,
 			status VARCHAR(64) NOT NULL,
 			message TEXT NULL,
 			created_at VARCHAR(64) NOT NULL,
 			INDEX idx_cm_events_apple_email_created_at (apple_email, created_at),
-			INDEX idx_cm_events_created_at (created_at)
+			INDEX idx_cm_events_created_at (created_at),
+			INDEX idx_cm_events_apple_created_id (apple_email, created_at, id),
+			INDEX idx_cm_events_profile_created_id (profile, created_at, id),
+			INDEX idx_cm_events_member_email_created_id (member_email, created_at, id),
+			INDEX idx_cm_events_created_id (created_at, id)
 		) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
 	}
 }
@@ -489,21 +532,6 @@ func (s MySQLMemberStore) Load() (MemberData, error) {
 	if err := rows.Close(); err != nil {
 		return MemberData{}, err
 	}
-	rows, err = db.Query(`SELECT id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), COALESCE(member_email, ''), COALESCE(member_name, ''), confirmed, status, COALESCE(message, ''), created_at FROM cm_events ORDER BY created_at ASC LIMIT 500`)
-	if err != nil {
-		return MemberData{}, err
-	}
-	for rows.Next() {
-		var event OperationEvent
-		if err := rows.Scan(&event.ID, &event.Action, &event.Profile, &event.AppleEmail, &event.MemberID, &event.MemberEmail, &event.MemberName, &event.Confirmed, &event.Status, &event.Message, &event.CreatedAt); err != nil {
-			rows.Close()
-			return MemberData{}, err
-		}
-		out.Events = append(out.Events, event)
-	}
-	if err := rows.Close(); err != nil {
-		return MemberData{}, err
-	}
 	normalizeMemberData(&out)
 	return out, nil
 }
@@ -587,15 +615,6 @@ func (s MySQLMemberStore) saveUnlocked(data MemberData) error {
 			return err
 		}
 	}
-	if len(data.Events) > 500 {
-		data.Events = data.Events[len(data.Events)-500:]
-	}
-	for _, event := range data.Events {
-		if _, err := tx.Exec(mysqlOperationEventInsertQuery,
-			event.ID, event.Action, event.Profile, event.AppleEmail, event.MemberID, event.MemberEmail, event.MemberName, event.Confirmed, event.Status, event.Message, event.CreatedAt); err != nil {
-			return err
-		}
-	}
 	if err := advanceMySQLStoreLock(storeTx); err != nil {
 		return err
 	}
@@ -620,6 +639,7 @@ func (s MySQLMemberStore) CreateTransferRecord(memberID string, record TransferR
 	record.AppleEmail = normalizeEmail(record.AppleEmail)
 	record.Direction = strings.TrimSpace(strings.ToLower(record.Direction))
 	record.Status = strings.TrimSpace(strings.ToLower(record.Status))
+	record.Phase = strings.TrimSpace(strings.ToLower(record.Phase))
 	if err := validateTransferRecord(record); err != nil {
 		return TransferRecord{}, err
 	}
@@ -1046,6 +1066,14 @@ func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releas
 }
 
 func (s MySQLMemberStore) CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error) {
+	return s.cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason, nil)
+}
+
+func (s MySQLMemberStore) CleanupProfileRecordsAndRecordEvent(profileName, releasedAt, reason string, event OperationEvent) (ReleaseReminder, bool, error) {
+	return s.cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason, &event)
+}
+
+func (s MySQLMemberStore) cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason string, event *OperationEvent) (ReleaseReminder, bool, error) {
 	defer s.lockMutation()()
 	profileName = strings.TrimSpace(profileName)
 	if profileName == "" {
@@ -1066,12 +1094,13 @@ func (s MySQLMemberStore) CleanupProfileRecords(profileName, releasedAt, reason 
 	if releasedAt == "" {
 		releasedAt = s.currentTime().Format(time.RFC3339)
 	}
-	return cleanupProfileRecordsInMySQLTransaction(
+	return cleanupProfileRecordsAndMaybeEventInMySQLTransaction(
 		sqlMySQLReleaseReminderTransaction{tx: tx},
 		profileName,
 		releasedAt,
 		reason,
 		s.currentTime(),
+		event,
 	)
 }
 
@@ -1200,7 +1229,7 @@ func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (resu
 		}
 		data.TransferRecords = transferRecords
 	}
-	for _, table := range []string{"cm_events", "cm_transfer_records", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
+	for _, table := range []string{"cm_transfer_records", "cm_release_reminders", "cm_profile_members", "cm_profiles", "cm_profile_owners", "cm_assignments", "cm_members", "cm_settings"} {
 		if err := tx.Exec("DELETE FROM " + table); err != nil {
 			return MemberData{}, err
 		}
@@ -1209,6 +1238,12 @@ func prepareMySQLWholeStoreSave(tx mysqlStoreTransaction, data MemberData) (resu
 }
 
 func insertMySQLTransferRecord(execer mysqlReleaseReminderExecer, record TransferRecord) error {
+	if record.Phase != "" {
+		return execer.Exec(mysqlTransferInsertWithPhaseQuery,
+			record.ID, record.MemberID, record.MemberEmail, record.ProfileName, record.AppleEmail,
+			record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status,
+			record.Phase, record.Percent, record.ErrorSummary, record.CreatedAt, record.StartedAt, record.FinishedAt, record.UpdatedAt)
+	}
 	return execer.Exec(mysqlTransferInsertQuery,
 		record.ID, record.MemberID, record.MemberEmail, record.ProfileName, record.AppleEmail,
 		record.Direction, record.LocalPath, record.RemotePath, record.LocalJobID, record.Status,
@@ -1261,9 +1296,6 @@ func updateTransferRecordInMySQLTransaction(tx mysqlReleaseReminderTransaction, 
 		}
 		return TransferRecord{}, err
 	}
-	if isTerminalTransferStatus(current.Status) {
-		return TransferRecord{}, errors.New("terminal transfer record cannot be updated")
-	}
 	if current.LocalJobID != "" && current.LocalJobID != localJobID {
 		return TransferRecord{}, ErrTransferRecordNotFound
 	}
@@ -1290,8 +1322,20 @@ func updateTransferRecordInMySQLTransaction(tx mysqlReleaseReminderTransaction, 
 	}
 	updated.Direction = strings.TrimSpace(strings.ToLower(updated.Direction))
 	updated.Status = strings.TrimSpace(strings.ToLower(updated.Status))
+	updated.Phase = strings.TrimSpace(strings.ToLower(updated.Phase))
+	updated.ErrorSummary = strings.TrimSpace(updated.ErrorSummary)
 	if err = validateTransferRecord(updated); err != nil {
 		return TransferRecord{}, err
+	}
+	if isTerminalTransferStatus(current.Status) {
+		if !terminalTransferSemanticallyEqual(current, updated) {
+			return TransferRecord{}, errors.New("terminal transfer record cannot be updated")
+		}
+		if err = tx.Commit(); err != nil {
+			return TransferRecord{}, err
+		}
+		committed = true
+		return current, nil
 	}
 	if updated.Percent < current.Percent {
 		return TransferRecord{}, errors.New("transfer percent cannot regress")
@@ -1307,6 +1351,11 @@ func updateTransferRecordInMySQLTransaction(tx mysqlReleaseReminderTransaction, 
 		updated.Percent, updated.ErrorSummary, updated.StartedAt, updated.FinishedAt, updated.UpdatedAt,
 		recordID, memberID); err != nil {
 		return TransferRecord{}, err
+	}
+	if updated.Phase != "" {
+		if err = tx.Exec(mysqlTransferPhaseUpdateQuery, updated.Phase, recordID, memberID); err != nil {
+			return TransferRecord{}, err
+		}
 	}
 	if err = advanceMySQLStoreLock(tx); err != nil {
 		return TransferRecord{}, err
@@ -1469,20 +1518,7 @@ func setProfileOwnerAndRecordEventInMySQLTransaction(tx mysqlReleaseReminderTran
 		return PublicProfileOwner{}, err
 	}
 	normalized := data.Events[0]
-	if err = tx.Exec(
-		mysqlOperationEventInsertQuery,
-		normalized.ID,
-		normalized.Action,
-		normalized.Profile,
-		normalized.AppleEmail,
-		normalized.MemberID,
-		normalized.MemberEmail,
-		normalized.MemberName,
-		normalized.Confirmed,
-		normalized.Status,
-		normalized.Message,
-		normalized.CreatedAt,
-	); err != nil {
+	if err = tx.Exec(mysqlOperationEventInsertQuery, operationEventInsertArgs(normalized)...); err != nil {
 		return PublicProfileOwner{}, err
 	}
 	if err = advanceMySQLStoreLock(tx); err != nil {
@@ -1541,7 +1577,7 @@ func updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx mysqlReleaseR
 			return ReleaseReminder{}, err
 		}
 		normalized := data.Events[0]
-		if err = tx.Exec(mysqlOperationEventInsertQuery, normalized.ID, normalized.Action, normalized.Profile, normalized.AppleEmail, normalized.MemberID, normalized.MemberEmail, normalized.MemberName, normalized.Confirmed, normalized.Status, normalized.Message, normalized.CreatedAt); err != nil {
+		if err = tx.Exec(mysqlOperationEventInsertQuery, operationEventInsertArgs(normalized)...); err != nil {
 			return ReleaseReminder{}, err
 		}
 	}
@@ -1556,6 +1592,10 @@ func updateReleaseReminderAndMaybeRecordEventInMySQLTransaction(tx mysqlReleaseR
 }
 
 func cleanupProfileRecordsInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName, releasedAt, reason string, now time.Time) (reminder ReleaseReminder, changed bool, err error) {
+	return cleanupProfileRecordsAndMaybeEventInMySQLTransaction(tx, profileName, releasedAt, reason, now, nil)
+}
+
+func cleanupProfileRecordsAndMaybeEventInMySQLTransaction(tx mysqlReleaseReminderTransaction, profileName, releasedAt, reason string, now time.Time, explicitEvent *OperationEvent) (reminder ReleaseReminder, changed bool, err error) {
 	committed := false
 	defer func() {
 		if committed {
@@ -1609,14 +1649,27 @@ func cleanupProfileRecordsInMySQLTransaction(tx mysqlReleaseReminderTransaction,
 			return ReleaseReminder{}, false, err
 		}
 	}
-	eventData := MemberData{}
-	event := cleanupProfileRecordsEvent(reminder, reminderFound, ownerChanged, reminderChanged, reason)
-	if err = appendOperationEvent(&eventData, event, now.Format(time.RFC3339)); err != nil {
-		return ReleaseReminder{}, false, err
-	}
-	normalized := eventData.Events[0]
-	if err = tx.Exec(mysqlOperationEventInsertQuery, normalized.ID, normalized.Action, normalized.Profile, normalized.AppleEmail, normalized.MemberID, normalized.MemberEmail, normalized.MemberName, normalized.Confirmed, normalized.Status, normalized.Message, normalized.CreatedAt); err != nil {
-		return ReleaseReminder{}, false, err
+	if explicitEvent != nil {
+		eventData := MemberData{}
+		event := *explicitEvent
+		event.Profile = reminder.ProfileName
+		event.AppleEmail = reminder.AppleEmail
+		if err = appendOperationEvent(&eventData, event, now.Format(time.RFC3339)); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		if err = tx.Exec(mysqlOperationEventInsertQuery, operationEventInsertArgs(eventData.Events[0])...); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+	} else if shouldRecordAutomaticCleanupEvent(reason) {
+		eventData := MemberData{}
+		event := cleanupProfileRecordsEvent(reminder, reminderFound, ownerChanged, reminderChanged, reason)
+		if err = appendOperationEvent(&eventData, event, now.Format(time.RFC3339)); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		normalized := eventData.Events[0]
+		if err = tx.Exec(mysqlOperationEventInsertQuery, operationEventInsertArgs(normalized)...); err != nil {
+			return ReleaseReminder{}, false, err
+		}
 	}
 	if err = advanceMySQLStoreLock(tx); err != nil {
 		return ReleaseReminder{}, false, err
@@ -1716,12 +1769,12 @@ func (s MySQLMemberStore) EnsureAuthSecret() (string, error) {
 }
 
 func (s MySQLMemberStore) RecordEvent(event OperationEvent) error {
-	defer s.lockMutation()()
-	return recordEventInStore(s.unlocked(), event)
+	return s.insertEvent(event)
 }
 
 func (s MySQLMemberStore) RecentEvents(appleEmail string, limit int) ([]OperationEvent, error) {
-	return recentEventsInStore(s, appleEmail, limit)
+	page, err := s.QueryEvents(EventQuery{AppleEmail: appleEmail, Limit: limit, IncludeSystem: true})
+	return page.Events, err
 }
 
 func (s MySQLMemberStore) currentTime() time.Time {
@@ -1733,7 +1786,7 @@ type mysqlReleaseReminderScanner interface {
 }
 
 func scanMySQLTransferRecord(scanner mysqlReleaseReminderScanner, record *TransferRecord) error {
-	return scanner.Scan(
+	if err := scanner.Scan(
 		&record.ID,
 		&record.MemberID,
 		&record.MemberEmail,
@@ -1750,7 +1803,32 @@ func scanMySQLTransferRecord(scanner mysqlReleaseReminderScanner, record *Transf
 		&record.StartedAt,
 		&record.FinishedAt,
 		&record.UpdatedAt,
-	)
+	); err != nil {
+		return err
+	}
+	if status, phase, ok := strings.Cut(record.Status, "|"); ok {
+		record.Status = status
+		record.Phase = phase
+	}
+	return nil
+}
+
+func inferredTransferPhase(status string, percent int) string {
+	switch status {
+	case TransferStatusSucceeded:
+		return TransferPhaseSucceeded
+	case TransferStatusFailed:
+		return TransferPhaseFailed
+	case TransferStatusInterrupted, TransferStatusUnconfirmed:
+		return TransferPhaseInterrupted
+	}
+	if percent >= 99 {
+		return TransferPhaseFinalizing
+	}
+	if percent > 0 {
+		return TransferPhaseTransferring
+	}
+	return TransferPhasePreparing
 }
 
 func scanMySQLReleaseReminder(scanner mysqlReleaseReminderScanner, reminder *ReleaseReminder) error {

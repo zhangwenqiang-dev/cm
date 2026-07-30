@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+const (
+	webAWSLifecycleNotificationClaimLease  = 5 * time.Minute
+	webAWSLifecycleNotificationMaxAttempts = 5
+)
+
+var webAWSLifecycleNotificationBackoff = [...]time.Duration{
+	time.Minute,
+	5 * time.Minute,
+	15 * time.Minute,
+	30 * time.Minute,
+}
+
 func awsLifecycleOpenReady(status AWSStatus) bool {
 	return AWSStatusReady(status)
 }
@@ -37,13 +49,22 @@ func (a App) reconcileWebAWSLifecycles(ctx context.Context, configPath string) e
 }
 
 func webAWSLifecycleJobParticipates(job Job) bool {
-	if job.LifecycleState == "" || job.LifecycleState == JobLifecycleFailed {
+	if job.LifecycleState == "" {
 		return false
 	}
 	if job.Type != "aws-open" && job.Type != "aws-destroy" {
 		return false
 	}
-	return job.LifecycleState != JobLifecycleFinalized || job.LifecycleNotifiedAt.IsZero()
+	if job.LifecycleState == JobLifecycleFailed {
+		return job.LifecycleEventRecordedAt.IsZero()
+	}
+	if job.LifecycleState != JobLifecycleFinalized {
+		return true
+	}
+	if !job.LifecycleNotifiedAt.IsZero() {
+		return false
+	}
+	return true
 }
 
 func (a App) reconcileWebAWSLifecycleJob(ctx context.Context, configPath string, job Job) error {
@@ -75,6 +96,11 @@ func (a App) reconcileWebAWSLifecycleJobLocked(ctx context.Context, configPath s
 		return nil
 	}
 	if job.Status == JobStatusFailed || job.Status == JobStatusInterrupted {
+		if job.LifecycleEventRecordedAt.IsZero() {
+			if err := a.recordWebAWSLifecycleTerminal(job, false); err != nil {
+				return err
+			}
+		}
 		_, err := a.JobManager.Update(job.ID, func(current Job) (Job, error) {
 			if current.LifecycleState == JobLifecycleFinalized {
 				return current, nil
@@ -83,6 +109,9 @@ func (a App) reconcileWebAWSLifecycleJobLocked(ctx context.Context, configPath s
 			current.LifecycleError = strings.TrimSpace(current.LastError)
 			if current.LifecycleError == "" {
 				current.LifecycleError = string(current.Status)
+			}
+			if current.LifecycleEventRecordedAt.IsZero() {
+				current.LifecycleEventRecordedAt = time.Now()
 			}
 			return current, nil
 		})
@@ -104,6 +133,20 @@ func (a App) reconcileWebAWSLifecycleJobLocked(ctx context.Context, configPath s
 		return err
 	}
 	if current.LifecycleState == JobLifecycleFinalized {
+		if current.LifecycleEventRecordedAt.IsZero() {
+			if err := a.recordWebAWSLifecycleTerminal(current, true); err != nil {
+				return err
+			}
+			current, err = a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
+				if latest.LifecycleEventRecordedAt.IsZero() {
+					latest.LifecycleEventRecordedAt = time.Now()
+				}
+				return latest, nil
+			})
+			if err != nil {
+				return err
+			}
+		}
 		return a.notifyFinalizedWebAWSLifecycle(current, profile, ReleaseReminder{})
 	}
 	_, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false})
@@ -135,10 +178,14 @@ func (a App) reconcileWebAWSLifecycleJobLocked(ctx context.Context, configPath s
 		if err != nil {
 			return a.recordWebAWSLifecycleRetry(job.ID, err)
 		}
+		if err := a.recordWebAWSLifecycleTerminal(current, true); err != nil {
+			return err
+		}
 		current, err = a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
 			if latest.LifecycleState != JobLifecycleFinalized {
 				latest.LifecycleState = JobLifecycleFinalized
 				latest.LifecycleFinalizedAt = time.Now()
+				latest.LifecycleEventRecordedAt = latest.LifecycleFinalizedAt
 				latest.LifecycleError = ""
 			}
 			return latest, nil
@@ -148,6 +195,55 @@ func (a App) reconcileWebAWSLifecycleJobLocked(ctx context.Context, configPath s
 		}
 	}
 	return a.notifyFinalizedWebAWSLifecycle(current, profile, reminder)
+}
+
+func (a App) recordWebAWSLifecycleTerminal(job Job, success bool) error {
+	actionPrefix := "aws.open"
+	phase := "ready"
+	if job.Type == "aws-destroy" {
+		actionPrefix = "aws.release"
+		phase = "stopped"
+	}
+	status := "success"
+	errorCode := ""
+	message := ""
+	if !success {
+		phase = "failed"
+		status = "failed"
+		message = strings.TrimSpace(job.LastError)
+		if message == "" {
+			message = string(job.Status)
+		}
+		errorCode = strings.TrimSpace(job.ErrorCode)
+		if errorCode == "" {
+			errorCode = classifyOperationalError(errors.New(message)).Code
+		}
+	}
+	duration := time.Since(job.StartedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	if success && job.Type == "aws-destroy" {
+		message = "eip_retained=true"
+	}
+	return a.MemberStore.RecordEvent(OperationEvent{
+		ID:          "event-" + job.ID + "-" + phase,
+		Action:      actionPrefix + "." + phase,
+		Profile:     job.Profile,
+		AppleEmail:  job.AppleEmail,
+		MemberID:    job.ActorMemberID,
+		MemberEmail: job.ActorEmail,
+		MemberName:  job.ActorName,
+		RequestID:   job.RequestID,
+		JobID:       job.ID,
+		Source:      job.Source,
+		Phase:       phase,
+		ErrorCode:   errorCode,
+		DurationMS:  duration.Milliseconds(),
+		Confirmed:   true,
+		Status:      status,
+		Message:     message,
+	})
 }
 
 func (a App) hasNewerWebAWSLifecycleJob(current Job) (bool, error) {
@@ -195,12 +291,60 @@ func (a App) notifyFinalizedWebAWSLifecycle(job Job, profile Profile, reminder R
 		event, description = "open", "Mac 打开确认成功"
 		operator = reminder.OwnerName
 	}
+	now := a.JobManager.normalize().Now()
+	fingerprint := wechatWebhookConfigFingerprint(os.Getenv(envWechatWebhookURL))
+	if job.LifecycleNotifyConfigFingerprint == "" {
+		job, err = a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
+			if !latest.LifecycleNotifiedAt.IsZero() {
+				return latest, nil
+			}
+			latest.LifecycleNotifyConfigFingerprint = fingerprint
+			return latest, nil
+		})
+		if err != nil {
+			return err
+		}
+	} else if job.LifecycleNotifyConfigFingerprint != fingerprint && !job.LifecycleNotifyExhaustedAt.IsZero() {
+		job, err = a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
+			if !latest.LifecycleNotifiedAt.IsZero() || latest.LifecycleNotifyExhaustedAt.IsZero() {
+				return latest, nil
+			}
+			latest.LifecycleNotifyConfigFingerprint = fingerprint
+			latest.LifecycleNotifyAttempts = 0
+			latest.LifecycleNotifyNextAttemptAt = time.Time{}
+			latest.LifecycleNotifyExhaustedAt = time.Time{}
+			latest.LifecycleNotifyFailureRecordedAt = time.Time{}
+			latest.LifecycleNotifyClaimedAt = time.Time{}
+			latest.LifecycleError = ""
+			return latest, nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if !job.LifecycleNotifyNextAttemptAt.IsZero() && now.Before(job.LifecycleNotifyNextAttemptAt) {
+		return nil
+	}
+	if !job.LifecycleNotifyExhaustedAt.IsZero() {
+		return a.ensureWebAWSLifecycleNotificationFailureRecorded(job, event, WechatNotifyResult{}, errors.New(job.LifecycleError))
+	}
 	didClaim := false
 	claimed, err := a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
-		if !latest.LifecycleNotifiedAt.IsZero() || !latest.LifecycleNotifyClaimedAt.IsZero() {
+		if !latest.LifecycleNotifiedAt.IsZero() || !latest.LifecycleNotifyExhaustedAt.IsZero() {
 			return latest, nil
 		}
-		latest.LifecycleNotifyClaimedAt = time.Now()
+		if !latest.LifecycleNotifyClaimedAt.IsZero() &&
+			now.Sub(latest.LifecycleNotifyClaimedAt) < webAWSLifecycleNotificationClaimLease {
+			return latest, nil
+		}
+		if latest.LifecycleNotifyAttempts >= webAWSLifecycleNotificationMaxAttempts {
+			latest.LifecycleNotifyExhaustedAt = now
+			latest.LifecycleNotifyClaimedAt = time.Time{}
+			return latest, nil
+		}
+		latest.LifecycleNotifyClaimedAt = now
+		latest.LifecycleNotifyAttempts++
+		latest.LifecycleNotifyNextAttemptAt = time.Time{}
 		latest.LifecycleError = ""
 		didClaim = true
 		return latest, nil
@@ -209,22 +353,49 @@ func (a App) notifyFinalizedWebAWSLifecycle(job Job, profile Profile, reminder R
 		return err
 	}
 	if !didClaim {
+		if !claimed.LifecycleNotifyExhaustedAt.IsZero() {
+			return a.ensureWebAWSLifecycleNotificationFailureRecorded(claimed, event, WechatNotifyResult{}, errors.New(claimed.LifecycleError))
+		}
 		return nil
 	}
-	if err := a.notifyWebAWSLifecycle(event, reminder, operator, description); err != nil {
-		cause := fmt.Errorf("notify lifecycle success: %w", err)
-		_, clearErr := a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
+	deliveryContext, result, notifyErr := a.notifyWebAWSLifecycleObserved(claimed, event, reminder, operator, description)
+	if notifyErr != nil {
+		cause := errors.New(redactWechatWebhookURL(fmt.Sprintf("notify lifecycle success: %v", notifyErr)))
+		configurationFailure := result.Skipped || errors.Is(notifyErr, errWechatWebhookNotConfigured)
+		exhausted := configurationFailure || claimed.LifecycleNotifyAttempts >= webAWSLifecycleNotificationMaxAttempts
+		updated, clearErr := a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
 			if latest.LifecycleNotifiedAt.IsZero() && latest.LifecycleNotifyClaimedAt.Equal(claimed.LifecycleNotifyClaimedAt) {
 				latest.LifecycleNotifyClaimedAt = time.Time{}
 				latest.LifecycleError = cause.Error()
+				if exhausted {
+					latest.LifecycleNotifyExhaustedAt = now
+					latest.LifecycleNotifyNextAttemptAt = time.Time{}
+				} else {
+					latest.LifecycleNotifyNextAttemptAt = now.Add(
+						webAWSLifecycleNotificationBackoff[claimed.LifecycleNotifyAttempts-1],
+					)
+				}
 			}
 			return latest, nil
 		})
-		return errors.Join(cause, clearErr)
+		if clearErr != nil {
+			return errors.Join(cause, clearErr)
+		}
+		if exhausted {
+			recordErr := a.ensureWebAWSLifecycleNotificationFailureRecorded(updated, event, result, cause)
+			return errors.Join(cause, recordErr)
+		}
+		retryErr := a.recordWechatDeliveryState(deliveryContext, "retrying", result, cause)
+		return errors.Join(cause, retryErr)
+	}
+	if err := a.recordWechatDeliveryState(deliveryContext, "sent", result, nil); err != nil {
+		return err
 	}
 	_, err = a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
 		if latest.LifecycleNotifiedAt.IsZero() && latest.LifecycleNotifyClaimedAt.Equal(claimed.LifecycleNotifyClaimedAt) {
-			latest.LifecycleNotifiedAt = time.Now()
+			latest.LifecycleNotifiedAt = now
+			latest.LifecycleNotifyClaimedAt = time.Time{}
+			latest.LifecycleNotifyNextAttemptAt = time.Time{}
 			latest.LifecycleError = ""
 		}
 		return latest, nil
@@ -371,4 +542,80 @@ func (a App) notifyWebAWSLifecycle(event string, reminder ReleaseReminder, opera
 		return a.WebAWSLifecycleNotifier(event, reminder, operator, description)
 	}
 	return a.notifyReleaseReminder(event, reminder, operator, description)
+}
+
+func (a App) notifyWebAWSLifecycleObserved(job Job, event string, reminder ReleaseReminder, operator, description string) (wechatDeliveryContext, WechatNotifyResult, error) {
+	deliveryContext := wechatDeliveryContext{
+		RequestID:   job.RequestID,
+		JobID:       job.ID,
+		Profile:     job.Profile,
+		AppleEmail:  job.AppleEmail,
+		Source:      job.Source,
+		Event:       event,
+		DeliveryKey: job.LifecycleNotifyConfigFingerprint,
+		Actor: AuditActor{
+			MemberID:    job.ActorMemberID,
+			MemberEmail: job.ActorEmail,
+			MemberName:  job.ActorName,
+		},
+		Attempt: job.LifecycleNotifyAttempts,
+	}
+	notification := WechatNotification{
+		Event:         event,
+		Profile:       reminder.ProfileName,
+		AppleEmail:    reminder.AppleEmail,
+		Owner:         displayNameEmail(reminder.OwnerName, reminder.OwnerEmail),
+		Operator:      operator,
+		HostID:        reminder.HostID,
+		HostCreatedAt: reminder.HostCreatedAt,
+		DueAt:         reminder.ReleaseDueAt,
+		Management:    true,
+		Description:   description,
+	}
+	send := func() (WechatNotifyResult, error) {
+		if a.WebAWSLifecycleNotifier != nil {
+			err := a.WebAWSLifecycleNotifier(event, reminder, operator, description)
+			return WechatNotifyResult{}, err
+		}
+		return NewWechatNotifierFromEnv().Send(notification)
+	}
+	// WeChat exposes no idempotency key. Persist pending immediately before the
+	// HTTP call and sent immediately after it to keep the unavoidable at-least-once window minimal.
+	result, err := a.attemptWechatNotification(deliveryContext, send)
+	return deliveryContext, result, err
+}
+
+func (a App) ensureWebAWSLifecycleNotificationFailureRecorded(job Job, event string, result WechatNotifyResult, cause error) error {
+	if !job.LifecycleNotifyFailureRecordedAt.IsZero() {
+		return nil
+	}
+	deliveryContext := wechatDeliveryContext{
+		RequestID:   job.RequestID,
+		JobID:       job.ID,
+		Profile:     job.Profile,
+		AppleEmail:  job.AppleEmail,
+		Source:      job.Source,
+		Event:       event,
+		DeliveryKey: job.LifecycleNotifyConfigFingerprint,
+		Actor: AuditActor{
+			MemberID:    job.ActorMemberID,
+			MemberEmail: job.ActorEmail,
+			MemberName:  job.ActorName,
+		},
+		Attempt: job.LifecycleNotifyAttempts,
+	}
+	if cause == nil || strings.TrimSpace(cause.Error()) == "" {
+		cause = errors.New("notification attempts exhausted")
+	}
+	if err := a.recordWechatDeliveryState(deliveryContext, "failed", result, cause); err != nil {
+		return err
+	}
+	now := a.JobManager.normalize().Now()
+	_, err := a.JobManager.Update(job.ID, func(latest Job) (Job, error) {
+		if latest.LifecycleNotifyFailureRecordedAt.IsZero() {
+			latest.LifecycleNotifyFailureRecordedAt = now
+		}
+		return latest, nil
+	})
+	return err
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -161,6 +162,125 @@ func TestWebAWSLifecycleRepeatedScanIsIdempotent(t *testing.T) {
 	if firstReminder.CreatedAt != secondReminder.CreatedAt || firstReminder.ReleaseDueAt != secondReminder.ReleaseDueAt {
 		t.Fatalf("reminder changed across repeated scan: first=%+v second=%+v", firstReminder, secondReminder)
 	}
+	events, err := app.MemberStore.RecentEvents("user@example.com", 20)
+	if err != nil {
+		t.Fatalf("recent events: %v", err)
+	}
+	readyEvents := 0
+	for _, event := range events {
+		if event.Action != "aws.open.ready" {
+			continue
+		}
+		readyEvents++
+		if event.RequestID != job.RequestID || event.JobID != job.ID ||
+			event.MemberEmail != job.ActorEmail || event.DurationMS <= 0 {
+			t.Fatalf("ready event correlation = %+v, job = %+v", event, job)
+		}
+	}
+	if readyEvents != 1 {
+		t.Fatalf("ready events = %d, events = %+v", readyEvents, events)
+	}
+}
+
+func TestWebAWSLifecycleFailedEventIsRecordedExactlyOnce(t *testing.T) {
+	for _, status := range []JobStatus{JobStatusFailed, JobStatusInterrupted} {
+		t.Run(string(status), func(t *testing.T) {
+			app, configPath := newWebAWSLifecycleTestApp(t)
+			job := createWebAWSLifecycleJob(t, &app, "destroy", status)
+			if _, err := app.JobManager.Update(job.ID, func(current Job) (Job, error) {
+				current.LastError = "AccessDenied: not authorized"
+				return current, nil
+			}); err != nil {
+				t.Fatalf("update job failure: %v", err)
+			}
+			for range 2 {
+				if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
+					t.Fatalf("reconcile failed lifecycle: %v", err)
+				}
+			}
+			events, err := app.MemberStore.RecentEvents("user@example.com", 20)
+			if err != nil {
+				t.Fatalf("recent events: %v", err)
+			}
+			failed := 0
+			for _, event := range events {
+				if event.Action == "aws.release.failed" {
+					failed++
+					if event.JobID != job.ID || event.RequestID != job.RequestID ||
+						event.ErrorCode != "aws_permission_denied" {
+						t.Fatalf("failed event = %+v, job = %+v", event, job)
+					}
+				}
+			}
+			if failed != 1 {
+				t.Fatalf("failed events = %d, events = %+v", failed, events)
+			}
+		})
+	}
+}
+
+func TestWebAWSLifecycleFailedEventPrefersPersistedJobErrorCode(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusFailed)
+	if _, err := app.JobManager.Update(job.ID, func(current Job) (Job, error) {
+		current.ErrorCode = "host_transition"
+		current.LastError = "AccessDenied: not authorized"
+		return current, nil
+	}); err != nil {
+		t.Fatalf("update failed job: %v", err)
+	}
+	if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
+		t.Fatalf("reconcile failed lifecycle: %v", err)
+	}
+	events, err := app.MemberStore.RecentEvents("user@example.com", 20)
+	if err != nil {
+		t.Fatalf("recent events: %v", err)
+	}
+	for _, event := range events {
+		if event.Action == "aws.open.failed" {
+			if event.ErrorCode != "host_transition" {
+				t.Fatalf("terminal error code = %q, want persisted job code; event=%+v", event.ErrorCode, event)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing aws.open.failed event: %+v", events)
+}
+
+func TestWebAWSLifecycleReleaseStoppedRecordsRetainedEIPOnce(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error { return nil }
+	seedWebAWSLifecycleOwner(t, &app)
+	seedWebAWSLifecycleReminder(t, &app)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: AWSStatus{
+			ElasticIP: ElasticIP{AllocationID: "eipalloc-1", PublicIP: "203.0.113.10"},
+		}}, nil
+	}
+	job := createWebAWSLifecycleJob(t, &app, "destroy", JobStatusSuccess)
+	for range 2 {
+		if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
+			t.Fatalf("reconcile release lifecycle: %v", err)
+		}
+	}
+	events, err := app.MemberStore.RecentEvents("user@example.com", 20)
+	if err != nil {
+		t.Fatalf("recent events: %v", err)
+	}
+	stopped := 0
+	for _, event := range events {
+		if event.Action != "aws.release.stopped" {
+			continue
+		}
+		stopped++
+		if event.JobID != job.ID || event.RequestID != job.RequestID ||
+			event.Message != "eip_retained=true" || event.Status != "success" {
+			t.Fatalf("release stopped event = %+v, job = %+v", event, job)
+		}
+	}
+	if stopped != 1 {
+		t.Fatalf("release stopped events = %d, events = %+v", stopped, events)
+	}
 }
 
 func TestWebAWSLifecycleConcurrentScansClaimNotificationAtMostOnce(t *testing.T) {
@@ -203,13 +323,15 @@ func TestWebAWSLifecycleConcurrentScansClaimNotificationAtMostOnce(t *testing.T)
 	if err != nil {
 		t.Fatalf("load job: %v", err)
 	}
-	if got.LifecycleNotifyClaimedAt.IsZero() || got.LifecycleNotifiedAt.IsZero() {
-		t.Fatalf("notification claim/success not persisted: %+v", got)
+	if !got.LifecycleNotifyClaimedAt.IsZero() || got.LifecycleNotifiedAt.IsZero() || got.LifecycleNotifyAttempts != 1 {
+		t.Fatalf("notification success state not persisted: %+v", got)
 	}
 }
 
 func TestWebAWSLifecycleNotificationFailureClearsClaimForRetry(t *testing.T) {
 	app, configPath := newWebAWSLifecycleTestApp(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	app.JobManager.Now = func() time.Time { return now }
 	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
 		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
 	}
@@ -233,6 +355,10 @@ func TestWebAWSLifecycleNotificationFailureClearsClaimForRetry(t *testing.T) {
 	if !failed.LifecycleNotifyClaimedAt.IsZero() || !failed.LifecycleNotifiedAt.IsZero() {
 		t.Fatalf("returned failure must clear claim for retry: %+v", failed)
 	}
+	if failed.LifecycleNotifyNextAttemptAt.IsZero() {
+		t.Fatalf("returned failure must persist retry time: %+v", failed)
+	}
+	now = failed.LifecycleNotifyNextAttemptAt
 	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
 		t.Fatalf("retry scan: %v", err)
 	}
@@ -242,6 +368,260 @@ func TestWebAWSLifecycleNotificationFailureClearsClaimForRetry(t *testing.T) {
 	}
 	if attempts != 2 || succeeded.LifecycleNotifiedAt.IsZero() {
 		t.Fatalf("attempts=%d job=%+v, want successful retry", attempts, succeeded)
+	}
+	events, err := app.MemberStore.QueryEvents(EventQuery{Profile: job.Profile, IncludeSystem: true, Limit: 50})
+	if err != nil {
+		t.Fatalf("query notification events: %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range events.Events {
+		if event.JobID == job.ID {
+			counts[event.Action]++
+			if event.RequestID != job.RequestID || event.Source == "" {
+				t.Fatalf("notification event missing correlation: %+v", event)
+			}
+			if strings.HasPrefix(event.Action, "wechat.") && !strings.Contains(event.Message, "notification_event=open") {
+				t.Fatalf("notification event missing type: %+v", event)
+			}
+		}
+	}
+	for _, action := range []string{"wechat.pending", "wechat.retrying", "wechat.sent"} {
+		if counts[action] == 0 {
+			t.Fatalf("notification events missing %s: %+v", action, counts)
+		}
+	}
+	if counts["wechat.failed"] != 0 {
+		t.Fatalf("transient lifecycle failure recorded final failed event: %+v", counts)
+	}
+	logCounts := map[string]int{}
+	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		if entry.JobID != job.ID || !strings.HasPrefix(entry.Action, "wechat.") {
+			continue
+		}
+		logCounts[entry.Action]++
+		if entry.RequestID != job.RequestID || entry.Profile != job.Profile || entry.Attempt == 0 {
+			t.Fatalf("notification log missing correlation: %+v", entry)
+		}
+		if entry.Operation != "wechat.notify.open" {
+			t.Fatalf("notification log missing type: %+v", entry)
+		}
+	}
+	for _, action := range []string{"wechat.pending", "wechat.retrying", "wechat.sent"} {
+		if logCounts[action] == 0 {
+			t.Fatalf("notification logs missing %s: %+v", action, logCounts)
+		}
+	}
+	if logCounts["wechat.failed"] != 0 {
+		t.Fatalf("transient lifecycle failure recorded final failed log: %+v", logCounts)
+	}
+}
+
+func TestWebAWSLifecycleNotificationExhaustsAfterPersistedMaximumAttempts(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	app.JobManager.Now = func() time.Time { return now }
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	attempts := 0
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
+		attempts++
+		return errors.New("temporary webhook failure")
+	}
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	for attempt := 1; attempt <= webAWSLifecycleNotificationMaxAttempts; attempt++ {
+		if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err == nil {
+			t.Fatalf("attempt %d should fail", attempt)
+		}
+		current, err := app.JobManager.Load(job.ID)
+		if err != nil {
+			t.Fatalf("load attempt %d: %v", attempt, err)
+		}
+		if current.LifecycleNotifyAttempts != attempt {
+			t.Fatalf("persisted attempts = %d, want %d", current.LifecycleNotifyAttempts, attempt)
+		}
+		if attempt < webAWSLifecycleNotificationMaxAttempts {
+			wantNext := now.Add(webAWSLifecycleNotificationBackoff[attempt-1])
+			if current.LifecycleNotifyNextAttemptAt != wantNext {
+				t.Fatalf("attempt %d next retry = %s, want %s", attempt, current.LifecycleNotifyNextAttemptAt, wantNext)
+			}
+			if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+				t.Fatalf("attempt %d early scan: %v", attempt, err)
+			}
+			if attempts != attempt {
+				t.Fatalf("attempt %d retried before backoff: webhook attempts=%d", attempt, attempts)
+			}
+			now = wantNext
+		} else if !current.LifecycleNotifyNextAttemptAt.IsZero() {
+			t.Fatalf("exhausted notification retained next attempt: %+v", current)
+		}
+	}
+	exhausted, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load exhausted job: %v", err)
+	}
+	if exhausted.LifecycleNotifyExhaustedAt.IsZero() || exhausted.LifecycleNotifyFailureRecordedAt.IsZero() ||
+		!exhausted.LifecycleNotifyClaimedAt.IsZero() || !exhausted.LifecycleNotifiedAt.IsZero() {
+		t.Fatalf("exhausted notification state = %+v", exhausted)
+	}
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+		t.Fatalf("post-exhaustion scan: %v", err)
+	}
+	if attempts != webAWSLifecycleNotificationMaxAttempts {
+		t.Fatalf("webhook attempts = %d, want %d", attempts, webAWSLifecycleNotificationMaxAttempts)
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: job.Profile, IncludeSystem: true, Limit: 100})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	failed, retrying := 0, 0
+	for _, event := range page.Events {
+		if event.JobID != job.ID {
+			continue
+		}
+		switch event.Action {
+		case "wechat.failed":
+			failed++
+			if !strings.Contains(event.Message, "notification_event=open") {
+				t.Fatalf("final failed event missing notification type: %+v", event)
+			}
+		case "wechat.retrying":
+			retrying++
+		}
+	}
+	if failed != 1 || retrying != webAWSLifecycleNotificationMaxAttempts-1 {
+		t.Fatalf("failed=%d retrying=%d events=%+v", failed, retrying, page.Events)
+	}
+}
+
+func TestWebAWSLifecycleWebhookConfigChangeResetsExhaustion(t *testing.T) {
+	t.Setenv(envWechatWebhookURL, "")
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	app.JobManager.Now = func() time.Time { return now }
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err == nil {
+		t.Fatal("missing webhook should exhaust notification")
+	}
+	exhausted, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load exhausted job: %v", err)
+	}
+	if exhausted.LifecycleNotifyConfigFingerprint == "" ||
+		exhausted.LifecycleNotifyConfigFingerprint == os.Getenv(envWechatWebhookURL) {
+		t.Fatalf("configuration fingerprint is missing or not one-way: %+v", exhausted)
+	}
+
+	t.Setenv(envWechatWebhookURL, "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=new-secret")
+	deliveries := 0
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
+		deliveries++
+		return nil
+	}
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+		t.Fatalf("config-change retry: %v", err)
+	}
+	recovered, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load recovered job: %v", err)
+	}
+	if deliveries != 1 || recovered.LifecycleNotifyAttempts != 1 ||
+		!recovered.LifecycleNotifyExhaustedAt.IsZero() ||
+		!recovered.LifecycleNotifyFailureRecordedAt.IsZero() ||
+		recovered.LifecycleNotifiedAt != now {
+		t.Fatalf("config-change recovery = deliveries=%d job=%+v", deliveries, recovered)
+	}
+	if recovered.LifecycleNotifyConfigFingerprint == exhausted.LifecycleNotifyConfigFingerprint ||
+		strings.Contains(recovered.LifecycleNotifyConfigFingerprint, "new-secret") {
+		t.Fatalf("configuration fingerprint did not safely change: before=%q after=%q",
+			exhausted.LifecycleNotifyConfigFingerprint, recovered.LifecycleNotifyConfigFingerprint)
+	}
+}
+
+func TestWebAWSLifecycleMissingWebhookExhaustsWithoutFalseSuccessOrRepeat(t *testing.T) {
+	t.Setenv(envWechatWebhookURL, "")
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err == nil {
+		t.Fatal("missing webhook must fail lifecycle notification")
+	}
+	first, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load failed job: %v", err)
+	}
+	if first.LifecycleNotifyAttempts != 1 || first.LifecycleNotifyExhaustedAt.IsZero() ||
+		first.LifecycleNotifyFailureRecordedAt.IsZero() || !first.LifecycleNotifiedAt.IsZero() ||
+		!first.LifecycleNotifyClaimedAt.IsZero() {
+		t.Fatalf("missing webhook lifecycle state = %+v", first)
+	}
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+		t.Fatalf("repeat exhausted scan: %v", err)
+	}
+	second, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("reload failed job: %v", err)
+	}
+	if second.LifecycleNotifyAttempts != 1 || !second.LifecycleNotifiedAt.IsZero() {
+		t.Fatalf("missing webhook was retried or marked notified: %+v", second)
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: job.Profile, IncludeSystem: true, Limit: 50})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range page.Events {
+		if event.JobID != job.ID {
+			continue
+		}
+		counts[event.Action]++
+		if event.Action == "wechat.failed" && event.ErrorCode != "notification_error" {
+			t.Fatalf("missing webhook error code = %q", event.ErrorCode)
+		}
+	}
+	if counts["wechat.pending"] != 1 || counts["wechat.failed"] != 1 ||
+		counts["wechat.sent"] != 0 || counts["wechat.retrying"] != 0 {
+		t.Fatalf("missing webhook lifecycle events = %+v", counts)
+	}
+	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		if strings.Contains(entry.Message, envWechatWebhookURL) {
+			t.Fatalf("webhook environment name leaked to logs: %+v", entry)
+		}
+	}
+}
+
+func TestWebAWSLifecycleDoesNotRecordRetryingWhenClaimClearFails(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
+		path, err := app.JobManager.JobPath(job.ID)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return errors.New("temporary webhook failure")
+	}
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err == nil {
+		t.Fatal("scan should fail when claim cannot be cleared")
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: job.Profile, IncludeSystem: true, Limit: 20})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	for _, event := range page.Events {
+		if event.JobID == job.ID && (event.Action == "wechat.retrying" || event.Action == "wechat.failed") {
+			t.Fatalf("claim clear failure emitted terminal/retry state: %+v", event)
+		}
 	}
 }
 
@@ -274,6 +654,109 @@ func TestWebAWSLifecyclePersistedNotificationClaimPreventsRedelivery(t *testing.
 	}
 	if notifications != 0 || got.LifecycleNotifyClaimedAt != claimTime || !got.LifecycleNotifiedAt.IsZero() {
 		t.Fatalf("persisted claim must suppress redelivery after uncertain delivery: notifications=%d job=%+v", notifications, got)
+	}
+}
+
+func TestWebAWSLifecycleStaleNotificationClaimIsReclaimed(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	now := time.Date(2026, 7, 16, 3, 0, 0, 0, time.UTC)
+	app.JobManager.Now = func() time.Time { return now }
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	seedWebAWSLifecycleOwner(t, &app)
+	seedWebAWSLifecycleReminder(t, &app)
+	staleClaim := now.Add(-webAWSLifecycleNotificationClaimLease - time.Second)
+	if _, err := app.JobManager.Update(job.ID, func(current Job) (Job, error) {
+		current.LifecycleState = JobLifecycleFinalized
+		current.LifecycleFinalizedAt = staleClaim
+		current.LifecycleEventRecordedAt = staleClaim
+		current.LifecycleNotifyClaimedAt = staleClaim
+		return current, nil
+	}); err != nil {
+		t.Fatalf("persist stale notification claim: %v", err)
+	}
+	notifications := 0
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
+		notifications++
+		return nil
+	}
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+		t.Fatalf("reclaim stale notification: %v", err)
+	}
+	got, err := app.JobManager.Load(job.ID)
+	if err != nil {
+		t.Fatalf("load reclaimed job: %v", err)
+	}
+	if notifications != 1 || !got.LifecycleNotifyClaimedAt.IsZero() || got.LifecycleNotifiedAt != now ||
+		got.LifecycleNotifyAttempts != 1 {
+		t.Fatalf("stale claim was not reclaimed: notifications=%d job=%+v", notifications, got)
+	}
+}
+
+func TestWebAWSLifecyclePersistedNotifiedAtPreventsDuplicateSentEvent(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error { return nil }
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	if err := app.reconcileWebAWSLifecycles(context.Background(), configPath); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	page, err := app.MemberStore.QueryEvents(EventQuery{Profile: job.Profile, IncludeSystem: true, Limit: 50})
+	if err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	sent := 0
+	for _, event := range page.Events {
+		if event.JobID == job.ID && event.Action == "wechat.sent" {
+			sent++
+		}
+	}
+	if sent != 1 {
+		t.Fatalf("wechat.sent events = %d, want 1; events=%+v", sent, page.Events)
+	}
+}
+
+type queryCountingMemberRepository struct {
+	MemberRepository
+	queryCalls int
+}
+
+func (r *queryCountingMemberRepository) QueryEvents(query EventQuery) (EventPage, error) {
+	r.queryCalls++
+	return r.MemberRepository.QueryEvents(query)
+}
+
+func TestWebAWSLifecycleTerminalInsertDoesNotScanEventHistory(t *testing.T) {
+	app, _ := newWebAWSLifecycleTestApp(t)
+	counting := &queryCountingMemberRepository{MemberRepository: app.MemberStore}
+	app.MemberStore = counting
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusFailed)
+	if err := app.recordWebAWSLifecycleTerminal(job, false); err != nil {
+		t.Fatalf("record terminal event: %v", err)
+	}
+	if counting.queryCalls != 0 {
+		t.Fatalf("terminal event performed %d history queries", counting.queryCalls)
+	}
+}
+
+func TestWebAWSLifecycleNotificationDoesNotScanEventHistory(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	counting := &queryCountingMemberRepository{MemberRepository: app.MemberStore}
+	app.MemberStore = counting
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
+	}
+	app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error { return nil }
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+	if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
+		t.Fatalf("reconcile lifecycle: %v", err)
+	}
+	if counting.queryCalls != 0 {
+		t.Fatalf("notification performed %d history queries", counting.queryCalls)
 	}
 }
 
@@ -354,6 +837,33 @@ func TestWebAWSLifecycleProfileResolutionKeepsLocalExactCandidateOnManagedCollis
 	}
 	if resolved.Name != job.Profile || normalizeEmail(resolved.AWS.AccountEmail) != normalizeEmail(job.AppleEmail) {
 		t.Fatalf("resolved mismatched candidate: %+v", resolved)
+	}
+}
+
+func TestWebAWSLifecycleProfileResolutionAllowsMissingButRejectsInvalidLocalConfig(t *testing.T) {
+	app, configPath := newWebAWSLifecycleTestApp(t)
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile := cfg.Profiles["xcode-vnc"]
+	if _, err := app.MemberStore.UpsertManagedProfile(profile); err != nil {
+		t.Fatalf("seed managed profile: %v", err)
+	}
+	job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
+
+	if err := os.Remove(configPath); err != nil {
+		t.Fatalf("remove local config: %v", err)
+	}
+	if _, err := app.resolveWebAWSLifecycleProfile(configPath, job); err != nil {
+		t.Fatalf("missing local config should merge managed profile: %v", err)
+	}
+
+	if err := os.WriteFile(configPath, []byte("profiles:\n  broken: ["), 0o600); err != nil {
+		t.Fatalf("write invalid local config: %v", err)
+	}
+	if _, err := app.resolveWebAWSLifecycleProfile(configPath, job); err == nil {
+		t.Fatal("invalid local config must remain an error")
 	}
 }
 
@@ -490,6 +1000,11 @@ func createWebAWSLifecycleJob(t *testing.T, app *App, command string, status Job
 		Type:                "aws-" + command,
 		Profile:             "xcode-vnc",
 		AppleEmail:          "user@example.com",
+		RequestID:           "req-lifecycle-" + command,
+		Source:              "web",
+		ActorMemberID:       "member-owner",
+		ActorEmail:          "owner@example.com",
+		ActorName:           "Owner",
 		Status:              status,
 		StartedAt:           time.Date(2026, 7, 16, 1, 0, 0, 0, time.UTC),
 		LifecycleOwnerEmail: "owner@example.com",

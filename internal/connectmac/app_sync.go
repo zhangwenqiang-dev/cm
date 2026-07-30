@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 )
 
 func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) < 2 {
 		fmt.Fprintln(a.Err, "usage: cm pull <profile-or-apple-email> <remote-path> [--include <pattern>] [--exclude <pattern>]")
 		return 2
@@ -23,6 +25,7 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 	}
 	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateRsyncAccess(profile) {
+		a.logLocalCommand(ctx, "sync.pull.failed", profile, 1, startedAt, LogEntry{Direction: "pull", ErrorCode: "validation_error"})
 		return 1
 	}
 	rsyncArgs, err := RsyncPullArgs(profile, args[1], ".", mergeSyncFilters(profile.Sync.Pull, extraFilters))
@@ -31,13 +34,17 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 		return 1
 	}
 	fmt.Fprintf(a.Out, "Pull: %s -> .\n", RemoteTarget(profile, args[1]))
+	a.logLocalCommand(ctx, "sync.pull.started", profile, 0, startedAt, LogEntry{Direction: "pull", Phase: "started"})
 	if err := a.Runner.RunRsync(ctx, rsyncArgs); err != nil {
 		fmt.Fprintf(a.Err, "rsync failed: %v\n", err)
+		a.logLocalCommand(ctx, "sync.pull.failed", profile, 1, startedAt, LogEntry{Direction: "pull", ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "sync.pull.succeeded", profile, 0, startedAt, LogEntry{Direction: "pull"})
 	return 0
 }
 func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
+	startedAt := time.Now()
 	if len(args) < 3 {
 		fmt.Fprintln(a.Err, "usage: cm push <profile-or-apple-email> <local-path> <remote-dir> [--include <pattern>] [--exclude <pattern>]")
 		return 2
@@ -54,6 +61,7 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 	}
 	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateRsyncAccess(profile) {
+		a.logLocalCommand(ctx, "sync.push.failed", profile, 1, startedAt, LogEntry{Direction: "push", ErrorCode: "validation_error"})
 		return 1
 	}
 	localPath := args[1]
@@ -68,10 +76,13 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 		return 1
 	}
 	fmt.Fprintf(a.Out, "Push: %s -> %s\n", localPath, RemoteTarget(profile, remoteDir))
+	a.logLocalCommand(ctx, "sync.push.started", profile, 0, startedAt, LogEntry{Direction: "push", Phase: "started"})
 	if err := a.Runner.RunRsync(ctx, rsyncArgs); err != nil {
 		fmt.Fprintf(a.Err, "rsync failed: %v\n", err)
+		a.logLocalCommand(ctx, "sync.push.failed", profile, 1, startedAt, LogEntry{Direction: "push", ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	a.logLocalCommand(ctx, "sync.push.succeeded", profile, 0, startedAt, LogEntry{Direction: "push"})
 	return 0
 }
 func (a App) validateRsyncAccess(profile Profile) bool {

@@ -1,6 +1,7 @@
 package connectmac
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +17,15 @@ func (a App) cleanupLocalConfigAfterLogin(configPath string) {
 	}
 	backup, err := cleanupDefaultLocalConfigProfiles(configPath, time.Now())
 	if err != nil {
-		_ = a.LogManager.Write(LogEntry{Level: "warn", Action: "web.auth.cleanup", Message: err.Error()})
+		a.writeRuntimeLog(LogEntry{
+			Level:     "error",
+			Action:    "web.auth.cleanup",
+			Operation: "config.cleanup",
+			Source:    "system",
+			Phase:     "failed",
+			ErrorCode: classifyOperationalError(err).Code,
+			Message:   err.Error(),
+		})
 		return
 	}
 	if backup != "" {
@@ -39,6 +48,9 @@ func cleanupDefaultLocalConfigProfiles(configPath string, now time.Time) (string
 	}
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
 		return "", err
 	}
 	configDir := filepath.Dir(expanded)

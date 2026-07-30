@@ -65,11 +65,26 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.terminal", Profile: profile.Name, Message: err.Error()})
 			return
 		}
-		_ = a.LogManager.Write(LogEntry{Level: "info", Action: "web.terminal", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail, Message: "opened web terminal"})
+		startedAt := time.Now()
+		op := a.operationContextForRequest(r)
+		a.writeRuntimeLog(LogEntry{
+			Action: "terminal.opened", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
+			RequestID: op.RequestID, Source: "web-server", Phase: "opened", Outcome: "success", Message: "terminal.opened",
+		})
 		a.recordWebEvent(configPath, profile.Name, "terminal", true, webAPIResponse{OK: true, Output: "opened web terminal"})
-		if err := a.proxyWebTerminal(r.Context(), conn, profile); err != nil && !errors.Is(err, context.Canceled) {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.terminal", Profile: profile.Name, Message: err.Error()})
+		proxyErr := a.proxyWebTerminal(r.Context(), conn, profile)
+		entry := LogEntry{
+			Action: "terminal.closed", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
+			RequestID: op.RequestID, Source: "web-server", Phase: "closed",
+			DurationMS: time.Since(startedAt).Milliseconds(), Outcome: "success", Message: "terminal.closed",
 		}
+		if !normalTerminalClose(proxyErr) {
+			classified := classifyOperationalError(proxyErr)
+			entry.Level = classified.Level
+			entry.ErrorCode = classified.Code
+			entry.Outcome = "failure"
+		}
+		a.writeRuntimeLog(entry)
 	}
 }
 

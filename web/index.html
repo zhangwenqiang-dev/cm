@@ -852,6 +852,7 @@
               <div id="syncPushProgress" class="sync-progress hidden">
                 <div class="sync-progress-row"><span id="syncPushProgressLabel">上传准备中</span><strong id="syncPushProgressPercent">0%</strong></div>
                 <div class="sync-progress-track"><div id="syncPushProgressBar" class="sync-progress-bar"></div></div>
+                <button id="syncPushTerminalRetryBtn" class="hidden" type="button">重试保存结果</button>
               </div>
             </div>
             <div class="sync-panel">
@@ -865,6 +866,7 @@
               <div id="syncPullProgress" class="sync-progress hidden">
                 <div class="sync-progress-row"><span id="syncPullProgressLabel">下载准备中</span><strong id="syncPullProgressPercent">0%</strong></div>
                 <div class="sync-progress-track"><div id="syncPullProgressBar" class="sync-progress-bar"></div></div>
+                <button id="syncPullTerminalRetryBtn" class="hidden" type="button">重试保存结果</button>
               </div>
             </div>
           </div>
@@ -992,10 +994,15 @@
     </div>
   </div>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const transferMissingGraceMS = 10000;
     const transferMissingReloadDelayMS = 3000;
     const transferMissingMaxReloads = 4;
+    const terminalSyncBaseDelayMS = 1000;
+    const terminalSyncMaxDelayMS = 10000;
+    const terminalSyncMaxDurationMS = 10 * 60 * 1000;
+    const terminalSyncMaxAttempts = 60;
+    const terminalSyncRequestTimeoutMS = 15000;
     const $ = (id) => document.getElementById(id);
 
     function selectedProfile() {
@@ -1004,7 +1011,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncPushTerminalRetryBtn", "syncPullTerminalRetryBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1087,13 +1094,42 @@
       return body;
     }
 
+    function newLocalRequestID() {
+      if (window.crypto?.randomUUID) return "local-" + window.crypto.randomUUID();
+      return "local-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    }
+
+    async function recordLocalIntent(profile, operation, requestID) {
+      return api("/api/local-intent", {
+        method: "POST",
+        body: JSON.stringify({ profile, operation, request_id: requestID })
+      });
+    }
+
     async function localAgentAPI(path, options = {}) {
       if (!state.localAgent.online || !state.localAgent.url) {
         throw new Error(state.localAgent.errorReason || "本机代理未连接，请运行 cm local-agent install");
       }
+      const requestID = options.requestID || newLocalRequestID();
+      const requestOptions = { ...options };
+      delete requestOptions.requestID;
+      const headers = { "Content-Type": "application/json", "X-Request-ID": requestID, ...(requestOptions.headers || {}) };
+      let body = requestOptions.body;
+      if (typeof body === "string" && body.trim()) {
+        try {
+          const payload = JSON.parse(body);
+          if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+            payload.request_id = requestID;
+            body = JSON.stringify(payload);
+          }
+        } catch (err) {
+          // Non-JSON local-agent requests retain the correlation header.
+        }
+      }
       const res = await fetch(state.localAgent.url + path, {
-        headers: { "Content-Type": "application/json" },
-        ...options
+        ...requestOptions,
+        headers,
+        body
       });
       const body = await res.json();
       if (!body.ok) {
@@ -1372,6 +1408,7 @@
     }
 
     async function logout() {
+      cancelPendingTerminalSyncs();
       setBusy(true, "正在退出...");
       try {
         await api("/api/auth/logout", { method: "POST", body: "{}" });
@@ -1798,8 +1835,8 @@
       $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released" || releaseActive;
       $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
       $("syncBtn").disabled = readyActionDisabled;
-      $("syncPushBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobActive(syncJob(p?.name, "push"));
-      $("syncPullBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobActive(syncJob(p?.name, "pull"));
+      $("syncPushBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "push"), p?.name, "push");
+      $("syncPullBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "pull"), p?.name, "pull");
       $("syncPushBrowseBtn").disabled = readyActionDisabled;
       $("syncPullBrowseBtn").disabled = readyActionDisabled;
       $("terminalBtn").disabled = readyActionDisabled;
@@ -2275,13 +2312,17 @@
       setBusy(true, "正在打开 VNC...");
       setStatus("VNC 打开中...");
       try {
+        const requestID = typeof newLocalRequestID === "function" ? newLocalRequestID() : "local-vnc";
+        if (typeof recordLocalIntent === "function") await recordLocalIntent(profile, "vnc", requestID);
         const start = await localAgentAPI("/start", {
           method: "POST",
-          body: JSON.stringify(localAgentPayload(profile))
+          body: JSON.stringify(localAgentPayload(profile)),
+          requestID
         });
         const opened = await localAgentAPI("/open-vnc", {
           method: "POST",
-          body: JSON.stringify(localAgentPayload(profile))
+          body: JSON.stringify(localAgentPayload(profile)),
+          requestID
         });
         setOutput((start.output || "") + (start.error || "") + "\n" + (opened.output || "") + (opened.error || ""));
         state.terminalConnectedProfiles.add(profile);
@@ -2430,7 +2471,7 @@
         return "<div class=\"sync-history-item\">" +
           "<div><strong>方向：</strong><span class=\"badge " + (item.direction === "push" ? "wait" : "ready") + "\">" + escapeHTML(label) + "</span></div>" +
           "<div><strong>路径：</strong><code>" + escapeHTML(from || "-") + " -> " + escapeHTML(to || "-") + "</code></div>" +
-          "<div><strong>状态：</strong>" + escapeHTML(transferStatusLabel(item.status)) + " <strong>进度：</strong>" + escapeHTML(String(item.percent || 0)) + "%</div>" +
+          "<div><strong>状态：</strong>" + escapeHTML(transferPhaseLabel(item.direction, item.phase, item.status)) + " <strong>进度：</strong>" + escapeHTML(String(item.percent || 0)) + "%</div>" +
           "<div class=\"muted\"><strong>开始：</strong>" + escapeHTML(formatTime(started || item.created_at)) + " <strong>结束：</strong>" + escapeHTML(finished ? formatTime(finished) : "-") + " <strong>耗时：</strong>" + escapeHTML(elapsed) + "</div>" +
           (item.error_summary ? "<div class=\"danger\"><strong>错误：</strong>" + escapeHTML(item.error_summary) + "</div>" : "") +
           "<div class=\"sync-history-actions\"><button data-sync-use=\"" + escapeAttr(item.id) + "\">使用</button><button data-sync-delete=\"" + escapeAttr(item.id) + "\">删除</button></div>" +
@@ -2449,6 +2490,17 @@
         created: "已创建", queued: "排队中", running: "传输中", succeeded: "已完成",
         failed: "失败", interrupted: "已中断", unconfirmed: "无法确认"
       }[status] || "未知";
+    }
+
+    function transferPhaseLabel(direction, phase, status) {
+      const label = direction === "push" ? "上传" : "下载";
+      if (phase === "preparing") return label + "准备中";
+      if (phase === "transferring") return label + "中";
+      if (phase === "finalizing") return "正在完成校验";
+      if (phase === "succeeded") return label + "完成";
+      if (phase === "failed") return label + "失败";
+      if (phase === "interrupted") return label + "已中断";
+      return transferStatusLabel(status);
     }
 
     function transferElapsed(item) {
@@ -2474,24 +2526,33 @@
       return [100, 99, 90, 75, 50, 25, 10, 0].find((value) => Number(percent || 0) >= value) ?? 0;
     }
 
-    async function updateTransferRecord(transferID, job, bind = false) {
+    async function updateTransferRecord(transferID, job, bind = false, options = {}) {
       if (!transferID || !job) return null;
       const terminal = transferTerminal(job.status);
-      const milestone = transferMilestone(job.percent);
+      const exactPercent = Math.max(0, Math.min(100, Math.round(Number(job.percent) || 0)));
+      const persistedPercent = terminal ? exactPercent : transferMilestone(exactPercent);
+      const phase = String(job.phase || (terminal ? job.status : (persistedPercent > 0 ? "transferring" : "preparing")));
+      const milestoneKey = phase + ":" + persistedPercent;
       const last = state.transferMilestones[transferID];
-      if (!bind && !terminal && last !== undefined && milestone <= last) return null;
+      if (!bind && !terminal && last === milestoneKey) return null;
       const started = Date.parse(job.started_at || job.created_at || "");
       const finished = Date.parse(job.finished_at || "");
       const body = {
         id: transferID,
         local_job_id: job.id || "",
         status: job.status || "running",
-        percent: terminal && job.status === "succeeded" ? 100 : milestone,
+        phase,
+        percent: persistedPercent,
         error_summary: String(job.error || "").trim(),
         elapsed_ms: started ? Math.max(0, (finished || Date.now()) - started) : 0
       };
-      const result = await api("/api/transfer-record/update", { method: "POST", body: JSON.stringify(body) });
-      state.transferMilestones[transferID] = body.percent;
+      const result = await api("/api/transfer-record/update", {
+        method: "POST",
+        body: JSON.stringify(body),
+        signal: options.signal
+      });
+      if (options.isCurrent && !options.isCurrent()) return null;
+      state.transferMilestones[transferID] = milestoneKey;
       const updated = result.data?.record;
       if (updated && state.view === "syncView" && state.selected === updated.profile_name) {
         const index = state.syncHistory.findIndex((record) => record.id === transferID);
@@ -2502,11 +2563,223 @@
       return updated || null;
     }
 
+    function pendingTerminalSyncKey(job) {
+      return syncJobKey(job?.profile, job?.direction);
+    }
+
+    function terminalSyncPending(job) {
+      const key = pendingTerminalSyncKey(job);
+      const pending = key && state.pendingTerminalSyncs[key];
+      return Boolean(pending && pending.job?.id === job?.id && pending.state !== "terminal_sync_failed");
+    }
+
+    function terminalSyncFailed(job) {
+      const key = pendingTerminalSyncKey(job);
+      const pending = key && state.pendingTerminalSyncs[key];
+      return Boolean(pending && pending.job?.id === job?.id && pending.state === "terminal_sync_failed");
+    }
+
+    function clearPendingTerminalSync(key, abort = true) {
+      const pending = state.pendingTerminalSyncs[key];
+      if (!pending) return;
+      if (pending.timerID) window.clearTimeout(pending.timerID);
+      if (abort && pending.request) abortTerminalSyncRequest(pending.request);
+      delete state.pendingTerminalSyncs[key];
+    }
+
+    function cancelPendingTerminalSyncs() {
+      state.terminalSyncGeneration += 1;
+      for (const key of Object.keys(state.pendingTerminalSyncs)) {
+        clearPendingTerminalSync(key);
+      }
+      for (const request of state.terminalSyncRequests) abortTerminalSyncRequest(request);
+      state.terminalSyncRequests.clear();
+    }
+
+    function beginTerminalSyncRequest(generation) {
+      const request = {
+        controller: new AbortController(),
+        generation,
+        timedOut: false,
+        timeoutID: 0
+      };
+      request.timeoutID = window.setTimeout(() => {
+        request.timedOut = true;
+        request.controller.abort();
+      }, terminalSyncRequestTimeoutMS);
+      state.terminalSyncRequests.add(request);
+      return request;
+    }
+
+    function finishTerminalSyncRequest(request) {
+      if (!request) return;
+      if (request.timeoutID) window.clearTimeout(request.timeoutID);
+      request.timeoutID = 0;
+      state.terminalSyncRequests.delete(request);
+    }
+
+    function abortTerminalSyncRequest(request) {
+      if (!request) return;
+      finishTerminalSyncRequest(request);
+      request.controller.abort();
+    }
+
+    function terminalSyncRequestError(err, request) {
+      if (!request?.timedOut) return err;
+      const timeoutError = new Error("传输结果保存请求超时");
+      timeoutError.status = 408;
+      return timeoutError;
+    }
+
+    function terminalSyncRetryDelay(attempts) {
+      return Math.min(terminalSyncMaxDelayMS, terminalSyncBaseDelayMS * Math.pow(2, Math.max(0, attempts - 1)));
+    }
+
+    function terminalSyncRetryable(err) {
+      const status = Number(err?.status || 0);
+      return status === 0 || status === 408 || status === 429 || status >= 500;
+    }
+
+    function terminalSyncRetryExhausted(pending) {
+      return pending.attempts >= terminalSyncMaxAttempts ||
+        Date.now() - pending.startedAt >= terminalSyncMaxDurationMS;
+    }
+
+    function failPendingTerminalSync(key, pending, err) {
+      if (state.pendingTerminalSyncs[key] !== pending) return;
+      if (pending.timerID) window.clearTimeout(pending.timerID);
+      pending.timerID = 0;
+      pending.state = "terminal_sync_failed";
+      pending.lastError = String(err?.message || err || "传输结果保存失败");
+      setStatus("传输结果保存失败，请手动重试");
+      renderSelected();
+    }
+
+    function schedulePendingTerminalSync(key) {
+      const pending = state.pendingTerminalSyncs[key];
+      if (!pending || pending.timerID || pending.state === "terminal_sync_failed") return;
+      if (terminalSyncRetryExhausted(pending)) {
+        failPendingTerminalSync(key, pending, pending.lastError);
+        return;
+      }
+      pending.timerID = window.setTimeout(() => {
+        if (state.pendingTerminalSyncs[key] !== pending) return;
+        pending.timerID = 0;
+        retryPendingTerminalSync(key);
+      }, terminalSyncRetryDelay(pending.attempts));
+    }
+
+    function queuePendingTerminalSync(record, job, err) {
+      const key = pendingTerminalSyncKey(job);
+      if (!key || !record?.id || !job?.id) return;
+      const current = state.pendingTerminalSyncs[key];
+      if (current && current.job.id !== job.id) clearPendingTerminalSync(key);
+      const pending = state.pendingTerminalSyncs[key] || {
+        recordID: record.id,
+        job: { ...job },
+        attempts: 0,
+        timerID: 0,
+        lastError: "",
+        startedAt: Date.now(),
+        generation: state.terminalSyncGeneration,
+        request: null,
+        state: "pending"
+      };
+      pending.recordID = record.id;
+      pending.job = { ...job };
+      pending.attempts += 1;
+      pending.lastError = String(err?.message || err || "");
+      pending.state = "pending";
+      state.pendingTerminalSyncs[key] = pending;
+      if (!terminalSyncRetryable(err) || terminalSyncRetryExhausted(pending)) {
+        failPendingTerminalSync(key, pending, err);
+        return;
+      }
+      schedulePendingTerminalSync(key);
+      setStatus("正在保存传输结果");
+    }
+
+    async function retryPendingTerminalSync(key) {
+      const pending = state.pendingTerminalSyncs[key];
+      if (!pending || pending.state === "terminal_sync_failed") return;
+      if (pending.generation !== state.terminalSyncGeneration) return;
+      const request = beginTerminalSyncRequest(pending.generation);
+      pending.request = request;
+      const isCurrent = () => state.terminalSyncGeneration === pending.generation &&
+        state.pendingTerminalSyncs[key] === pending;
+      try {
+        const updated = await updateTransferRecord(pending.recordID, pending.job, true, {
+          signal: request.controller.signal,
+          isCurrent
+        });
+        if (!updated || !isCurrent()) return;
+        pending.request = null;
+        clearPendingTerminalSync(key, false);
+        if (state.view === "syncView" && state.selected === pending.job.profile) {
+          presentSyncJob(pending.job);
+          renderSelected();
+          Promise.all([loadSyncHistory(pending.job.profile, { quiet: true }), loadEvents(false)]).catch(() => {});
+        }
+      } catch (err) {
+        const requestError = terminalSyncRequestError(err, request);
+        if (!isCurrent() || err?.name === "AbortError" && !request.timedOut) return;
+        pending.attempts += 1;
+        pending.lastError = String(requestError?.message || requestError || "");
+        if (!terminalSyncRetryable(requestError) || terminalSyncRetryExhausted(pending)) {
+          failPendingTerminalSync(key, pending, requestError);
+          return;
+        }
+        schedulePendingTerminalSync(key);
+      } finally {
+        finishTerminalSyncRequest(request);
+        if (pending.request === request) pending.request = null;
+      }
+    }
+
+    async function persistTerminalTransfer(record, job) {
+      if (!record?.id || !job || !transferTerminal(job.status)) return false;
+      const key = pendingTerminalSyncKey(job);
+      const generation = state.terminalSyncGeneration;
+      const request = beginTerminalSyncRequest(generation);
+      const isCurrent = () => state.terminalSyncGeneration === generation;
+      try {
+        const updated = await updateTransferRecord(record.id, job, true, {
+          signal: request.controller.signal,
+          isCurrent
+        });
+        if (!updated || !isCurrent()) return false;
+        clearPendingTerminalSync(key, false);
+        return true;
+      } catch (err) {
+        const requestError = terminalSyncRequestError(err, request);
+        if (!isCurrent() || err?.name === "AbortError" && !request.timedOut) return false;
+        queuePendingTerminalSync(record, job, requestError);
+        return false;
+      } finally {
+        finishTerminalSyncRequest(request);
+      }
+    }
+
+    function retryTerminalSync(direction) {
+      const key = syncJobKey(state.selected, direction);
+      const pending = state.pendingTerminalSyncs[key];
+      if (!pending || pending.state !== "terminal_sync_failed") return;
+      pending.attempts = 0;
+      pending.startedAt = Date.now();
+      pending.lastError = "";
+      pending.generation = state.terminalSyncGeneration;
+      pending.state = "pending";
+      setStatus("正在重新保存传输结果");
+      renderSelected();
+      retryPendingTerminalSync(key);
+    }
+
     async function failTransferRecord(transferID, err) {
       if (!transferID) return;
       await updateTransferRecord(transferID, {
         id: "",
         status: "failed",
+        phase: "failed",
         percent: 0,
         error: String(err?.message || err || "本机传输启动失败")
       }, true);
@@ -2551,6 +2824,7 @@
         updateTransferRecord(record.id, {
           id: record.local_job_id || "",
           status: "unconfirmed",
+          phase: "interrupted",
           percent: record.percent || 0,
           error: "本机代理中无法恢复对应传输任务"
         }, true).then(() => {
@@ -2597,8 +2871,17 @@
         }
         if (job) {
           clearTransferMissingConfirmation(record.id);
-          if (bind) await updateTransferRecord(record.id, job, true);
-          else await updateTransferRecord(record.id, job);
+          if (transferTerminal(job.status)) {
+            const persisted = await persistTerminalTransfer(record, job);
+            if (!persisted) {
+              renderSelected();
+              continue;
+            }
+          } else if (bind) {
+            await updateTransferRecord(record.id, job, true);
+          } else {
+            await updateTransferRecord(record.id, job);
+          }
           if (state.view !== "syncView" || state.selected !== profile) return;
           if (syncJobActive(job)) scheduleSyncPoll(job);
           continue;
@@ -2632,6 +2915,11 @@
       return job?.status === "queued" || job?.status === "running";
     }
 
+    function syncJobBusy(job, profile = "", direction = "") {
+      const key = job ? pendingTerminalSyncKey(job) : syncJobKey(profile, direction);
+      return syncJobActive(job) || Boolean(key && state.pendingTerminalSyncs[key]);
+    }
+
     function syncDirectionLabel(direction) {
       return direction === "push" ? "上传" : "下载";
     }
@@ -2640,6 +2928,14 @@
       const label = syncDirectionLabel(job?.direction);
       if (!job) return label + "准备中";
       if (state.syncPollUnavailable[syncJobKey(job.profile, job.direction)]) return "状态暂时不可用";
+      if (terminalSyncFailed(job)) return "传输结果保存失败";
+      if (terminalSyncPending(job)) return "正在保存传输结果";
+      if (job.phase === "preparing") return label + "准备中";
+      if (job.phase === "transferring") return label + "中";
+      if (job.phase === "finalizing") return "正在完成校验";
+      if (job.phase === "succeeded") return label + "完成";
+      if (job.phase === "failed") return label + "失败";
+      if (job.phase === "interrupted") return label + "已中断";
       if (job.status === "queued") return label + "排队中";
       if (job.status === "running") return label + "中";
       if (job.status === "succeeded") return label + "完成";
@@ -2661,16 +2957,22 @@
 
     function renderSyncProgress(direction, job) {
       const prefix = direction === "push" ? "syncPush" : "syncPull";
+      const retryButton = $(prefix + "TerminalRetryBtn");
       if (!job) {
         $(prefix + "Progress").classList.add("hidden");
+        retryButton.classList.add("hidden");
         return;
       }
       const percent = Number.isFinite(Number(job.percent)) ? Number(job.percent) : 0;
-      const value = Math.max(0, Math.min(100, Math.round(percent)));
+      const value = terminalSyncPending(job) || job.phase === "finalizing"
+        ? Math.min(99, Math.max(0, Math.round(percent)))
+        : Math.max(0, Math.min(100, Math.round(percent)));
       $(prefix + "Progress").classList.remove("hidden");
       $(prefix + "ProgressBar").style.width = value + "%";
       $(prefix + "ProgressPercent").textContent = value + "%";
       $(prefix + "ProgressLabel").textContent = syncJobStatusLabel(job);
+      retryButton.classList.toggle("hidden", !terminalSyncFailed(job));
+      retryButton.disabled = !terminalSyncFailed(job);
     }
 
     function presentSyncJob(job) {
@@ -2847,7 +3149,19 @@
         if (state.syncJobs[key]?.id !== jobID) return;
         const savedJob = storeSyncJob(key, job);
         const record = transferRecordForJob(savedJob);
-        if (record) await updateTransferRecord(record.id, savedJob);
+        if (record) {
+          if (transferTerminal(savedJob.status)) {
+            const persisted = await persistTerminalTransfer(record, savedJob);
+            if (!persisted) {
+              if (state.syncPollRequests[key] === request && state.view === "syncView" && state.selected === profile) {
+                renderSelected();
+              }
+              return;
+            }
+          } else {
+            await updateTransferRecord(record.id, savedJob);
+          }
+        }
         if (state.syncPollRequests[key] !== request || state.view !== "syncView" || state.selected !== profile) return;
         delete state.syncPollUnavailable[key];
         presentSyncJob(savedJob);
@@ -2863,6 +3177,7 @@
           storeSyncJob(key, {
             ...job,
             status: "interrupted",
+            phase: "interrupted",
             error: [job.error || job.output || "", "传输任务不存在"].filter(Boolean).join("\n"),
             finished_at: new Date().toISOString()
           });
@@ -2871,6 +3186,7 @@
             await updateTransferRecord(record.id, {
               ...state.syncJobs[key],
               status: "unconfirmed",
+              phase: "interrupted",
               error: "本机代理中无法恢复对应传输任务"
             }, true).catch(() => {});
           }
@@ -2902,6 +3218,7 @@
 
     function clearSyncProfileState(profile) {
       if (!profile) return;
+      cancelPendingTerminalSyncs();
       state.syncViewGeneration += 1;
       state.syncHistoryGenerations[profile] = (state.syncHistoryGenerations[profile] || 0) + 1;
       state.syncJobsGenerations[profile] = (state.syncJobsGenerations[profile] || 0) + 1;
@@ -2982,7 +3299,7 @@
         return;
       }
       if (state.syncJobsLoading[p.name]) return;
-      if (syncJobActive(syncJob(p.name, direction))) return;
+      if (syncJobBusy(syncJob(p.name, direction), p.name, direction)) return;
       const payload = { profile: p.name };
       if (direction === "push") {
         payload.local_path = $("syncPushLocalPath").value.trim();
@@ -3009,9 +3326,12 @@
         state.syncHistory.unshift(record);
         renderSyncHistory();
         payload.transfer_id = record.id;
+        const requestID = typeof newLocalRequestID === "function" ? newLocalRequestID() : "local-transfer";
+        if (typeof recordLocalIntent === "function") await recordLocalIntent(p.name, "transfer", requestID);
         const body = await localAgentAPI("/sync/" + direction, {
           method: "POST",
-          body: JSON.stringify(localAgentPayload(p.name, payload))
+          body: JSON.stringify(localAgentPayload(p.name, payload)),
+          requestID
         });
         job = body.data?.job;
         if (!job?.id) {
@@ -3022,15 +3342,26 @@
         const savedJob = storeSyncJob(key, job);
         delete state.syncPollUnavailable[key];
         scheduleSyncPoll(savedJob);
-        await updateTransferRecord(record.id, job, true).catch((err) => {
-          setOutput(String(err.message || err));
-          setStatus(label + "已启动，记录绑定待重试");
-          loadSyncJobs(p.name);
-        });
+        let terminalPersisted = true;
+        if (transferTerminal(savedJob.status)) {
+          terminalPersisted = await persistTerminalTransfer(record, savedJob);
+          if (!terminalPersisted) {
+            setOutput("传输已结束，正在重试保存最终结果。");
+            renderSelected();
+          }
+        } else {
+          await updateTransferRecord(record.id, savedJob, true).catch((err) => {
+            setOutput(String(err.message || err));
+            setStatus(label + "已启动，记录绑定待重试");
+            loadSyncJobs(p.name);
+          });
+        }
         setBusy(false);
         renderProfiles();
         renderSelected();
-        presentSyncJob(savedJob);
+        if (!transferTerminal(savedJob.status) || terminalPersisted) {
+          presentSyncJob(savedJob);
+        }
       } catch (err) {
         if (record?.id && !job) {
           await failTransferRecord(record.id, err).catch(() => {});
@@ -3132,15 +3463,18 @@
       terminalClear();
       terminalSetStatus("正在处理本机 SSH 指纹...");
       try {
+        const requestID = typeof newLocalRequestID === "function" ? newLocalRequestID() : "local-connect";
+        if (typeof recordLocalIntent === "function") await recordLocalIntent(profile, "connect", requestID);
         const check = await localAgentAPI("/terminal/check", {
           method: "POST",
-          body: JSON.stringify(localAgentPayload(profile))
+          body: JSON.stringify(localAgentPayload(profile)),
+          requestID
         });
         const data = check.data || {};
         terminalAppend("Host key: " + (data.host_key_message || data.host_key_status || "ok") + "\r\n");
         terminalAppend("Connecting " + (data.target || profile) + "...\r\n");
         terminalSetStatus("正在连接本机网页终端...");
-        const wsURL = state.localAgent.url.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/terminal/ws?profile=" + encodeURIComponent(profile);
+        const wsURL = state.localAgent.url.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/terminal/ws?profile=" + encodeURIComponent(profile) + "&request_id=" + encodeURIComponent(requestID);
         const socket = new WebSocket(wsURL);
         state.terminal.socket = socket;
         socket.binaryType = "arraybuffer";
@@ -3787,18 +4121,28 @@
       }
     }
 
-    async function loadEvents(showStatus = true) {
+    async function loadEvents(showStatus = true, append = false) {
       const p = selectedProfile();
       if (!p || !p.apple_email) return;
+      if (state.eventProfile !== p.name) {
+        state.eventItems = [];
+        state.eventCursor = "";
+        state.eventProfile = p.name;
+        append = false;
+      }
       if (showStatus) {
         setBusy(true, "正在读取事件...");
         setStatus("读取事件...");
       }
       try {
-        const body = await api("/api/events?apple_email=" + encodeURIComponent(p.apple_email));
+        const cursor = append ? state.eventCursor : "";
+        const body = await api("/api/events?limit=50&apple_email=" + encodeURIComponent(p.apple_email) + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
         const events = body.data.events || [];
+        state.eventItems = append ? state.eventItems.concat(events) : events;
+        state.eventCursor = body.data.next_cursor || "";
+        $("eventsBtn").textContent = state.eventCursor ? "更多事件" : "事件";
         if (showStatus) {
-          setOutput(events.length ? events.map((event) =>
+          setOutput(state.eventItems.length ? state.eventItems.map((event) =>
             "[" + formatTime(event.created_at) + "] " + event.action + " " + event.status + " confirmed=" + String(!!event.confirmed) + "\n" + (event.message || "")
           ).join("\n\n") : "No events.");
           setStatus("事件已加载");
@@ -4045,7 +4389,7 @@
       }
     });
     $("addMemberBtn").addEventListener("click", addMember);
-    $("eventsBtn").addEventListener("click", () => loadEvents(true));
+    $("eventsBtn").addEventListener("click", () => loadEvents(true, !!state.eventCursor));
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
@@ -4101,6 +4445,8 @@
     $("syncPullBrowseBtn").addEventListener("click", () => openLocalPicker("syncPullLocalPath"));
     $("syncPushBtn").addEventListener("click", () => runSync("push"));
     $("syncPullBtn").addEventListener("click", () => runSync("pull"));
+    $("syncPushTerminalRetryBtn").addEventListener("click", () => retryTerminalSync("push"));
+    $("syncPullTerminalRetryBtn").addEventListener("click", () => retryTerminalSync("pull"));
     $("localPickerCloseBtn").addEventListener("click", closeLocalPicker);
     $("localPickerUpBtn").addEventListener("click", () => {
       if (state.picker.parent) loadLocalPicker(state.picker.parent);

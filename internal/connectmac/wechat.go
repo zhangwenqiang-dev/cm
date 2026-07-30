@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,13 @@ const (
 	envWechatWebhookURL = "CONNECTMAC_WECHAT_WEBHOOK_URL"
 	envWebBaseURL       = "CONNECTMAC_WEB_BASE_URL"
 )
+
+var errWechatWebhookNotConfigured = fmt.Errorf("wechat webhook not configured")
+
+func wechatWebhookConfigFingerprint(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
 
 type WechatNotifier struct {
 	WebhookURL string
@@ -35,8 +43,11 @@ type WechatNotification struct {
 }
 
 type WechatNotifyResult struct {
-	Skipped bool   `json:"skipped"`
-	Message string `json:"message,omitempty"`
+	Skipped      bool   `json:"skipped"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	ErrorCode    int    `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 func NewWechatNotifierFromEnv() WechatNotifier {
@@ -50,7 +61,7 @@ func NewWechatNotifierFromEnv() WechatNotifier {
 func (n WechatNotifier) Send(notification WechatNotification) (WechatNotifyResult, error) {
 	webhook := strings.TrimSpace(n.WebhookURL)
 	if webhook == "" {
-		return WechatNotifyResult{Skipped: true, Message: "wechat webhook not configured"}, nil
+		return WechatNotifyResult{Skipped: true, Message: errWechatWebhookNotConfigured.Error()}, errWechatWebhookNotConfigured
 	}
 	payload := map[string]interface{}{
 		"msgtype": "markdown",
@@ -76,12 +87,18 @@ func (n WechatNotifier) Send(notification WechatNotification) (WechatNotifyResul
 		ErrMsg  string `json:"errmsg"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return WechatNotifyResult{}, fmt.Errorf("decode wechat webhook response: %w", err)
+		return WechatNotifyResult{HTTPStatus: resp.StatusCode}, fmt.Errorf("decode wechat webhook response: %w", err)
+	}
+	result := WechatNotifyResult{
+		HTTPStatus:   resp.StatusCode,
+		ErrorCode:    response.ErrCode,
+		ErrorMessage: response.ErrMsg,
+		Message:      response.ErrMsg,
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || response.ErrCode != 0 {
-		return WechatNotifyResult{}, fmt.Errorf("wechat webhook failed status=%d errcode=%d errmsg=%s", resp.StatusCode, response.ErrCode, response.ErrMsg)
+		return result, fmt.Errorf("wechat webhook failed status=%d errcode=%d errmsg=%s", resp.StatusCode, response.ErrCode, response.ErrMsg)
 	}
-	return WechatNotifyResult{Message: response.ErrMsg}, nil
+	return result, nil
 }
 
 func (n WechatNotifier) markdown(notification WechatNotification) string {

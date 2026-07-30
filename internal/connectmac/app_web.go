@@ -228,7 +228,10 @@ func (a App) runWebBackgroundWorker(ctx context.Context, configPath string, life
 		}
 	}
 	_ = scan(ctx, configPath)
-	a.advanceAutoReleaseReminders(ctx, configPath, time.Now())
+	now := time.Now()
+	a.pruneWebAuditEvents(now)
+	nextAuditPrune := now.Add(24 * time.Hour)
+	a.advanceAutoReleaseReminders(ctx, configPath, now)
 	for {
 		select {
 		case <-ctx.Done():
@@ -236,9 +239,40 @@ func (a App) runWebBackgroundWorker(ctx context.Context, configPath string, life
 		case <-lifecycleTicks:
 			_ = scan(ctx, configPath)
 		case now := <-reminderTicks:
+			if !now.Before(nextAuditPrune) {
+				a.pruneWebAuditEvents(now)
+				nextAuditPrune = now.Add(24 * time.Hour)
+			}
 			a.advanceAutoReleaseReminders(ctx, configPath, now)
 		}
 	}
+}
+
+func (a App) pruneWebAuditEvents(now time.Time) {
+	removed, err := a.MemberStore.PruneEvents(now.AddDate(0, 0, -eventRetentionDays))
+	if err != nil {
+		a.writeRuntimeLog(LogEntry{
+			Level:     "error",
+			Action:    "audit.prune",
+			Operation: "audit.retention",
+			Source:    "system",
+			Phase:     "failed",
+			ErrorCode: classifyOperationalError(err).Code,
+			Message:   err.Error(),
+		})
+		return
+	}
+	if removed == 0 {
+		return
+	}
+	a.writeRuntimeLog(LogEntry{
+		Level:     "info",
+		Action:    "audit.prune",
+		Operation: "audit.retention",
+		Source:    "system",
+		Phase:     "completed",
+		Message:   fmt.Sprintf("deleted %d audit events older than %d days", removed, eventRetentionDays),
+	})
 }
 
 func (a App) sendDueReleaseReminders(now time.Time) {
@@ -475,8 +509,9 @@ func (a App) newWebHandler(configPath string) http.Handler {
 	mux.HandleFunc("/api/transfer-record/start", a.requireWebRole(a.webTransferRecordStartHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/transfer-record/update", a.requireWebRole(a.webTransferRecordUpdateHandler(), "operator", "admin"))
 	mux.HandleFunc("/api/transfer-record/delete", a.requireWebRole(a.webTransferRecordDeleteHandler(), "operator", "admin"))
+	mux.HandleFunc("/api/local-intent", a.requireWebRole(a.webLocalIntentHandler(configPath), "operator", "admin"))
 	mux.HandleFunc("/api/local/list", a.requireWebRole(a.webLocalListHandler(), "operator", "admin"))
-	return mux
+	return a.withWebObservability(mux)
 }
 
 func (a App) webUserProxyHandler(configPath string) http.HandlerFunc {
@@ -1338,7 +1373,25 @@ func (a App) webReleaseReminderCleanupHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
-		reminder, err := a.cleanupProfileLocalRecords(profileName, "manual")
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		op := a.operationContextForRequest(r)
+		reminder, _, err := a.cleanupProfileLocalRecordsWithEvent(profileName, "manual", OperationEvent{
+			Action:      "profile.cleanup.completed",
+			Profile:     profileName,
+			MemberID:    member.ID,
+			MemberEmail: member.Email,
+			MemberName:  member.Name,
+			RequestID:   op.RequestID,
+			Source:      "web",
+			Phase:       "completed",
+			Confirmed:   true,
+			Status:      "success",
+			Message:     "cleared profile owner and converged release reminder",
+		})
 		if err != nil {
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1527,13 +1580,94 @@ func (a App) webEventsHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		events, err := a.MemberStore.RecentEvents(r.URL.Query().Get("apple_email"), 50)
-		if err != nil {
-			writeWebError(w, http.StatusInternalServerError, err.Error())
+		member, ok := a.currentWebMember(r)
+		if !ok {
+			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
 		}
-		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"events": events}})
+		limit := 50
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 1 || value > 200 {
+				writeWebError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+				return
+			}
+			limit = value
+		}
+		query := EventQuery{
+			AppleEmail: strings.TrimSpace(r.URL.Query().Get("apple_email")),
+			Profile:    strings.TrimSpace(r.URL.Query().Get("profile")),
+			Cursor:     strings.TrimSpace(r.URL.Query().Get("cursor")),
+			Limit:      limit,
+		}
+		if member.Role == "admin" {
+			query.IncludeSystem = r.URL.Query().Get("include_system") == "1"
+		}
+		page, err := a.queryWebEventsForMember(member, query)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "invalid event cursor") {
+				status = http.StatusBadRequest
+			}
+			if errors.Is(err, errWebProfileAccessDenied) {
+				status = http.StatusForbidden
+			}
+			writeWebError(w, status, err.Error())
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
+			"events": page.Events, "next_cursor": page.NextCursor,
+		}})
 	}
+}
+
+var errWebProfileAccessDenied = errors.New("profile access denied")
+
+func (a App) queryWebEventsForMember(member Member, query EventQuery) (EventPage, error) {
+	if member.Role == "admin" {
+		return a.MemberStore.QueryEvents(query)
+	}
+	profiles, err := a.MemberStore.ListManagedProfiles(member.Email)
+	if err != nil {
+		return EventPage{}, err
+	}
+	allowed := make(map[string]struct{}, len(profiles))
+	for _, profile := range profiles {
+		allowed[profile.Name] = struct{}{}
+	}
+	if query.Profile != "" {
+		if _, ok := allowed[query.Profile]; !ok {
+			return EventPage{}, errWebProfileAccessDenied
+		}
+	}
+	targetCount := query.Limit + 1
+	result := EventPage{Events: make([]OperationEvent, 0, targetCount)}
+	scan := query
+	scan.Limit = 200
+	for len(result.Events) < targetCount {
+		page, err := a.MemberStore.QueryEvents(scan)
+		if err != nil {
+			return EventPage{}, err
+		}
+		for _, event := range page.Events {
+			if _, ok := allowed[event.Profile]; !ok {
+				continue
+			}
+			result.Events = append(result.Events, event)
+			if len(result.Events) == targetCount {
+				break
+			}
+		}
+		if len(result.Events) == targetCount || page.NextCursor == "" {
+			break
+		}
+		scan.Cursor = page.NextCursor
+	}
+	if len(result.Events) > query.Limit {
+		result.Events = result.Events[:query.Limit]
+		result.NextCursor = encodeEventCursor(result.Events[len(result.Events)-1])
+	}
+	return result, nil
 }
 
 func (a App) webJobsHandler(configPath string) http.HandlerFunc {
@@ -1688,13 +1822,13 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 		}
 		cfg, err := a.loadWebConfig(r, configPath)
 		if err != nil {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.status", Profile: ref, Message: err.Error()})
+			a.logWebAWSStatusError(r, ref, err)
 			writeWebError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		profile, err := resolveProfileRef(cfg, ref)
 		if err != nil {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.status", Profile: ref, Message: err.Error()})
+			a.logWebAWSStatusError(r, ref, err)
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1706,7 +1840,7 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 		}
 		plan, status, err := a.webAWSStatusWithCleanup(r.Context(), profile)
 		if err != nil {
-			a.logProfileError("web.aws.status", profile, fmt.Sprintf("aws status failed: %v", err))
+			a.logWebAWSStatusError(r, profile.Name, err)
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("aws status failed: %v", err)})
 			return
 		}
@@ -1717,6 +1851,29 @@ func (a App) webAWSStatusHandler(configPath string) http.HandlerFunc {
 			Data:   webAWSStatusData(profile, plan, status),
 		})
 	}
+}
+
+func (a App) logWebAWSStatusError(r *http.Request, profile string, err error) {
+	classified := classifyOperationalError(err)
+	if classified.Skip {
+		return
+	}
+	op := a.operationContextForRequest(r)
+	a.writeRuntimeLog(LogEntry{
+		Level:            classified.Level,
+		Action:           "web.aws.status",
+		Operation:        "aws.status",
+		Profile:          profile,
+		RequestID:        op.RequestID,
+		Source:           op.Source,
+		Phase:            "failed",
+		ErrorCode:        classified.Code,
+		MemberEmail:      op.Actor.MemberEmail,
+		ActorMemberID:    op.Actor.MemberID,
+		ActorMemberEmail: op.Actor.MemberEmail,
+		ActorMemberName:  op.Actor.MemberName,
+		Message:          err.Error(),
+	})
 }
 
 func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
@@ -1768,7 +1925,6 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		if req.Confirm && req.Background {
 			resp := a.startWebAWSJob(r, configPath, command, req.Profile, req.OwnerEmail, req.Notify)
 			a.logWebResponse("web.aws."+command, req.Profile, resp)
-			a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
 			writeWebJSON(w, resp)
 			return
 		}
@@ -1786,7 +1942,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			}
 		}
 		a.logWebResponse("web.aws."+command, req.Profile, resp)
-		a.recordWebEvent(configPath, req.Profile, command, req.Confirm, resp)
+		a.recordWebEventForRequest(r, configPath, req.Profile, command, req.Confirm, resp)
 		writeWebJSON(w, resp)
 	}
 }
@@ -1831,7 +1987,7 @@ func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {
 		}
 		resp := a.webRunCommand(r, configPath, []string{"start", req.Profile})
 		a.logWebResponse("web.tunnel.start", req.Profile, resp)
-		a.recordWebEvent(configPath, req.Profile, "start", true, resp)
+		a.recordWebEventForRequest(r, configPath, req.Profile, "start", true, resp)
 		writeWebJSON(w, resp)
 	}
 }
@@ -2000,30 +2156,69 @@ func (a App) webAWSStatusWithCleanup(ctx context.Context, profile Profile) (MacP
 }
 
 func (a App) cleanupProfileLocalRecords(profileName, reason string) (ReleaseReminder, error) {
-	profileName = strings.TrimSpace(profileName)
-	if profileName == "" {
-		return ReleaseReminder{}, errors.New("profile is required")
-	}
-	var reminder ReleaseReminder
-	err := a.JobManager.WithProfileOperation(profileName, func() error {
-		var err error
-		reminder, err = a.cleanupProfileLocalRecordsLocked(profileName, reason)
-		return err
-	})
+	reminder, _, err := a.cleanupProfileLocalRecordsChanged(profileName, reason)
 	return reminder, err
 }
 
+func (a App) cleanupProfileLocalRecordsChanged(profileName, reason string) (ReleaseReminder, bool, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, false, errors.New("profile is required")
+	}
+	var reminder ReleaseReminder
+	var changed bool
+	err := a.JobManager.WithProfileOperation(profileName, func() error {
+		var err error
+		reminder, changed, err = a.cleanupProfileLocalRecordsLockedChanged(profileName, reason)
+		return err
+	})
+	return reminder, changed, err
+}
+
+func (a App) cleanupProfileLocalRecordsWithEvent(profileName, reason string, event OperationEvent) (ReleaseReminder, bool, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ReleaseReminder{}, false, errors.New("profile is required")
+	}
+	var reminder ReleaseReminder
+	var changed bool
+	err := a.JobManager.WithProfileOperation(profileName, func() error {
+		var err error
+		reminder, changed, err = a.MemberStore.CleanupProfileRecordsAndRecordEvent(
+			profileName,
+			time.Now().Format(time.RFC3339),
+			reason,
+			event,
+		)
+		return err
+	})
+	return reminder, changed, err
+}
+
 func (a App) cleanupProfileLocalRecordsLocked(profileName, reason string) (ReleaseReminder, error) {
-	reminder, _, err := a.MemberStore.CleanupProfileRecords(
+	reminder, _, err := a.cleanupProfileLocalRecordsLockedChanged(profileName, reason)
+	return reminder, err
+}
+
+func (a App) cleanupProfileLocalRecordsLockedChanged(profileName, reason string) (ReleaseReminder, bool, error) {
+	return a.MemberStore.CleanupProfileRecords(
 		profileName,
 		time.Now().Format(time.RFC3339),
 		reason,
 	)
-	return reminder, err
 }
 
 func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) error {
-	result, err := NewWechatNotifierFromEnv().Send(WechatNotification{
+	requestToken, _ := randomToken(12)
+	context := wechatDeliveryContext{
+		RequestID:  "req-wechat-" + requestToken,
+		Profile:    reminder.ProfileName,
+		AppleEmail: reminder.AppleEmail,
+		Source:     "system",
+		Event:      event,
+		Attempt:    1,
+	}
+	notification := WechatNotification{
 		Event:         event,
 		Profile:       reminder.ProfileName,
 		AppleEmail:    reminder.AppleEmail,
@@ -2034,16 +2229,142 @@ func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, opera
 		DueAt:         reminder.ReleaseDueAt,
 		Management:    true,
 		Description:   description,
+	}
+	return a.deliverWechatNotification(context, func() (WechatNotifyResult, error) {
+		return NewWechatNotifierFromEnv().Send(notification)
 	})
-	if err != nil {
-		redacted := redactWechatWebhookURL(err.Error())
-		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: redacted})
-		return errors.New(redacted)
+}
+
+type wechatDeliveryContext struct {
+	RequestID   string
+	JobID       string
+	Profile     string
+	AppleEmail  string
+	Source      string
+	Actor       AuditActor
+	Event       string
+	DeliveryKey string
+	Attempt     int
+}
+
+func (a App) deliverWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) error {
+	result, sendErr := a.attemptWechatNotification(context, send)
+	if sendErr == nil && !result.Skipped {
+		return a.recordWechatDeliveryState(context, "sent", result, nil)
+	}
+	if sendErr == nil {
+		sendErr = errWechatWebhookNotConfigured
+	}
+	redacted := errors.New(redactWechatWebhookURL(sendErr.Error()))
+	failedErr := a.recordWechatDeliveryState(context, "failed", result, redacted)
+	return errors.Join(redacted, failedErr)
+}
+
+func (a App) attemptWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) (WechatNotifyResult, error) {
+	if context.Attempt <= 0 {
+		context.Attempt = 1
+	}
+	if context.Source == "" {
+		context.Source = "system"
+	}
+	if err := a.recordWechatDeliveryState(context, "pending", WechatNotifyResult{}, nil); err != nil {
+		return WechatNotifyResult{}, err
+	}
+	return send()
+}
+
+func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase string, result WechatNotifyResult, cause error) error {
+	level := "info"
+	status := phase
+	if phase == "sent" {
+		status = "success"
+	}
+	errorCode := ""
+	message := result.Message
+	if cause != nil {
+		if phase == "retrying" {
+			level = "warn"
+		} else {
+			level = "error"
+			status = "failed"
+		}
+		errorCode = classifyOperationalError(cause).Code
+		message = cause.Error()
 	}
 	if result.Skipped {
-		_ = a.LogManager.Write(LogEntry{Level: "info", Action: "wechat." + event, Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail, Message: result.Message})
+		message = result.Message
 	}
-	return nil
+	operation := "wechat.notify"
+	if event := strings.TrimSpace(context.Event); event != "" {
+		operation += "." + event
+	}
+	entry := LogEntry{
+		Level:            level,
+		Action:           "wechat." + phase,
+		Profile:          context.Profile,
+		AppleEmail:       context.AppleEmail,
+		ActorMemberID:    context.Actor.MemberID,
+		ActorMemberEmail: context.Actor.MemberEmail,
+		ActorMemberName:  context.Actor.MemberName,
+		RequestID:        context.RequestID,
+		JobID:            context.JobID,
+		Operation:        operation,
+		Source:           context.Source,
+		Phase:            phase,
+		Status:           status,
+		ErrorCode:        errorCode,
+		Attempt:          context.Attempt,
+		HTTPStatus:       result.HTTPStatus,
+		Message:          message,
+	}
+	a.writeRuntimeLog(entry)
+	eventID := ""
+	if context.JobID != "" {
+		deliveryKey := strings.TrimSpace(context.DeliveryKey)
+		if len(deliveryKey) > 16 {
+			deliveryKey = deliveryKey[:16]
+		}
+		eventID = fmt.Sprintf("event-%s-wechat-%s-%d-%s", context.JobID, phase, context.Attempt, deliveryKey)
+		if phase == "sent" {
+			eventID = "event-" + context.JobID + "-wechat-sent"
+		}
+	}
+	return a.MemberStore.RecordEvent(OperationEvent{
+		ID:          eventID,
+		Action:      "wechat." + phase,
+		Profile:     context.Profile,
+		AppleEmail:  context.AppleEmail,
+		MemberID:    context.Actor.MemberID,
+		MemberEmail: context.Actor.MemberEmail,
+		MemberName:  context.Actor.MemberName,
+		RequestID:   context.RequestID,
+		JobID:       context.JobID,
+		Source:      "system",
+		Phase:       phase,
+		ErrorCode:   errorCode,
+		Status:      status,
+		Message:     wechatAuditMessageForEvent(result, cause, context.Attempt, context.Event),
+	})
+}
+
+func wechatAuditMessageForEvent(result WechatNotifyResult, cause error, attempt int, event string) string {
+	parts := []string{fmt.Sprintf("attempt=%d", attempt)}
+	if strings.TrimSpace(event) != "" {
+		parts = append(parts, "notification_event="+strings.TrimSpace(event))
+	}
+	if result.HTTPStatus != 0 {
+		parts = append(parts, fmt.Sprintf("http_status=%d", result.HTTPStatus))
+	}
+	if result.ErrorCode != 0 {
+		parts = append(parts, fmt.Sprintf("wechat_error_code=%d", result.ErrorCode))
+	}
+	if result.Skipped {
+		parts = append(parts, "skipped=true")
+	}
+	if cause != nil {
+		parts = append(parts, "delivery_failed=true")
+	}
+	return strings.Join(parts, " ")
 }
 
 func displayNameEmail(name, email string) string {
@@ -2136,13 +2457,50 @@ func (a App) startWebAWSJob(r *http.Request, configPath, command, profileRef, ow
 			lifecycleOwnerEmail = member.Email
 		}
 	}
-	job, plan, err := a.startAWSJobForResolvedProfileJob(r.Context(), runConfigPath, command, profile, notify, Job{
+	op := a.operationContextForRequest(r)
+	startedAt := a.JobManager.normalize().Now()
+	seed := Job{
+		ID:                  newJobID("aws-"+command, profile.Name, startedAt),
+		Type:                "aws-" + command,
+		Profile:             profile.Name,
+		AppleEmail:          profile.AWS.AccountEmail,
+		RequestID:           op.RequestID,
+		Source:              "web",
+		ActorMemberID:       op.Actor.MemberID,
+		ActorEmail:          op.Actor.MemberEmail,
+		ActorName:           op.Actor.MemberName,
+		StartedAt:           startedAt,
 		LifecycleOwnerEmail: lifecycleOwnerEmail,
 		LifecycleState:      JobLifecyclePending,
-	}, runConfigPath)
+	}
+	job, plan, err := a.prepareAWSJobForResolvedProfile(r.Context(), runConfigPath, command, profile, notify, seed, runConfigPath)
 	if err != nil {
 		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
 	}
+	if err := a.recordWebAWSJobPhase(job, "requested", "success", ""); err != nil {
+		_, _ = a.JobManager.failRunnerStartup(job.ID, fmt.Errorf("record requested event: %w", err))
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	detached := context.WithoutCancel(r.Context())
+	job, err = a.JobManager.StartRunner(detached, job)
+	if err != nil {
+		if lifecycleErr := a.reconcileWebAWSLifecycleJob(detached, configPath, job); lifecycleErr != nil {
+			classified := classifyOperationalError(lifecycleErr)
+			a.writeRuntimeLog(LogEntry{
+				Level:     classified.Level,
+				Action:    "web.aws." + command + ".startup_failure_reconcile",
+				Profile:   job.Profile,
+				RequestID: job.RequestID,
+				JobID:     job.ID,
+				Source:    job.Source,
+				Phase:     "failed",
+				ErrorCode: classified.Code,
+				Message:   lifecycleErr.Error(),
+			})
+		}
+		return webAPIResponse{OK: false, Code: 1, Error: err.Error()}
+	}
+	_ = a.recordWebAWSJobPhase(job, "started", "success", "")
 	var out strings.Builder
 	fmt.Fprintf(&out, "Started background AWS %s job: %s\n", command, job.ID)
 	fmt.Fprintf(&out, "Profile: %s\n", profile.Name)
@@ -2162,6 +2520,15 @@ func (a App) startAWSJobForResolvedProfile(ctx context.Context, configPath, comm
 }
 
 func (a App) startAWSJobForResolvedProfileJob(ctx context.Context, configPath, command string, profile Profile, notify bool, job Job, cleanupPaths ...string) (created Job, plan MacPlan, err error) {
+	created, plan, err = a.prepareAWSJobForResolvedProfile(ctx, configPath, command, profile, notify, job, cleanupPaths...)
+	if err != nil {
+		return created, plan, err
+	}
+	created, err = a.JobManager.StartRunner(ctx, created)
+	return created, plan, err
+}
+
+func (a App) prepareAWSJobForResolvedProfile(ctx context.Context, configPath, command string, profile Profile, notify bool, job Job, cleanupPaths ...string) (created Job, plan MacPlan, err error) {
 	defer func() {
 		if err != nil {
 			_ = removeJobPaths(cleanupPaths)
@@ -2178,6 +2545,22 @@ func (a App) startAWSJobForResolvedProfileJob(ctx context.Context, configPath, c
 	job.Type = "aws-" + command
 	job.Profile = profile.Name
 	job.AppleEmail = plan.AccountEmail
+	op := operationContextFrom(ctx)
+	if job.RequestID == "" {
+		job.RequestID = op.RequestID
+	}
+	if job.Source == "" {
+		job.Source = op.Source
+	}
+	if job.ActorMemberID == "" {
+		job.ActorMemberID = op.Actor.MemberID
+	}
+	if job.ActorEmail == "" {
+		job.ActorEmail = op.Actor.MemberEmail
+	}
+	if job.ActorName == "" {
+		job.ActorName = op.Actor.MemberName
+	}
 	job.Command = []string{executable, "aws", command, profile.Name, "--confirm", "--config", configPath}
 	job.Notify = notify
 	job.CleanupPaths = append([]string(nil), cleanupPaths...)
@@ -2185,11 +2568,54 @@ func (a App) startAWSJobForResolvedProfileJob(ctx context.Context, configPath, c
 	if err != nil {
 		return Job{}, MacPlan{}, err
 	}
-	created, err = a.JobManager.StartRunner(ctx, created)
 	return created, plan, err
 }
 
+func (a App) recordWebAWSJobPhase(job Job, phase, status, errorCode string) error {
+	actionPrefix := "aws.open"
+	if job.Type == "aws-destroy" {
+		actionPrefix = "aws.release"
+	}
+	err := a.MemberStore.RecordEvent(OperationEvent{
+		Action:      actionPrefix + "." + phase,
+		Profile:     job.Profile,
+		AppleEmail:  job.AppleEmail,
+		MemberID:    job.ActorMemberID,
+		MemberEmail: job.ActorEmail,
+		MemberName:  job.ActorName,
+		RequestID:   job.RequestID,
+		JobID:       job.ID,
+		Source:      job.Source,
+		Phase:       phase,
+		ErrorCode:   errorCode,
+		Confirmed:   true,
+		Status:      status,
+	})
+	if err != nil {
+		classified := classifyOperationalError(err)
+		a.writeRuntimeLog(LogEntry{
+			Level:       classified.Level,
+			Action:      actionPrefix + "." + phase + ".audit_failed",
+			Operation:   actionPrefix,
+			Profile:     job.Profile,
+			AppleEmail:  job.AppleEmail,
+			MemberEmail: job.ActorEmail,
+			RequestID:   job.RequestID,
+			JobID:       job.ID,
+			Source:      job.Source,
+			Phase:       phase,
+			ErrorCode:   classified.Code,
+			Message:     err.Error(),
+		})
+	}
+	return err
+}
+
 func (a App) recordWebEvent(configPath, profileRef, action string, confirmed bool, resp webAPIResponse) {
+	a.recordWebEventForRequest(nil, configPath, profileRef, action, confirmed, resp)
+}
+
+func (a App) recordWebEventForRequest(r *http.Request, configPath, profileRef, action string, confirmed bool, resp webAPIResponse) {
 	status := "success"
 	message := strings.TrimSpace(resp.Output)
 	if !resp.OK {
@@ -2199,12 +2625,43 @@ func (a App) recordWebEvent(configPath, profileRef, action string, confirmed boo
 	if len(message) > 400 {
 		message = message[:400]
 	}
+	eventAction := action
+	eventPhase := ""
+	if !confirmed {
+		switch action {
+		case "open":
+			eventAction = "aws.open.previewed"
+			eventPhase = "previewed"
+		case "destroy":
+			eventAction = "aws.release.previewed"
+			eventPhase = "previewed"
+		}
+	} else {
+		switch action {
+		case "open":
+			eventAction = "aws.open.requested"
+			eventPhase = "requested"
+		case "destroy":
+			eventAction = "aws.release.requested"
+			eventPhase = "requested"
+		}
+	}
+	op := OperationContext{Source: "web"}
+	if r != nil {
+		op = a.operationContextForRequest(r)
+	}
 	event := OperationEvent{
-		Action:    action,
-		Profile:   profileRef,
-		Confirmed: confirmed,
-		Status:    status,
-		Message:   message,
+		Action:      eventAction,
+		Profile:     profileRef,
+		MemberID:    op.Actor.MemberID,
+		MemberEmail: op.Actor.MemberEmail,
+		MemberName:  op.Actor.MemberName,
+		RequestID:   op.RequestID,
+		Source:      op.Source,
+		Phase:       eventPhase,
+		Confirmed:   confirmed,
+		Status:      status,
+		Message:     message,
 	}
 	if cfg, err := LoadConfig(configPath); err == nil {
 		if profile, err := resolveProfileRef(cfg, profileRef); err == nil {

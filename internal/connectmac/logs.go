@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -20,26 +21,38 @@ type LogManager struct {
 }
 
 type LogEntry struct {
-	Time         string `json:"time"`
-	Level        string `json:"level"`
-	Action       string `json:"action"`
-	Profile      string `json:"profile,omitempty"`
-	TunnelAction string `json:"tunnel_action,omitempty"`
-	PID          int    `json:"pid,omitempty"`
-	LocalPorts   []int  `json:"local_ports,omitempty"`
-	LaunchResult string `json:"launch_result,omitempty"`
-	Outcome      string `json:"outcome,omitempty"`
-	AppleEmail   string `json:"apple_email,omitempty"`
-	MemberEmail  string `json:"member_email,omitempty"`
-	TransferID   string `json:"transfer_id,omitempty"`
-	LocalJobID   string `json:"local_job_id,omitempty"`
-	Direction    string `json:"direction,omitempty"`
-	Status       string `json:"status,omitempty"`
-	Percent      int    `json:"percent,omitempty"`
-	ElapsedMS    int64  `json:"elapsed_ms,omitempty"`
-	Region       string `json:"region,omitempty"`
-	AWSProfile   string `json:"aws_profile,omitempty"`
-	Message      string `json:"message"`
+	Time             string `json:"time"`
+	Level            string `json:"level"`
+	Action           string `json:"action"`
+	Profile          string `json:"profile,omitempty"`
+	TunnelAction     string `json:"tunnel_action,omitempty"`
+	PID              int    `json:"pid,omitempty"`
+	LocalPorts       []int  `json:"local_ports,omitempty"`
+	LaunchResult     string `json:"launch_result,omitempty"`
+	Outcome          string `json:"outcome,omitempty"`
+	AppleEmail       string `json:"apple_email,omitempty"`
+	MemberEmail      string `json:"member_email,omitempty"`
+	ActorMemberID    string `json:"actor_member_id,omitempty"`
+	ActorMemberEmail string `json:"actor_member_email,omitempty"`
+	ActorMemberName  string `json:"actor_member_name,omitempty"`
+	TransferID       string `json:"transfer_id,omitempty"`
+	LocalJobID       string `json:"local_job_id,omitempty"`
+	Direction        string `json:"direction,omitempty"`
+	Status           string `json:"status,omitempty"`
+	Percent          int    `json:"percent,omitempty"`
+	ElapsedMS        int64  `json:"elapsed_ms,omitempty"`
+	DurationMS       int64  `json:"duration_ms,omitempty"`
+	Region           string `json:"region,omitempty"`
+	AWSProfile       string `json:"aws_profile,omitempty"`
+	RequestID        string `json:"request_id,omitempty"`
+	JobID            string `json:"job_id,omitempty"`
+	Operation        string `json:"operation,omitempty"`
+	Source           string `json:"source,omitempty"`
+	Phase            string `json:"phase,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	Attempt          int    `json:"attempt,omitempty"`
+	HTTPStatus       int    `json:"http_status,omitempty"`
+	Message          string `json:"message"`
 }
 
 type LogFile struct {
@@ -71,7 +84,7 @@ func (m LogManager) Write(entry LogEntry) error {
 	if entry.Time == "" {
 		entry.Time = m.Now().Format(time.RFC3339)
 	}
-	entry.Message = sanitizeLogText(entry.Message)
+	entry = sanitizeLogEntry(entry)
 	dir, err := ExpandPath(m.Dir)
 	if err != nil {
 		return err
@@ -214,19 +227,78 @@ func addLogFileToZip(zw *zip.Writer, file LogFile) error {
 
 func sanitizeLogText(text string) string {
 	text = strings.TrimSpace(text)
+	text = logPEMBlockPattern.ReplaceAllString(text, "[REDACTED PEM]")
+	text = logAuthorizationPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logCookieHeaderPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logURLCredentialPattern.ReplaceAllString(text, "${1}[REDACTED]${2}")
+	text = logJSONSensitivePattern.ReplaceAllString(text, `${1}"[REDACTED]"`)
+	text = logSensitiveQueryPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logAWSAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = logSensitiveAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = logAWSAccessKeyPattern.ReplaceAllString(text, "[REDACTED AWS ACCESS KEY]")
 	if len(text) > 4000 {
 		text = text[:4000]
 	}
-	replacements := []string{
-		"password", "[password]",
-		"Password", "[password]",
-		"secret", "[secret]",
-		"Secret", "[secret]",
-		"token", "[token]",
-		"Token", "[token]",
-		"session", "[session]",
-		"Session", "[session]",
-	}
-	replacer := strings.NewReplacer(replacements...)
-	return replacer.Replace(text)
+	return text
+}
+
+const logSensitiveKeyPattern = `access_token|client_secret|aws_access_key_id|aws_secret_access_key|aws_session_token|awsaccesskeyid|secretaccesskey|sessiontoken|password|token|secret|session|cookie`
+
+var (
+	logPEMBlockPattern = regexp.MustCompile(
+		`(?s)-----BEGIN [^-\r\n]+-----.*?(?:-----END [^-\r\n]+-----|$)`,
+	)
+	logAuthorizationPattern = regexp.MustCompile(
+		`(?i)(authorization[ \t]*:[ \t]*)[^\r\n]*`,
+	)
+	logCookieHeaderPattern = regexp.MustCompile(
+		`(?i)((?:set-cookie|cookie)[ \t]*:[ \t]*)[^\r\n]*`,
+	)
+	logURLCredentialPattern = regexp.MustCompile(
+		`(?i)([a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+(@)`,
+	)
+	logJSONSensitivePattern = regexp.MustCompile(
+		`(?i)("(?:` + logSensitiveKeyPattern + `|x-amz-credential|x-amz-security-token|x-amz-signature)"[ \t]*:[ \t]*)"(?:\\.|[^"\\])*"`,
+	)
+	logSensitiveQueryPattern = regexp.MustCompile(
+		`(?i)([?&](?:key|` + logSensitiveKeyPattern + `|x-amz-credential|x-amz-security-token|x-amz-signature)=)[^&#\s]+`,
+	)
+	logAWSAssignmentPattern = regexp.MustCompile(
+		`(?i)\b(aws_access_key_id|aws_secret_access_key|aws_session_token)([ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
+	)
+	logSensitiveAssignmentPattern = regexp.MustCompile(
+		`(?i)(^|[?&;,\s])((?:` + logSensitiveKeyPattern + `)(?:[ \t]*[:=][ \t]*|[ \t]+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
+	)
+	logAWSAccessKeyPattern = regexp.MustCompile(
+		`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`,
+	)
+)
+
+func sanitizeLogEntry(entry LogEntry) LogEntry {
+	entry.Time = sanitizeLogText(entry.Time)
+	entry.Level = sanitizeLogText(entry.Level)
+	entry.Action = sanitizeLogText(entry.Action)
+	entry.Profile = sanitizeLogText(entry.Profile)
+	entry.TunnelAction = sanitizeLogText(entry.TunnelAction)
+	entry.LaunchResult = sanitizeLogText(entry.LaunchResult)
+	entry.Outcome = sanitizeLogText(entry.Outcome)
+	entry.AppleEmail = sanitizeLogText(entry.AppleEmail)
+	entry.MemberEmail = sanitizeLogText(entry.MemberEmail)
+	entry.ActorMemberID = sanitizeLogText(entry.ActorMemberID)
+	entry.ActorMemberEmail = sanitizeLogText(entry.ActorMemberEmail)
+	entry.ActorMemberName = sanitizeLogText(entry.ActorMemberName)
+	entry.TransferID = sanitizeLogText(entry.TransferID)
+	entry.LocalJobID = sanitizeLogText(entry.LocalJobID)
+	entry.Direction = sanitizeLogText(entry.Direction)
+	entry.Status = sanitizeLogText(entry.Status)
+	entry.Region = sanitizeLogText(entry.Region)
+	entry.AWSProfile = sanitizeLogText(entry.AWSProfile)
+	entry.RequestID = sanitizeLogText(entry.RequestID)
+	entry.JobID = sanitizeLogText(entry.JobID)
+	entry.Operation = sanitizeLogText(entry.Operation)
+	entry.Source = sanitizeLogText(entry.Source)
+	entry.Phase = sanitizeLogText(entry.Phase)
+	entry.ErrorCode = sanitizeLogText(entry.ErrorCode)
+	entry.Message = sanitizeLogText(entry.Message)
+	return entry
 }
