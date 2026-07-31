@@ -1285,7 +1285,10 @@
       });
       $("loadingTitle").textContent = message;
       $("loadingLayer").classList.toggle("hidden", !busy);
-      if (!busy) scheduleDialogFocusFlush();
+      if (!busy) {
+        if (!$("awsConfirmLayer").classList.contains("hidden")) renderAWSConfirmValidation();
+        scheduleDialogFocusFlush();
+      }
     }
 
     function setOutput(text) {
@@ -2660,7 +2663,11 @@
       }
       const ownerEmail = isAdmin() ? confirmOpenOwnerValue(profile.name) : (state.auth?.member?.email || "");
       if (isAdmin() && pending.command === "open" && !ownerEmail) {
-        return { valid: false, message: "管理员确认打开前必须选择负责人。", field: $("assignMemberSelect") };
+        return {
+          valid: false,
+          message: "管理员确认打开前必须选择负责人，请关闭预览并选择负责人。",
+          field: $("awsConfirmCloseBtn"),
+        };
       }
       const model = pendingAWSActionModel(profile);
       const action = pending.command === "open" ? model.actions.open : model.actions.release;
@@ -2935,7 +2942,10 @@
       const validation = validatePendingAWS();
       if (!validation.valid) {
         renderAWSConfirmValidation();
-        if (validation.field) focusInvalidField(validation.field, validation.message);
+        if (validation.field) {
+          setStatus(validation.message);
+          validation.field.focus();
+        }
         return;
       }
       await runAWS(pending.command, true);

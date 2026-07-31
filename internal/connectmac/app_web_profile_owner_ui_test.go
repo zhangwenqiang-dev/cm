@@ -81,6 +81,8 @@ func TestWebProfileOwnerConfirmationDialogContract(t *testing.T) {
 		`$("awsConfirmOwner").textContent`,
 		`$("runAWSConfirmBtn").disabled = !validation.valid;`,
 		`focusInvalidField(`,
+		`field: $("awsConfirmCloseBtn")`,
+		`请关闭预览并选择负责人`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("profile owner confirmation contract missing %q", want)

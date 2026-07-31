@@ -347,8 +347,13 @@ func TestWebDialogFocusLifecycleContract(t *testing.T) {
 		}
 	}
 	setBusy := webInlineFunctionSource(t, html, `function setBusy(busy, message = "处理中...")`)
-	if !strings.Contains(setBusy, `if (!busy) scheduleDialogFocusFlush();`) {
+	if !strings.Contains(setBusy, `if (!busy) {`) || !strings.Contains(setBusy, `scheduleDialogFocusFlush();`) {
 		t.Error("setBusy(false) must flush deferred dialog focus after controls render")
+	}
+	revalidate := strings.Index(setBusy, `renderAWSConfirmValidation();`)
+	schedule := strings.Index(setBusy, `scheduleDialogFocusFlush();`)
+	if revalidate < 0 || schedule < 0 || revalidate > schedule {
+		t.Error("setBusy(false) must revalidate the visible AWS dialog before scheduling focus")
 	}
 	focusManager := extractWebSource(t, html, "const dialogTriggers = new WeakMap();", "\n    function cancelDialog(")
 	if strings.Contains(focusManager, "setInterval(") || strings.Contains(focusManager, "setTimeout(") {
@@ -453,7 +458,15 @@ const window = { getComputedStyle: (element) => element.style };
 const HTMLElement = FakeElement;
 const state = { busy: false };
 
-` + manager + "\n" + setBusy + `
+` + manager + `
+
+let awsValidationCalls = 0;
+function renderAWSConfirmValidation() {
+  awsValidationCalls += 1;
+  $("runAWSConfirmBtn").disabled = true;
+}
+
+` + setBusy + `
 
 // Opening during busy defers focus. Validation may keep the requested control
 // disabled, so the flush must choose the first enabled visible fallback.
@@ -467,8 +480,9 @@ setBusy(true);
 openDialog(awsLayer, awsConfirm);
 assert.equal(document.activeElement, openTrigger);
 setBusy(false);
-awsConfirm.disabled = true;
 await Promise.resolve();
+assert.equal(awsValidationCalls, 1);
+assert.equal(awsConfirm.disabled, true);
 assert.equal(document.activeElement, awsClose);
 
 // Closing during busy defers restoration until setBusy(false) has re-enabled
