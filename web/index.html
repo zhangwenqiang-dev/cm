@@ -4152,23 +4152,34 @@ cm local-agent start</pre>
       surface.style.padding = "12px";
     }
 
-    async function openTerminal(profile) {
-      if (!profile) return;
+    function localTerminalAvailable(profile) {
+      if (!profile) return false;
+      if (!profileReady(profile)) {
+        setStatus("Mac 尚未 ready，不能打开终端。");
+        terminalSetStatus("Mac 尚未 ready，不能打开终端。");
+        return false;
+      }
       if (!state.localAgent.online) {
         setStatus(localAgentOfflineMessage);
+        terminalSetStatus(localAgentOfflineMessage);
         openLocalAgentRepair();
-        return;
+        return false;
       }
+      return true;
+    }
+
+    async function openTerminal(profile) {
+      if (!localTerminalAvailable(profile)) return;
       state.selected = profile;
       showView("terminalView");
       ensureTerminalSurface();
       renderProfiles();
       renderSelected();
-      await connectLocalTerminal(profile);
+      return connectLocalTerminal(profile);
     }
 
     async function connectLocalTerminal(profile) {
-      if (!profile) return;
+      if (!localTerminalAvailable(profile)) return;
       closeTerminal(false);
       state.terminal.profile = profile;
       state.terminal.manualClose = false;

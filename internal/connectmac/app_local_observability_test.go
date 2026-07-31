@@ -733,6 +733,7 @@ func TestBrowserLocalActionsRecordServerIntentBeforeLocalCalls(t *testing.T) {
 	html := string(data)
 	startTunnel := extractWebSource(t, html, "async function startTunnel(profile)", "\n    async function openSync(profile)")
 	runSync := extractWebSource(t, html, "async function runSync(direction)", "\n    function terminalSetStatus")
+	terminalGuard := extractWebSource(t, html, "function localTerminalAvailable(profile)", "\n    async function openTerminal(profile)")
 	connectTerminal := extractWebSource(t, html, "async function connectLocalTerminal(profile)", "\n    function closeTerminal")
 	script := `
 import assert from "node:assert/strict";
@@ -812,7 +813,7 @@ async function updateTransferRecord() {}
 function loadSyncJobs() {}
 function presentSyncJob() {}
 async function failTransferRecord() {}
-` + startTunnel + "\n" + runSync + "\n" + connectTerminal + `
+	` + startTunnel + "\n" + runSync + "\n" + terminalGuard + "\n" + connectTerminal + `
 
 sequence = [];
 await startTunnel("shared");
