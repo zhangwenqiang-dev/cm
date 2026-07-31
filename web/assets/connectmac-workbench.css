@@ -1,5 +1,8 @@
 .view.workbench {
   display: grid;
+}
+
+.workbench {
   gap: 16px;
   padding: 18px;
   background: transparent;

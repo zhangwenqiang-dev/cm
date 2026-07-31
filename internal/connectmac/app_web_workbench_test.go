@@ -45,8 +45,15 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(cssData), ".view.workbench {") {
-		t.Error("workbench stylesheet must use .view.workbench to override the later inline .view display rule")
+	css := string(cssData)
+	if !strings.Contains(css, ".view.workbench {\n  display: grid;\n}") {
+		t.Error("workbench stylesheet must isolate the inline .view display override in .view.workbench")
+	}
+	if !strings.Contains(css, ".workbench {\n  gap: 16px;\n  padding: 18px;") {
+		t.Error("base .workbench rule must own desktop gap and padding")
+	}
+	if !strings.Contains(css, "@media (max-width: 820px) {\n  .workbench {\n    padding: 12px;\n  }") {
+		t.Error("mobile .workbench rule must override padding at 820px")
 	}
 }
 
