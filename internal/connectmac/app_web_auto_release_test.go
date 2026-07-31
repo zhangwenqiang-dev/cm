@@ -726,13 +726,13 @@ func TestWebAutoReleaseDialogAccessibilityContract(t *testing.T) {
 	html := string(data)
 	for _, want := range []string{
 		`role="dialog" aria-modal="true" aria-labelledby="autoReleaseTitle" aria-describedby="autoReleaseDialogCopy autoReleaseSafetyCopy"`,
-		`state.autoReleaseTrigger = document.activeElement;`,
-		`$("autoReleaseConfirmBtn").focus();`,
+		`openDialog($("autoReleaseLayer"), $("autoReleaseConfirmBtn"));`,
+		`closeDialog($("autoReleaseLayer"));`,
 		`if (event.key === "Escape")`,
 		`if (event.key !== "Tab") return;`,
 		`focusable[focusable.length - 1].focus();`,
 		`focusable[0].focus();`,
-		`trigger.focus();`,
+		`dialogTriggers.set(layer, document.activeElement instanceof HTMLElement ? document.activeElement : null);`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web auto release accessibility contract missing %q", want)

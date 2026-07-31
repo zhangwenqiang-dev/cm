@@ -324,6 +324,216 @@ func TestWebWorkbenchDialogContract(t *testing.T) {
 	}
 }
 
+func TestWebDialogFocusLifecycleContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`const dialogTriggers = new WeakMap();`,
+		`const pendingDialogInitialFocus = new Set();`,
+		`const pendingDialogRestoreFocus = new Set();`,
+		`const dialogLayerStack = [];`,
+		`function flushDialogFocus()`,
+		`function scheduleDialogFocusFlush()`,
+		`pendingDialogInitialFocus.add(layer);`,
+		`pendingDialogRestoreFocus.add(layer);`,
+		`dialogTriggers.get(layer)`,
+		`dialogTriggers.delete(layer)`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dialog focus lifecycle contract missing %q", want)
+		}
+	}
+	setBusy := webInlineFunctionSource(t, html, `function setBusy(busy, message = "处理中...")`)
+	if !strings.Contains(setBusy, `if (!busy) scheduleDialogFocusFlush();`) {
+		t.Error("setBusy(false) must flush deferred dialog focus after controls render")
+	}
+	focusManager := extractWebSource(t, html, "const dialogTriggers = new WeakMap();", "\n    function cancelDialog(")
+	if strings.Contains(focusManager, "setInterval(") || strings.Contains(focusManager, "setTimeout(") {
+		t.Error("dialog focus lifecycle must not use polling")
+	}
+}
+
+func TestWebDialogFocusLifecycleBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for dialog focus behavior test: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	manager := extractWebSource(t, html, "const dialogTriggers = new WeakMap();", "\n    function cancelDialog(")
+	setBusy := webInlineFunctionSource(t, html, `function setBusy(busy, message = "处理中...")`)
+	harness := `
+import assert from "node:assert/strict";
+
+class FakeClassList {
+  constructor(values = []) { this.values = new Set(values); }
+  contains(value) { return this.values.has(value); }
+  add(value) { this.values.add(value); }
+  remove(value) { this.values.delete(value); }
+  toggle(value, force) {
+    if (force === undefined ? !this.values.has(value) : force) this.values.add(value);
+    else this.values.delete(value);
+  }
+}
+
+class FakeElement {
+  constructor(id, classes = []) {
+    this.id = id;
+    this.classList = new FakeClassList(classes);
+    this.disabled = false;
+    this.hidden = false;
+    this.attributes = new Map();
+    this.controls = [];
+    this.parent = null;
+    this.style = { display: "block", visibility: "visible" };
+    this.focusCount = 0;
+  }
+  focus() { document.activeElement = this; this.focusCount += 1; }
+  getAttribute(name) { return this.attributes.get(name) || null; }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  addEventListener() {}
+  querySelectorAll() { return this.controls.slice(); }
+  querySelector(selector) {
+    if (selector.includes("data-dialog-initial-focus")) {
+      return this.controls.find((item) => item.attributes.has("data-dialog-initial-focus")) || null;
+    }
+    return this.controls[0] || null;
+  }
+  contains(element) {
+    for (let current = element; current; current = current.parent) {
+      if (current === this) return true;
+    }
+    return false;
+  }
+  closest(selector) {
+    for (let current = this; current; current = current.parent) {
+      if (selector === ".hidden" && current.classList.contains("hidden")) return current;
+      if (selector === ".picker-layer" && current.classList.contains("picker-layer")) return current;
+      if (selector === "section, main, .card" && current.classList.contains("surface")) return current;
+    }
+    return null;
+  }
+}
+
+const elements = new Map();
+const attached = new Set();
+function register(element) {
+  attached.add(element);
+  if (element.id) elements.set(element.id, element);
+  return element;
+}
+function $(id) {
+  if (!elements.has(id)) register(new FakeElement(id));
+  return elements.get(id);
+}
+function layer(id, controls) {
+  const result = register(new FakeElement(id, ["picker-layer", "hidden"]));
+  result.controls = controls;
+  controls.forEach((control) => {
+    register(control);
+    control.parent = result;
+  });
+  return result;
+}
+
+const document = {
+  activeElement: null,
+  contains: (element) => attached.has(element),
+  querySelectorAll: (selector) => selector.startsWith("[data-")
+    ? []
+    : [...attached].filter((element) => !element.classList.contains("picker-layer"))
+};
+const window = { getComputedStyle: (element) => element.style };
+const HTMLElement = FakeElement;
+const state = { busy: false };
+
+` + manager + "\n" + setBusy + `
+
+// Opening during busy defers focus. Validation may keep the requested control
+// disabled, so the flush must choose the first enabled visible fallback.
+const openTrigger = $("openMacBtn");
+const awsClose = $("awsConfirmCloseBtn");
+const awsConfirm = $("runAWSConfirmBtn");
+awsConfirm.setAttribute("data-dialog-initial-focus", "");
+const awsLayer = layer("awsConfirmLayer", [awsClose, awsConfirm]);
+openTrigger.focus();
+setBusy(true);
+openDialog(awsLayer, awsConfirm);
+assert.equal(document.activeElement, openTrigger);
+setBusy(false);
+awsConfirm.disabled = true;
+await Promise.resolve();
+assert.equal(document.activeElement, awsClose);
+
+// Closing during busy defers restoration until setBusy(false) has re-enabled
+// and rendered the trigger.
+closeDialog(awsLayer);
+const passwordTrigger = $("openOwnPasswordBtn");
+const passwordInput = $("userCurrentPassword");
+const passwordClose = $("ownPasswordCloseBtn");
+const passwordLayer = layer("ownPasswordLayer", [passwordClose, passwordInput]);
+passwordTrigger.focus();
+openDialog(passwordLayer, passwordInput);
+assert.equal(document.activeElement, passwordInput);
+setBusy(true);
+closeDialog(passwordLayer);
+assert.equal(document.activeElement, passwordInput);
+setBusy(false);
+await Promise.resolve();
+assert.equal(document.activeElement, passwordTrigger);
+
+// Per-layer triggers preserve nesting. Closing a hidden unrelated layer must
+// not clear the active child or parent restoration chain.
+const original = $("openMemberFormBtn");
+const parentControl = new FakeElement("parentControl");
+const parentClose = new FakeElement("parentClose");
+const parentLayer = layer("parentLayer", [parentClose, parentControl]);
+const childControl = new FakeElement("childControl");
+const childClose = new FakeElement("childClose");
+const childLayer = layer("childLayer", [childClose, childControl]);
+const unrelated = layer("unrelatedLayer", [new FakeElement("unrelatedClose")]);
+original.focus();
+openDialog(parentLayer, parentControl);
+openDialog(childLayer, childControl);
+closeDialog(unrelated);
+closeDialog(childLayer);
+assert.equal(document.activeElement, parentControl);
+closeDialog(parentLayer);
+assert.equal(document.activeElement, original);
+
+// Reopening the same layer before a deferred restore keeps its original
+// trigger instead of replacing it with focus stranded inside the hidden layer.
+const continuousTrigger = $("openProfileFormBtn");
+const continuousInput = $("profileFormName");
+const continuousClose = $("profileFormCloseBtn");
+const continuousLayer = layer("profileFormLayer", [continuousClose, continuousInput]);
+continuousTrigger.focus();
+openDialog(continuousLayer, continuousInput);
+setBusy(true);
+closeDialog(continuousLayer);
+openDialog(continuousLayer, continuousInput);
+setBusy(false);
+await Promise.resolve();
+assert.equal(document.activeElement, continuousInput);
+closeDialog(continuousLayer);
+assert.equal(document.activeElement, continuousTrigger);
+`
+	script := filepath.Join(t.TempDir(), "dialog_focus_behavior.mjs")
+	if err := os.WriteFile(script, []byte(harness), 0o600); err != nil {
+		t.Fatalf("write dialog focus node test: %v", err)
+	}
+	output, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("dialog focus node behavior test failed: %v\n%s", err, output)
+	}
+}
+
 func TestWebWorkbenchStateModel(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {

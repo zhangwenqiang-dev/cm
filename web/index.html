@@ -1086,24 +1086,109 @@
   <script src="assets/connectmac-workbench.js"></script>
   <script>
     const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", statusRefreshRequests: new Map(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
-    let dialogTrigger = null;
+    const dialogTriggers = new WeakMap();
+    const dialogInitialFocus = new WeakMap();
+    const pendingDialogInitialFocus = new Set();
+    const pendingDialogRestoreFocus = new Set();
+    const dialogLayerStack = [];
+    let dialogFocusFlushScheduled = false;
+
+    function dialogElementAvailable(element) {
+      if (!(element instanceof HTMLElement) || element.disabled || !document.contains(element)) return false;
+      if (element.hidden || element.getAttribute("aria-hidden") === "true" || element.closest(".hidden")) return false;
+      const style = window.getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden";
+    }
+
+    function dialogFocusableControls(layer) {
+      if (!layer || layer.classList.contains("hidden")) return [];
+      return [...layer.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
+        'textarea:not([disabled]), summary, a[href], [tabindex]:not([tabindex="-1"])',
+      )].filter(dialogElementAvailable);
+    }
+
+    function dialogInitialTarget(layer) {
+      const requested = dialogInitialFocus.get(layer);
+      if (dialogElementAvailable(requested)) return requested;
+      const marked = layer.querySelector("[data-dialog-initial-focus]");
+      if (dialogElementAvailable(marked)) return marked;
+      return dialogFocusableControls(layer)[0] || null;
+    }
+
+    function dialogRestoreTarget(trigger) {
+      if (dialogElementAvailable(trigger)) return trigger;
+      const parentLayer = trigger instanceof HTMLElement ? trigger.closest(".picker-layer") : null;
+      const parentTarget = dialogFocusableControls(parentLayer)[0];
+      if (parentTarget) return parentTarget;
+      const parentSurface = trigger instanceof HTMLElement ? trigger.closest("section, main, .card") : null;
+      const localTarget = parentSurface
+        ? [...parentSurface.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href]')].find(dialogElementAvailable)
+        : null;
+      if (localTarget) return localTarget;
+      return [...document.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href]')].find(dialogElementAvailable) || null;
+    }
+
+    function flushDialogFocus() {
+      if (state.busy) return;
+      let restoreTarget = null;
+      for (const layer of [...pendingDialogRestoreFocus]) {
+        pendingDialogRestoreFocus.delete(layer);
+        const trigger = dialogTriggers.get(layer);
+        dialogTriggers.delete(layer);
+        dialogInitialFocus.delete(layer);
+        restoreTarget = dialogRestoreTarget(trigger) || restoreTarget;
+      }
+      if (restoreTarget) restoreTarget.focus();
+
+      for (const layer of [...pendingDialogInitialFocus]) {
+        if (layer.classList.contains("hidden")) pendingDialogInitialFocus.delete(layer);
+      }
+      const topLayer = [...dialogLayerStack].reverse().find((layer) => !layer.classList.contains("hidden"));
+      if (!topLayer || !pendingDialogInitialFocus.has(topLayer)) return;
+      const target = dialogInitialTarget(topLayer);
+      if (!target) return;
+      pendingDialogInitialFocus.delete(topLayer);
+      target.focus();
+    }
+
+    function scheduleDialogFocusFlush() {
+      if (dialogFocusFlushScheduled) return;
+      dialogFocusFlushScheduled = true;
+      queueMicrotask(() => {
+        dialogFocusFlushScheduled = false;
+        flushDialogFocus();
+      });
+    }
 
     function openDialog(layer, initialFocus) {
       if (!layer || !layer.classList.contains("hidden")) return;
-      dialogTrigger = document.activeElement;
+      const reopeningBeforeRestore = pendingDialogRestoreFocus.has(layer) && dialogTriggers.has(layer);
+      if (!reopeningBeforeRestore) {
+        dialogTriggers.set(layer, document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      }
+      dialogInitialFocus.set(layer, initialFocus || null);
+      pendingDialogRestoreFocus.delete(layer);
+      pendingDialogInitialFocus.add(layer);
+      dialogLayerStack.push(layer);
       layer.classList.remove("hidden");
-      const preferred = initialFocus && !initialFocus.disabled ? initialFocus : null;
-      const marked = layer.querySelector("[data-dialog-initial-focus]:not([disabled])");
-      const target = preferred || marked ||
-        layer.querySelector("input:not([disabled]), select:not([disabled]), button:not([disabled])");
-      window.requestAnimationFrame(() => target?.focus());
+      if (!state.busy) flushDialogFocus();
     }
 
     function closeDialog(layer, { restoreFocus = true } = {}) {
-      if (!layer) return;
+      if (!layer || layer.classList.contains("hidden")) return;
       layer.classList.add("hidden");
-      if (restoreFocus && dialogTrigger instanceof HTMLElement) dialogTrigger.focus();
-      dialogTrigger = null;
+      const stackIndex = dialogLayerStack.lastIndexOf(layer);
+      if (stackIndex >= 0) dialogLayerStack.splice(stackIndex, 1);
+      pendingDialogInitialFocus.delete(layer);
+      if (restoreFocus && dialogTriggers.has(layer)) {
+        pendingDialogRestoreFocus.add(layer);
+      } else {
+        dialogTriggers.delete(layer);
+        dialogInitialFocus.delete(layer);
+        pendingDialogRestoreFocus.delete(layer);
+      }
+      if (!state.busy) flushDialogFocus();
     }
 
     function trapDialogFocus(event, layer) {
@@ -1113,10 +1198,7 @@
         return;
       }
       if (event.key !== "Tab") return;
-      const focusable = [...layer.querySelectorAll(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
-        'textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
-      )].filter((element) => !element.classList.contains("hidden") && element.offsetParent !== null);
+      const focusable = dialogFocusableControls(layer);
       if (!focusable.length) return;
       if (event.shiftKey && document.activeElement === focusable[0]) {
         event.preventDefault();
@@ -1203,6 +1285,7 @@
       });
       $("loadingTitle").textContent = message;
       $("loadingLayer").classList.toggle("hidden", !busy);
+      if (!busy) scheduleDialogFocusFlush();
     }
 
     function setOutput(text) {
@@ -2666,7 +2749,6 @@
       }
       const enabled = !reminder.auto_release_enabled;
       state.pendingAutoRelease = { profile: p.name, enabled };
-      state.autoReleaseTrigger = document.activeElement;
       $("autoReleaseTitle").textContent = enabled ? "开启自动释放" : "关闭自动释放";
       $("autoReleaseDialogCopy").textContent = enabled
         ? "开启后，到期提醒后等待10分钟再自动释放；失败每5分钟重试，最多1小时。"
@@ -2676,7 +2758,6 @@
       $("autoReleaseConfirmBtn").classList.toggle("primary", enabled);
       renderAutoReleaseDialog();
       openDialog($("autoReleaseLayer"), $("autoReleaseConfirmBtn"));
-      $("autoReleaseConfirmBtn").focus();
     }
 
     function renderAutoReleaseDialog() {
@@ -2688,11 +2769,8 @@
 
     function closeAutoReleaseDialog() {
       if (state.autoReleaseSubmitting) return;
-      const trigger = state.autoReleaseTrigger;
-      state.autoReleaseTrigger = null;
       state.pendingAutoRelease = null;
-      closeDialog($("autoReleaseLayer"), { restoreFocus: false });
-      if (trigger && typeof trigger.focus === "function") trigger.focus();
+      closeDialog($("autoReleaseLayer"));
     }
 
     async function submitAutoRelease() {
