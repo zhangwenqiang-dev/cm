@@ -876,7 +876,7 @@
                 <select id="assignMemberSelect" class="inline-select"></select>
               </div>
             </div>
-            <div id="technicalOutput" class="output">
+            <div id="technicalOutput" class="output hidden">
               <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
               <pre id="output"></pre>
             </div>
@@ -1114,7 +1114,9 @@
     }
 
     function setOutput(text) {
-      $("output").textContent = text || "";
+      const value = text || "";
+      $("output").textContent = value;
+      $("technicalOutput").classList.toggle("hidden", !value);
     }
 
     function setStatus(text) {
@@ -1893,37 +1895,87 @@
       state.confirmOpenOwners[profileName] = ownerEmail || "";
     }
 
+    function applyWorkbenchAction(id, action) {
+      const button = $(id);
+      button.classList.toggle("hidden", !action.visible);
+      button.disabled = !action.enabled;
+      button.title = action.reason || "";
+    }
+
+    function renderWorkbench(p, status, reminder) {
+      const jobs = p ? state.jobs.filter((job) => job.profile === p.name) : [];
+      const effectiveState = ConnectMacWorkbench.effectiveState({
+        profileName: p?.name || "",
+        status: status,
+        reminder: reminder,
+        jobs: jobs,
+      });
+      const model = ConnectMacWorkbench.buildActionModel({
+        effectiveState: effectiveState,
+        mobile: window.matchMedia("(max-width: 640px)").matches,
+        localAgentOnline: state.localAgent.online,
+        busy: state.busy,
+        canOperate: ["operator", "admin"].includes(state.auth?.member?.role),
+        canAdmin: isAdmin(),
+      });
+      const copy = ConnectMacWorkbench.stateCopy(effectiveState);
+      const badgeClass = {
+        stopped: "stopped",
+        creating: "wait",
+        ready: "ready",
+        releasing: "wait",
+        blocked: "blocked",
+        unknown: "loading",
+      }[effectiveState] || "loading";
+
+      $("workbenchStateBadge").className = "badge " + badgeClass;
+      $("workbenchStateBadge").textContent = copy.badge;
+      $("workbenchRecommendation").textContent = copy.heading;
+      $("workbenchRecommendationDetail").textContent = copy.detail;
+
+      applyWorkbenchAction("statusBtn", model.actions.refresh);
+      applyWorkbenchAction("openMacBtn", model.actions.open);
+      applyWorkbenchAction("releaseMacBtn", model.actions.release);
+      applyWorkbenchAction("extendReminderBtn", model.actions.extend);
+      applyWorkbenchAction("cleanupRecordsBtn", model.actions.cleanup);
+      applyWorkbenchAction("terminalBtn", model.actions.connect);
+      applyWorkbenchAction("vncBtn", model.actions.vnc);
+      applyWorkbenchAction("syncBtn", model.actions.transfer);
+      applyWorkbenchAction("eventsBtn", model.actions.events);
+
+      const primaryButtons = {
+        refresh: "statusBtn",
+        open: "openMacBtn",
+        connect: "terminalBtn",
+        details: "statusBtn",
+      };
+      for (const id of ["statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "cleanupRecordsBtn", "terminalBtn", "vncBtn", "syncBtn", "eventsBtn"]) {
+        $(id).classList.toggle("primary", primaryButtons[model.primary] === id);
+      }
+      const primaryAction = model.actions[model.primary];
+      $("workbenchActionReason").textContent =
+        primaryAction && !primaryAction.enabled ? primaryAction.reason : "";
+
+      return model;
+    }
+
     function renderSelected() {
       const p = selectedProfile();
       $("selectedProfileName").textContent = p ? p.name : "未选择";
       $("selectedAppleEmail").textContent = p ? (p.apple_email || "无 Apple 邮箱") : "-";
       const disabled = !p;
       const status = p ? state.statuses[p.name] : null;
-      const statusKnown = !!status && status.decision !== "error" && !status.error;
-      const isReady = statusKnown && status.ready === true;
-      const readyActionDisabled = disabled || state.busy || !isReady || !state.localAgent.online;
       const reminder = p ? state.reminders[p.name] : null;
-      const releaseActive = !!(p && autoReleaseActive(reminder, p.name));
-      const openDisabled = disabled || state.busy || !statusKnown || isReady || releaseActive;
-      const destroyDisabled = disabled || state.busy || !statusKnown || !isReady || releaseActive;
+      const model = renderWorkbench(p, status, reminder);
       const syncJobsLoading = !!(p && state.syncJobsLoading[p.name]);
-      for (const id of ["statusBtn", "terminalBtn", "eventsBtn"]) {
-        $(id).disabled = disabled || state.busy;
-      }
-      $("openMacBtn").disabled = openDisabled;
-      $("releaseMacBtn").disabled = destroyDisabled;
-      $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released" || releaseActive;
-      $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
-      $("syncBtn").disabled = readyActionDisabled;
-      $("vncBtn").disabled = readyActionDisabled;
-      $("syncPushBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "push"), p?.name, "push");
-      $("syncPullBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "pull"), p?.name, "pull");
-      $("syncPushBrowseBtn").disabled = readyActionDisabled;
-      $("syncPullBrowseBtn").disabled = readyActionDisabled;
-      $("terminalBtn").disabled = readyActionDisabled;
+      const transferDisabled = !model.actions.transfer.enabled;
+      $("syncPushBtn").disabled = transferDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "push"), p?.name, "push");
+      $("syncPullBtn").disabled = transferDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "pull"), p?.name, "pull");
+      $("syncPushBrowseBtn").disabled = transferDisabled;
+      $("syncPullBrowseBtn").disabled = transferDisabled;
       $("syncRefreshHistoryBtn").disabled = disabled || state.busy;
       $("syncTitle").textContent = p ? ("传输 · " + p.name) : "传输";
-      $("syncReadyHint").textContent = !state.localAgent.online ? "本机代理未启动，不能传输。" : (p && !profileReady(p.name) ? "Mac 未 ready，不能传输。" : (syncJobsLoading ? "正在加载传输任务..." : ""));
+      $("syncReadyHint").textContent = syncJobsLoading ? "正在加载传输任务..." : model.actions.transfer.reason;
       $("terminalTitle").textContent = p ? ("网页终端 · " + p.name) : "网页终端";
       $("terminalReconnectBtn").disabled = disabled;
       $("terminalDisconnectBtn").disabled = !state.terminal.socket;
@@ -3630,6 +3682,7 @@
     async function loadStatus() {
       const p = selectedProfile();
       if (!p) return;
+      $("technicalDetails").open = true;
       setBusy(true, "正在读取状态...");
       setStatus("读取状态...");
       await refreshStatus(p.name, true);

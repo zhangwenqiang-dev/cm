@@ -13,6 +13,42 @@
     "releasing",
     "blocked",
   ]);
+  const stateCopyMap = {
+    stopped: {
+      badge: "已停止",
+      heading: "这台 Mac 尚未运行",
+      detail: "打开前会先展示 AWS 预览并要求确认。",
+    },
+    creating: {
+      badge: "正在打开",
+      heading: "正在打开这台 Mac",
+      detail: "系统正在创建资源并等待 AWS 状态检查。",
+    },
+    ready: {
+      badge: "已就绪",
+      heading: "这台 Mac 已可使用",
+      detail: "可以连接终端、打开 VNC 或传输文件。",
+    },
+    releasing: {
+      badge: "正在释放",
+      heading: "正在释放这台 Mac",
+      detail: "系统正在终止实例并等待 Dedicated Host 可释放。",
+    },
+    blocked: {
+      badge: "受阻",
+      heading: "当前流程已停止",
+      detail: "请查看阻塞原因；系统不会自动创建其他 Host 或终止 EC2。",
+    },
+    unknown: {
+      badge: "状态未知",
+      heading: "暂时无法确认 Mac 状态",
+      detail: "请先刷新状态或诊断配置。",
+    },
+  };
+
+  function stateCopy(state) {
+    return stateCopyMap[state] || stateCopyMap.unknown;
+  }
 
   function activeLifecycleJob(job, type, profileName) {
     if (!job || job.type !== type) return false;
@@ -106,7 +142,7 @@
         : ((state === "creating" || state === "releasing") ? "details" : "refresh"));
 
     const actions = {
-      refresh: action(true, true, ""),
+      refresh: action(true, !busy, busy ? operateReason : ""),
       open: action(true, state === "stopped" && operateAllowed, !operateAllowed ? operateReason : (releasing ? releaseReason : "Mac 当前不可打开")),
       release: action(true, ready && operateAllowed, !operateAllowed ? operateReason : (releasing ? releaseReason : notReadyReason)),
       connect: action(!mobile, localEnabled, localReason),
@@ -118,7 +154,7 @@
         canAdmin && state === "stopped" && !busy,
         !canAdmin ? "需要管理员权限" : (busy ? "操作进行中" : (releasing ? releaseReason : (ready ? "Mac 已就绪" : "状态未知"))),
       ),
-      events: action(true, true, ""),
+      events: action(true, !busy, busy ? operateReason : ""),
       details: action(true, true, ""),
     };
 
@@ -132,5 +168,7 @@
   window.ConnectMacWorkbench = {
     effectiveState: effectiveState,
     buildActionModel: buildActionModel,
+    stateCopyMap: stateCopyMap,
+    stateCopy: stateCopy,
   };
 })(window);

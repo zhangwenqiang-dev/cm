@@ -22,10 +22,42 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`id="workbenchActionReason"`,
 		`id="workbenchTaskPanel"`,
 		`id="technicalDetails"`,
+		`id="technicalOutput" class="output hidden"`,
 		`id="workbenchEmptyTask"`,
+		`function renderWorkbench(p, status, reminder)`,
+		`ConnectMacWorkbench.effectiveState({`,
+		`ConnectMacWorkbench.buildActionModel({`,
+		`ConnectMacWorkbench.stateCopy(effectiveState)`,
+		`$("technicalOutput").classList.toggle("hidden", !value);`,
+		`$("technicalDetails").open = true;`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("workbench structure is missing %q", want)
+		}
+	}
+
+	renderSelected := strings.Index(html, `function renderSelected()`)
+	renderWorkbenchCall := -1
+	if renderSelected >= 0 {
+		renderWorkbenchCall = strings.Index(html[renderSelected:], `renderWorkbench(p, status, reminder);`)
+	}
+	if renderWorkbenchCall < 0 {
+		t.Error("renderSelected must delegate workbench state and action rendering to renderWorkbench")
+	}
+
+	for _, action := range []string{
+		`applyWorkbenchAction("statusBtn", model.actions.refresh`,
+		`applyWorkbenchAction("openMacBtn", model.actions.open`,
+		`applyWorkbenchAction("releaseMacBtn", model.actions.release`,
+		`applyWorkbenchAction("extendReminderBtn", model.actions.extend`,
+		`applyWorkbenchAction("cleanupRecordsBtn", model.actions.cleanup`,
+		`applyWorkbenchAction("terminalBtn", model.actions.connect`,
+		`applyWorkbenchAction("vncBtn", model.actions.vnc`,
+		`applyWorkbenchAction("syncBtn", model.actions.transfer`,
+		`applyWorkbenchAction("eventsBtn", model.actions.events`,
+	} {
+		if !strings.Contains(html, action) {
+			t.Errorf("workbench action renderer is missing %q", action)
 		}
 	}
 

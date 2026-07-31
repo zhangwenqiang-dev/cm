@@ -49,9 +49,12 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 	}
 	html := string(data)
 	for _, want := range []string{
-		`return "releasing";`,
-		`const openDisabled = disabled || state.busy || !statusKnown || isReady || releaseActive;`,
-		`const destroyDisabled = disabled || state.busy || !statusKnown || !isReady || releaseActive;`,
+		`ConnectMacWorkbench.effectiveState({`,
+		`reminder: reminder,`,
+		`jobs: jobs,`,
+		`ConnectMacWorkbench.buildActionModel({`,
+		`applyWorkbenchAction("openMacBtn", model.actions.open`,
+		`applyWorkbenchAction("releaseMacBtn", model.actions.release`,
 		`if (reminder?.status === "released" || reminder?.auto_release_state === "released") return false;`,
 		`reminder?.auto_release_state === "running" || reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "notifying"`,
 		`statusBadge(status, p.name)`,
@@ -61,10 +64,14 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 			t.Fatalf("web releasing state contract missing %q", want)
 		}
 	}
-	guard := strings.Index(html, `if (profileName && autoReleaseActive(state.reminders[profileName], profileName)) return "releasing";`)
-	creating := strings.Index(html, `if (status.decision === "wait-ready") return "creating";`)
-	if guard < 0 || creating < 0 || guard > creating {
-		t.Fatal("releasing label must take precedence over the AWS creating label")
+	for _, obsolete := range []string{
+		`const openDisabled =`,
+		`const destroyDisabled =`,
+		`const releaseActive =`,
+	} {
+		if strings.Contains(html, obsolete) {
+			t.Fatalf("web releasing state still uses obsolete independent guard %q", obsolete)
+		}
 	}
 	activeJob := strings.Index(html, `if (state.jobs.some((job) => job.profile === profileName && job.type === "aws-destroy" && (job.status === "starting" || job.status === "running"))) return true;`)
 	terminalReminder := strings.Index(html, `if (reminder?.status === "released" || reminder?.auto_release_state === "released") return false;`)
@@ -733,7 +740,7 @@ func TestWebAutoReleaseMobileAndRoleContract(t *testing.T) {
 		`const ready = !!(profile && profileReady(profile.name));`,
 		`!profile || !reminder || !ready || state.busy`,
 		`Mac 已运行，可重新设置自动释放`,
-		`$("extendReminderBtn").disabled =`,
+		`applyWorkbenchAction("extendReminderBtn", model.actions.extend`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web auto release role/mobile contract missing %q", want)

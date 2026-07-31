@@ -9,7 +9,42 @@ const context = { window: {} };
 vm.createContext(context);
 new vm.Script(source, { filename: "web/assets/connectmac-workbench.js" }).runInContext(context);
 
-const { effectiveState, buildActionModel } = context.window.ConnectMacWorkbench;
+const { effectiveState, buildActionModel, stateCopyMap, stateCopy } =
+  context.window.ConnectMacWorkbench;
+
+const expectedStateCopy = {
+  stopped: {
+    badge: "已停止",
+    heading: "这台 Mac 尚未运行",
+  },
+  creating: {
+    badge: "正在打开",
+    heading: "正在打开这台 Mac",
+  },
+  ready: {
+    badge: "已就绪",
+    heading: "这台 Mac 已可使用",
+  },
+  releasing: {
+    badge: "正在释放",
+    heading: "正在释放这台 Mac",
+  },
+  blocked: {
+    badge: "受阻",
+    heading: "当前流程已停止",
+  },
+  unknown: {
+    badge: "状态未知",
+    heading: "暂时无法确认 Mac 状态",
+  },
+};
+for (const [state, expected] of Object.entries(expectedStateCopy)) {
+  assert.equal(stateCopyMap[state].badge, expected.badge);
+  assert.equal(stateCopy(state).heading, expected.heading);
+  assert.equal(stateCopy(state).badge, expected.badge);
+  assert.ok(stateCopy(state).detail.length > 0, `${state} must explain the next step`);
+}
+assert.equal(stateCopy("not-a-state").heading, expectedStateCopy.unknown.heading);
 
 assert.equal(effectiveState({ status: { decision: "create" } }), "stopped");
 assert.equal(effectiveState({ status: { decision: "wait-ready" } }), "creating");
@@ -218,7 +253,7 @@ for (const action of expectedActions) {
 }
 
 const busyReady = actionModel({ effectiveState: "ready", busy: true });
-for (const action of ["release", "connect", "vnc", "transfer", "extend"]) {
+for (const action of ["refresh", "release", "connect", "vnc", "transfer", "extend", "events"]) {
   assert.equal(busyReady.actions[action].enabled, false, `${action} must be locked while busy`);
 }
 const busyStopped = actionModel({ effectiveState: "stopped", busy: true });
