@@ -28,6 +28,12 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`ConnectMacWorkbench.effectiveState({`,
 		`ConnectMacWorkbench.buildActionModel({`,
 		`ConnectMacWorkbench.stateCopy(effectiveState)`,
+		`const statusAction = model.primary === "details" ? model.actions.details : model.actions.refresh;`,
+		`applyWorkbenchAction("statusBtn", statusAction`,
+		`effectiveState === "releasing" ? "查看释放进度" : "查看任务详情"`,
+		`$("statusBtn").dataset.workbenchAction = model.primary === "details" ? "details" : "refresh";`,
+		`function handleWorkbenchStatusAction()`,
+		`$("statusBtn").dataset.workbenchAction === "details"`,
 		`$("technicalOutput").classList.toggle("hidden", !value);`,
 		`$("technicalDetails").open = true;`,
 	} {
@@ -46,7 +52,6 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	}
 
 	for _, action := range []string{
-		`applyWorkbenchAction("statusBtn", model.actions.refresh`,
 		`applyWorkbenchAction("openMacBtn", model.actions.open`,
 		`applyWorkbenchAction("releaseMacBtn", model.actions.release`,
 		`applyWorkbenchAction("extendReminderBtn", model.actions.extend`,
@@ -58,6 +63,28 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	} {
 		if !strings.Contains(html, action) {
 			t.Errorf("workbench action renderer is missing %q", action)
+		}
+	}
+
+	handlerStart := strings.Index(html, `function handleWorkbenchStatusAction()`)
+	handlerEnd := -1
+	if handlerStart >= 0 {
+		handlerEnd = strings.Index(html[handlerStart+1:], "\n    function ")
+		if handlerEnd >= 0 {
+			handlerEnd++
+		}
+	}
+	if handlerStart < 0 || handlerEnd < 0 {
+		t.Error("workbench status handler is missing")
+	} else {
+		handler := html[handlerStart : handlerStart+handlerEnd]
+		for _, want := range []string{
+			`$("technicalDetails").open = true;`,
+			`loadStatus();`,
+		} {
+			if !strings.Contains(handler, want) {
+				t.Errorf("workbench details handler is missing %q", want)
+			}
 		}
 	}
 

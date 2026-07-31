@@ -1933,7 +1933,11 @@
       $("workbenchRecommendation").textContent = copy.heading;
       $("workbenchRecommendationDetail").textContent = copy.detail;
 
-      applyWorkbenchAction("statusBtn", model.actions.refresh);
+      const statusAction = model.primary === "details" ? model.actions.details : model.actions.refresh;
+      const detailsLabel = effectiveState === "releasing" ? "查看释放进度" : "查看任务详情";
+      applyWorkbenchAction("statusBtn", statusAction);
+      $("statusBtn").dataset.workbenchAction = model.primary === "details" ? "details" : "refresh";
+      $("statusBtn").textContent = model.primary === "details" ? detailsLabel : "刷新状态";
       applyWorkbenchAction("openMacBtn", model.actions.open);
       applyWorkbenchAction("releaseMacBtn", model.actions.release);
       applyWorkbenchAction("extendReminderBtn", model.actions.extend);
@@ -3691,6 +3695,15 @@
       renderSelected();
     }
 
+    function handleWorkbenchStatusAction() {
+      if ($("statusBtn").dataset.workbenchAction === "details") {
+        $("technicalDetails").open = true;
+      }
+      if (!state.busy) {
+        loadStatus();
+      }
+    }
+
     function openMemberForm(member = null) {
       state.editingMemberEmail = member?.email || "";
       $("memberFormTitle").textContent = member ? "修改成员" : "添加成员";
@@ -4545,7 +4558,7 @@
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
-    $("statusBtn").addEventListener("click", loadStatus);
+    $("statusBtn").addEventListener("click", handleWorkbenchStatusAction);
     $("openMacBtn").addEventListener("click", () => previewAWS("open"));
     $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
     $("assignMemberSelect").addEventListener("change", () => {
