@@ -8,6 +8,19 @@ import (
 	"testing"
 )
 
+func webInlineFunctionSource(t *testing.T, html, declaration string) string {
+	t.Helper()
+	start := strings.Index(html, declaration)
+	if start < 0 {
+		t.Fatalf("web inline function is missing %q", declaration)
+	}
+	end := strings.Index(html[start+1:], "\n    function ")
+	if end < 0 {
+		t.Fatalf("web inline function %q has no following function boundary", declaration)
+	}
+	return html[start : start+end+1]
+}
+
 func TestWebWorkbenchStructure(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
 	if err != nil {
@@ -25,17 +38,12 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`id="technicalOutput" class="output hidden"`,
 		`id="workbenchEmptyTask"`,
 		`function renderWorkbench(p, status, reminder)`,
-		`ConnectMacWorkbench.effectiveState({`,
-		`ConnectMacWorkbench.buildActionModel({`,
-		`ConnectMacWorkbench.stateCopy(effectiveState)`,
-		`const statusAction = model.primary === "details" ? model.actions.details : model.actions.refresh;`,
-		`applyWorkbenchAction("statusBtn", statusAction`,
-		`effectiveState === "releasing" ? "查看释放进度" : "查看任务详情"`,
-		`$("statusBtn").dataset.workbenchAction = model.primary === "details" ? "details" : "refresh";`,
 		`function handleWorkbenchStatusAction()`,
 		`$("statusBtn").dataset.workbenchAction === "details"`,
 		`$("technicalOutput").classList.toggle("hidden", !value);`,
 		`$("technicalDetails").open = true;`,
+		`const workbenchMobileMedia = window.matchMedia("(max-width: 820px)");`,
+		`workbenchMobileMedia.addEventListener("change", () => renderSelected());`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("workbench structure is missing %q", want)
@@ -51,7 +59,17 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		t.Error("renderSelected must delegate workbench state and action rendering to renderWorkbench")
 	}
 
-	for _, action := range []string{
+	renderWorkbench := webInlineFunctionSource(t, html, `function renderWorkbench(p, status, reminder)`)
+	for _, want := range []string{
+		`ConnectMacWorkbench.effectiveState({`,
+		`ConnectMacWorkbench.buildActionModel({`,
+		`ConnectMacWorkbench.stateCopy(effectiveState)`,
+		`hasProfile: !!p,`,
+		`mobile: workbenchMobileMedia.matches,`,
+		`const statusAction = model.primary === "details" ? model.actions.details : model.actions.refresh;`,
+		`applyWorkbenchAction("statusBtn", statusAction`,
+		`effectiveState === "releasing" ? "查看释放进度" : "查看任务详情"`,
+		`$("statusBtn").dataset.workbenchAction = model.primary === "details" ? "details" : "refresh";`,
 		`applyWorkbenchAction("openMacBtn", model.actions.open`,
 		`applyWorkbenchAction("releaseMacBtn", model.actions.release`,
 		`applyWorkbenchAction("extendReminderBtn", model.actions.extend`,
@@ -61,30 +79,18 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`applyWorkbenchAction("syncBtn", model.actions.transfer`,
 		`applyWorkbenchAction("eventsBtn", model.actions.events`,
 	} {
-		if !strings.Contains(html, action) {
-			t.Errorf("workbench action renderer is missing %q", action)
+		if !strings.Contains(renderWorkbench, want) {
+			t.Errorf("renderWorkbench is missing %q", want)
 		}
 	}
 
-	handlerStart := strings.Index(html, `function handleWorkbenchStatusAction()`)
-	handlerEnd := -1
-	if handlerStart >= 0 {
-		handlerEnd = strings.Index(html[handlerStart+1:], "\n    function ")
-		if handlerEnd >= 0 {
-			handlerEnd++
-		}
-	}
-	if handlerStart < 0 || handlerEnd < 0 {
-		t.Error("workbench status handler is missing")
-	} else {
-		handler := html[handlerStart : handlerStart+handlerEnd]
-		for _, want := range []string{
-			`$("technicalDetails").open = true;`,
-			`loadStatus();`,
-		} {
-			if !strings.Contains(handler, want) {
-				t.Errorf("workbench details handler is missing %q", want)
-			}
+	handler := webInlineFunctionSource(t, html, `function handleWorkbenchStatusAction()`)
+	for _, want := range []string{
+		`$("technicalDetails").open = true;`,
+		`loadStatus();`,
+	} {
+		if !strings.Contains(handler, want) {
+			t.Errorf("workbench details handler is missing %q", want)
 		}
 	}
 

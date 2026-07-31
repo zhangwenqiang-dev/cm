@@ -111,6 +111,7 @@
     const options = input || {};
     const requestedState = options.effectiveState || options.state || "unknown";
     const state = EFFECTIVE_STATES.has(requestedState) ? requestedState : "unknown";
+    const hasProfile = options.hasProfile === true;
     const mobile = options.mobile === true || options.isMobile === true;
     const localAgentOnline = options.localAgentOnline === true ||
       options.localAgent?.online === true;
@@ -135,11 +136,14 @@
       localReason = "本机代理未连接";
     }
     const localEnabled = !mobile && ready && localAgentOnline && operateAllowed;
-    const primary = state === "stopped"
-      ? "open"
-      : (state === "ready" && !mobile
+    let primary = "refresh";
+    if (hasProfile) {
+      primary = state === "stopped"
+        ? "open"
+        : (state === "ready" && !mobile
         ? "connect"
         : ((state === "creating" || state === "releasing") ? "details" : "refresh"));
+    }
 
     const actions = {
       refresh: action(true, !busy, busy ? operateReason : ""),
@@ -157,6 +161,12 @@
       events: action(true, !busy, busy ? operateReason : ""),
       details: action(true, true, ""),
     };
+
+    if (!hasProfile) {
+      for (const name of Object.keys(actions)) {
+        actions[name] = action(actions[name].visible, false, "请先选择 Profile");
+      }
+    }
 
     return {
       state: state,

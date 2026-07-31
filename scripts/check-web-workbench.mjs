@@ -191,6 +191,7 @@ assert.equal(effectiveState({ status: null }), "unknown");
 
 function actionModel(overrides = {}) {
   return buildActionModel({
+    hasProfile: true,
     effectiveState: "ready",
     mobile: false,
     localAgentOnline: true,
@@ -275,6 +276,7 @@ assert.equal(canAdmin.actions.cleanup.enabled, true);
 
 for (const missingPermission of [undefined, null]) {
   const denied = buildActionModel({
+    hasProfile: true,
     effectiveState: "stopped",
     mobile: false,
     localAgentOnline: true,
@@ -287,6 +289,7 @@ for (const missingPermission of [undefined, null]) {
   assert.equal(denied.actions.cleanup.enabled, false);
 }
 const omittedPermissions = buildActionModel({
+  hasProfile: true,
   effectiveState: "stopped",
   mobile: false,
   localAgentOnline: true,
@@ -295,6 +298,41 @@ const omittedPermissions = buildActionModel({
 assert.equal(omittedPermissions.actions.open.enabled, false);
 assert.equal(omittedPermissions.actions.cleanup.visible, false);
 assert.equal(omittedPermissions.actions.cleanup.enabled, false);
+
+for (const mobile of [false, true]) {
+  const noProfile = buildActionModel({
+    hasProfile: false,
+    effectiveState: "ready",
+    mobile,
+    localAgentOnline: true,
+    busy: false,
+    canOperate: true,
+    canAdmin: true,
+  });
+  assert.equal(noProfile.primary, "refresh");
+  for (const actionName of expectedActions) {
+    const action = noProfile.actions[actionName];
+    assert.equal(action.enabled, false, `${actionName} must require a selected Profile`);
+    assert.equal(action.reason, "请先选择 Profile");
+  }
+  for (const actionName of ["connect", "vnc", "transfer"]) {
+    assert.equal(noProfile.actions[actionName].visible, !mobile);
+  }
+}
+
+const omittedProfile = buildActionModel({
+  effectiveState: "ready",
+  mobile: false,
+  localAgentOnline: true,
+  busy: false,
+  canOperate: true,
+  canAdmin: true,
+});
+assert.equal(omittedProfile.primary, "refresh");
+for (const actionName of expectedActions) {
+  assert.equal(omittedProfile.actions[actionName].enabled, false);
+  assert.equal(omittedProfile.actions[actionName].reason, "请先选择 Profile");
+}
 
 for (const effectiveState of ["creating", "releasing", "ready", "blocked", "unknown"]) {
   assert.equal(

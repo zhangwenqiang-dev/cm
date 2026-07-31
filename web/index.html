@@ -1075,6 +1075,7 @@
     const terminalSyncMaxAttempts = 60;
     const terminalSyncRequestTimeoutMS = 15000;
     const $ = (id) => document.getElementById(id);
+    const workbenchMobileMedia = window.matchMedia("(max-width: 820px)");
 
     function selectedProfile() {
       return state.profiles.find((p) => p.name === state.selected);
@@ -1911,8 +1912,9 @@
         jobs: jobs,
       });
       const model = ConnectMacWorkbench.buildActionModel({
+        hasProfile: !!p,
         effectiveState: effectiveState,
-        mobile: window.matchMedia("(max-width: 640px)").matches,
+        mobile: workbenchMobileMedia.matches,
         localAgentOnline: state.localAgent.online,
         busy: state.busy,
         canOperate: ["operator", "admin"].includes(state.auth?.member?.role),
@@ -4651,6 +4653,7 @@
       button.addEventListener("click", () => showView(button.getAttribute("data-view")));
     });
     window.addEventListener("popstate", restoreBrowserHistory);
+    workbenchMobileMedia.addEventListener("change", () => renderSelected());
 
     renderLocalAgentStatus();
     startLocalAgentMonitor();
