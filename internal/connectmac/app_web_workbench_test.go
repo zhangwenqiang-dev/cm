@@ -43,7 +43,7 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`$("statusBtn").dataset.workbenchAction === "details"`,
 		`$("technicalOutput").classList.toggle("hidden", !value);`,
 		`$("technicalDetails").open = true;`,
-		`const workbenchMobileMedia = window.matchMedia("(max-width: 820px)");`,
+		`const workbenchMobileMedia = window.matchMedia("(max-width: 640px)");`,
 		`workbenchMobileMedia.addEventListener("change", () => renderSelected());`,
 	} {
 		if !strings.Contains(html, want) {

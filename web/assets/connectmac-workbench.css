@@ -135,6 +135,26 @@
   min-width: 88px;
 }
 
+.local-agent-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.local-agent-repair-card {
+  max-width: 560px;
+}
+
+.local-agent-repair-commands {
+  margin: 0 14px;
+  padding: 14px;
+  border-radius: 8px;
+  background: #101828;
+  color: #f9fafb;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
 .workbench-action-reason {
   width: 100%;
   min-height: 38px;
@@ -298,11 +318,27 @@
     margin-top: 20px;
   }
 
+  .technical-details .details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
   .mobile-local-hidden {
     display: none !important;
   }
 
-  .technical-details .details {
-    grid-template-columns: minmax(0, 1fr);
+  .workbench-primary {
+    padding-bottom: 84px;
+  }
+
+  .workbench-mobile-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+    margin-inline: -6px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
   }
 }

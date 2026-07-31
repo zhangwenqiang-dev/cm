@@ -8886,12 +8886,14 @@ func TestAppWebDesktopLayoutStabilizationContract(t *testing.T) {
 	for _, want := range []string{
 		`.profile-table-scroll table, .member-table-scroll table { min-width: 0; }`,
 		`.table-scroll { overflow-x: visible; }`,
-		`.local-action { display: none !important; }`,
 		`table, thead, tbody, tr, th, td { display: block; width: 100%; }`,
 	} {
 		if !strings.Contains(mobile, want) {
 			t.Errorf("web mobile layout contract missing %q", want)
 		}
+	}
+	if !strings.Contains(page, `class="local-action mobile-local-hidden"`) {
+		t.Error("web local operations must use the dedicated mobile capability class")
 	}
 }
 
