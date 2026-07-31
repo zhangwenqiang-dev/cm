@@ -2,6 +2,66 @@
   display: grid;
 }
 
+.profile-home-heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.profile-last-updated {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#profilesView .profile-home-row {
+  cursor: pointer;
+}
+
+#profilesView .profile-home-row:focus-visible {
+  outline: 3px solid rgba(36, 107, 254, .18);
+  outline-offset: -3px;
+}
+
+#profilesView .profile-status-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#profilesView .profile-status-summary::before {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #98a2b3;
+  content: "";
+}
+
+#profilesView .profile-status-summary.ready::before {
+  background: var(--ok);
+}
+
+#profilesView .profile-status-summary.wait::before {
+  background: var(--warn);
+}
+
+#profilesView .profile-status-summary.blocked::before,
+#profilesView .profile-status-summary.error::before {
+  background: var(--danger);
+}
+
+#profilesView .profile-workbench-entry {
+  min-width: 96px;
+}
+
+.mobile-entry-label {
+  display: none;
+}
+
 .workbench {
   gap: 16px;
   padding: 18px;
@@ -163,6 +223,66 @@
 @media (max-width: 820px) {
   .workbench {
     padding: 12px;
+  }
+
+  #profilesView .profile-home-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+    padding: 10px 12px;
+  }
+
+  #profilesView .profile-home-row > td {
+    min-height: 0;
+    display: block;
+    padding: 3px 0;
+  }
+
+  #profilesView .profile-home-row > td::before {
+    display: none;
+  }
+
+  #profilesView .profile-home-row > td:first-child {
+    grid-column: 1;
+    font-size: 14px;
+  }
+
+  #profilesView .profile-home-row > td:nth-child(2),
+  #profilesView .profile-home-row > td:nth-child(3),
+  #profilesView .profile-home-row > td:nth-child(4) {
+    grid-column: 1;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  #profilesView .profile-home-row > td:nth-child(2)::before,
+  #profilesView .profile-home-row > td:nth-child(3)::before,
+  #profilesView .profile-home-row > td:nth-child(4)::before {
+    display: inline;
+    margin-right: 6px;
+    font-size: 11px;
+  }
+
+  #profilesView .profile-home-row > td:nth-child(5) {
+    grid-column: 1;
+  }
+
+  #profilesView .profile-home-row > td:last-child {
+    grid-column: 2;
+    grid-row: 1 / span 5;
+    align-self: center;
+  }
+
+  #profilesView .profile-workbench-entry {
+    min-width: 60px;
+  }
+
+  .desktop-entry-label {
+    display: none;
+  }
+
+  .mobile-entry-label {
+    display: inline;
   }
 
   .workbench-grid {

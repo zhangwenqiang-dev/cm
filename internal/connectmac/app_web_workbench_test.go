@@ -130,3 +130,65 @@ func TestWebWorkbenchStateModel(t *testing.T) {
 		t.Fatalf("web workbench state model check failed: %v\n%s", err, output)
 	}
 }
+
+func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+
+	for _, want := range []string{
+		`id="profileLastUpdated"`,
+		`aria-live="polite"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("profile home is missing %q", want)
+		}
+	}
+	if strings.Contains(html, `title="选择当前 Profile"`) {
+		t.Error("profile home must not retain the legacy select-profile title")
+	}
+
+	renderProfiles := webInlineFunctionSource(t, html, `function renderProfiles()`)
+	for _, want := range []string{
+		`data-workbench`,
+		`进入工作台`,
+		`管理`,
+		`event.key !== "Enter"`,
+		`event.key !== " "`,
+		`event.target.closest("button, a")`,
+	} {
+		if !strings.Contains(renderProfiles, want) {
+			t.Errorf("renderProfiles is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		`data-terminal`,
+		`data-start`,
+		`data-sync`,
+		`title="选择当前 Profile"`,
+	} {
+		if strings.Contains(renderProfiles, unwanted) {
+			t.Errorf("renderProfiles must not contain %q", unwanted)
+		}
+	}
+	if got := strings.Count(renderProfiles, "p.apple_email"); got != 1 {
+		t.Errorf("renderProfiles must render the Apple email once, found %d references", got)
+	}
+
+	scheduleProfileRefresh := webInlineFunctionSource(t, html, `function scheduleProfileRefresh()`)
+	for _, want := range []string{
+		`refreshVisibleStatuses`,
+		`document.visibilityState`,
+		`state.auth?.authenticated`,
+		`profileRefreshTimer`,
+		`profileRefreshInFlight`,
+		`状态更新失败，正在重试`,
+		`最后更新（北京时间）`,
+	} {
+		if !strings.Contains(scheduleProfileRefresh, want) {
+			t.Errorf("scheduleProfileRefresh is missing %q", want)
+		}
+	}
+}
