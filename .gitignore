@@ -8,5 +8,6 @@ docs/superpowers/
 scripts/
 !scripts/
 scripts/*
+!scripts/check-web-js.mjs
 !scripts/build-deb.sh
 !scripts/deploy-staging.sh

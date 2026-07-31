@@ -5,6 +5,7 @@ GOCACHE ?= $(CURDIR)/.cache/go-build
 .PHONY: test build deb deb-all clean
 
 test:
+	node scripts/check-web-js.mjs
 	GOCACHE=$(GOCACHE) go test ./...
 
 build:

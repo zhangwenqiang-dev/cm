@@ -1138,13 +1138,13 @@
         headers,
         body
       });
-      const body = await res.json();
-      if (!body.ok) {
-        const err = new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
+      const responseBody = await res.json();
+      if (!responseBody.ok) {
+        const err = new Error((responseBody.error || "") + (responseBody.output ? "\n" + responseBody.output : ""));
         err.status = res.status;
         throw err;
       }
-      return body;
+      return responseBody;
     }
 
     async function probeLocalAgent(url, timeoutMs = 1200) {
