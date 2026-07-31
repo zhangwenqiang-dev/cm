@@ -24,12 +24,15 @@ func TestWebOperationHeaderUsesVerticalProfileIdentityWithoutHomeButton(t *testi
 		`class="selected-title"`,
 		`id="selectedProfileName" class="selected-profile-name"`,
 		`id="selectedAppleEmail" class="selected-apple-email"`,
+		`id="selectedProfileRegion" class="selected-profile-region"`,
 		`id="workbenchStateBadge"`,
 		`.selected-title {`,
 		`.selected-profile-name,`,
-		`.selected-apple-email {`,
+		`.selected-apple-email,`,
+		`.selected-profile-region {`,
 		`$("selectedProfileName").textContent = p ? p.name : "未选择";`,
 		`$("selectedAppleEmail").textContent = p ? (p.apple_email || "无 Apple 邮箱") : "-";`,
+		`$("selectedProfileRegion").textContent = "Region：" + (p ? (p.region || "-") : "-");`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("operation header is missing %q", want)

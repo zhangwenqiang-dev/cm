@@ -134,12 +134,14 @@
       text-align: left;
     }
     .selected-profile-name,
-    .selected-apple-email {
+    .selected-apple-email,
+    .selected-profile-region {
       min-width: 0;
       overflow-wrap: anywhere;
     }
     .selected-profile-name { font-weight: 700; }
-    .selected-apple-email {
+    .selected-apple-email,
+    .selected-profile-region {
       color: var(--muted);
       font-size: 13px;
       font-weight: 500;
@@ -863,6 +865,7 @@ cm local-agent start</pre>
             <h2 class="selected-title">
               <span id="selectedProfileName" class="selected-profile-name">未选择</span>
               <span id="selectedAppleEmail" class="selected-apple-email">-</span>
+              <span id="selectedProfileRegion" class="selected-profile-region">Region：-</span>
             </h2>
             <span id="workbenchStateBadge" class="badge stopped">状态未知</span>
           </div>
@@ -2479,6 +2482,7 @@ cm local-agent start</pre>
       const p = selectedProfile();
       $("selectedProfileName").textContent = p ? p.name : "未选择";
       $("selectedAppleEmail").textContent = p ? (p.apple_email || "无 Apple 邮箱") : "-";
+      $("selectedProfileRegion").textContent = "Region：" + (p ? (p.region || "-") : "-");
       const disabled = !p;
       const status = p ? state.statuses[p.name] : null;
       const reminder = p ? state.reminders[p.name] : null;
