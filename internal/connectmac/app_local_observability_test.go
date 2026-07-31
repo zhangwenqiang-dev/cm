@@ -733,7 +733,7 @@ func TestBrowserLocalActionsRecordServerIntentBeforeLocalCalls(t *testing.T) {
 	html := string(data)
 	startTunnel := extractWebSource(t, html, "async function startTunnel(profile)", "\n    async function openSync(profile)")
 	runSync := extractWebSource(t, html, "async function runSync(direction)", "\n    function terminalSetStatus")
-	terminalGuard := extractWebSource(t, html, "function localTerminalAvailable(profile)", "\n    async function openTerminal(profile)")
+	terminalGuard := extractWebSource(t, html, "function terminalConnectionCurrent(", "\n    async function openTerminal(profile)")
 	connectTerminal := extractWebSource(t, html, "async function connectLocalTerminal(profile)", "\n    function closeTerminal")
 	script := `
 import assert from "node:assert/strict";
@@ -743,7 +743,7 @@ const state = {
   selected: "shared",
   profiles: [{name:"shared", profile_yaml:"profiles:\n  shared: {}\n"}],
   terminalConnectedProfiles: new Set(),
-  terminal: {profile:"", manualClose:false, returnOnClose:false, socket:null, xterm:null},
+  terminal: {profile:"", manualClose:false, returnOnClose:false, connectionGeneration:0, socket:null, xterm:null},
   syncJobsLoading: {},
   syncHistory: [],
   syncPollUnavailable: {}

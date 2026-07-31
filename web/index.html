@@ -1103,7 +1103,7 @@ cm local-agent start</pre>
   <script src="/vendor/bootstrap/bootstrap.bundle.min.js"></script>
   <script src="assets/connectmac-workbench.js"></script>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", statusRefreshRequests: new Map(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", statusRefreshRequests: new Map(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, connectionGeneration: 0, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const dialogTriggers = new WeakMap();
     const dialogInitialFocus = new WeakMap();
     const pendingDialogInitialFocus = new Set();
@@ -1555,14 +1555,34 @@ cm local-agent start</pre>
       closeDialog($("localAgentRepairLayer"));
     }
 
+    function selectLocalAgentCommandsForCopy() {
+      const commandsNode = $("localAgentRepairCommands");
+      const selection = window.getSelection?.();
+      if (!selection || !document.createRange) {
+        $("localAgentRepairStatus").textContent = "请手动选择命令并复制。";
+        return false;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(commandsNode);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const shortcut = /Mac|iPhone|iPad/i.test(navigator.platform || "") ? "Cmd+C" : "Ctrl+C";
+      $("localAgentRepairStatus").textContent = "已选中，请按 " + shortcut;
+      return true;
+    }
+
     async function copyLocalAgentCommands() {
       const commands = $("localAgentRepairCommands").textContent.trim();
-      try {
-        await navigator.clipboard.writeText(commands);
-        $("localAgentRepairStatus").textContent = "命令已复制。";
-      } catch (err) {
-        showOperationError("复制命令失败", err);
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(commands);
+          $("localAgentRepairStatus").textContent = "命令已复制。";
+          return;
+        } catch (err) {
+          // Safari and browser permissions may reject the asynchronous clipboard API.
+        }
       }
+      selectLocalAgentCommandsForCopy();
     }
 
     async function recheckLocalAgent() {
@@ -4152,6 +4172,22 @@ cm local-agent start</pre>
       surface.style.padding = "12px";
     }
 
+    function terminalConnectionCurrent(generation, profile) {
+      return generation === state.terminal.connectionGeneration && state.terminal.profile === profile;
+    }
+
+    function closeStaleTerminalSocket(socket) {
+      if (!socket) return;
+      if (state.terminal.socket === socket) state.terminal.socket = null;
+      if (socket.readyState !== WebSocket.CLOSED) {
+        try {
+          socket.close();
+        } catch (err) {
+          // A stale socket must not surface errors into the current terminal session.
+        }
+      }
+    }
+
     function localTerminalAvailable(profile) {
       if (!profile) return false;
       if (!profileReady(profile)) {
@@ -4179,15 +4215,22 @@ cm local-agent start</pre>
     }
 
     async function connectLocalTerminal(profile) {
-      if (!localTerminalAvailable(profile)) return;
-      closeTerminal(false);
+      const generation = ++state.terminal.connectionGeneration;
+      const previousSocket = state.terminal.socket;
+      state.terminal.socket = null;
       state.terminal.profile = profile;
       state.terminal.manualClose = false;
       state.terminal.returnOnClose = false;
+      closeStaleTerminalSocket(previousSocket);
+      if (!localTerminalAvailable(profile)) {
+        renderSelected();
+        return;
+      }
       terminalClear();
       terminalSetStatus("正在处理本机 SSH 指纹...");
       try {
         const intent = await recordLocalIntent(profile, "connect");
+        if (!terminalConnectionCurrent(generation, profile)) return;
         const requestID = String(intent?.data?.request_id || "");
         if (!requestID) throw new Error("服务端未返回本机操作请求标识");
         const check = await localAgentAPI("/terminal/check", {
@@ -4195,6 +4238,7 @@ cm local-agent start</pre>
           body: JSON.stringify(localAgentPayload(profile)),
           requestID
         });
+        if (!terminalConnectionCurrent(generation, profile)) return;
         const data = check.data || {};
         const terminalSessionToken = String(data.terminal_session_token || "");
         if (!terminalSessionToken) throw new Error("本机代理未返回终端会话令牌");
@@ -4203,9 +4247,17 @@ cm local-agent start</pre>
         terminalSetStatus("正在连接本机网页终端...");
         const wsURL = state.localAgent.url.replace(/^http:/, "ws:").replace(/^https:/, "wss:") + "/terminal/ws?profile=" + encodeURIComponent(profile) + "&terminal_session_token=" + encodeURIComponent(terminalSessionToken);
         const socket = new WebSocket(wsURL);
+        if (!terminalConnectionCurrent(generation, profile)) {
+          closeStaleTerminalSocket(socket);
+          return;
+        }
         state.terminal.socket = socket;
         socket.binaryType = "arraybuffer";
         socket.onopen = () => {
+          if (!terminalConnectionCurrent(generation, profile) || state.terminal.socket !== socket) {
+            closeStaleTerminalSocket(socket);
+            return;
+          }
           state.terminalConnectedProfiles.add(profile);
           terminalSetStatus("终端已连接，点击黑色区域后输入命令。");
           if (state.terminal.xterm) {
@@ -4217,6 +4269,10 @@ cm local-agent start</pre>
           renderSelected();
         };
         socket.onmessage = (event) => {
+          if (!terminalConnectionCurrent(generation, profile) || state.terminal.socket !== socket) {
+            closeStaleTerminalSocket(socket);
+            return;
+          }
           if (event.data instanceof ArrayBuffer) {
             terminalAppend(new TextDecoder().decode(event.data));
           } else {
@@ -4224,9 +4280,14 @@ cm local-agent start</pre>
           }
         };
         socket.onerror = () => {
+          if (!terminalConnectionCurrent(generation, profile) || state.terminal.socket !== socket) {
+            closeStaleTerminalSocket(socket);
+            return;
+          }
           terminalSetStatus("终端连接错误");
         };
         socket.onclose = () => {
+          if (!terminalConnectionCurrent(generation, profile) || state.terminal.socket !== socket) return;
           const wasManual = state.terminal.manualClose;
           const shouldReturn = state.terminal.returnOnClose;
           state.terminal.socket = null;
@@ -4238,6 +4299,7 @@ cm local-agent start</pre>
           renderSelected();
         };
       } catch (err) {
+        if (!terminalConnectionCurrent(generation, profile)) return;
         terminalAppend(sanitizedOperationMessage(err) + "\r\n");
         terminalSetStatus("终端打开失败");
         showOperationError("终端打开失败", err);
@@ -4246,17 +4308,15 @@ cm local-agent start</pre>
     }
 
     function closeTerminal(manual = true, returnOnClose = false) {
+      state.terminal.connectionGeneration += 1;
       const socket = state.terminal.socket;
-      if (!socket) {
-        if (returnOnClose && state.view === "terminalView") {
-          showView("operationsView");
-        }
-        return;
-      }
       state.terminal.manualClose = manual;
       state.terminal.returnOnClose = returnOnClose;
       state.terminal.socket = null;
-      socket.close();
+      if (socket) closeStaleTerminalSocket(socket);
+      if (returnOnClose && state.view === "terminalView") {
+        showView("operationsView");
+      }
       renderSelected();
     }
 
