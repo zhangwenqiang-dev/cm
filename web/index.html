@@ -1144,6 +1144,14 @@
         .trim();
     }
 
+    function createAPIError(message, status, requestID, errorCode) {
+      const error = new Error(sanitizedOperationMessage(message) || "请求失败");
+      error.status = status;
+      error.requestID = requestID || "";
+      error.errorCode = errorCode || "";
+      return error;
+    }
+
     function showOperationError(summary, error) {
       const message = sanitizedOperationMessage(error);
       const lowerMessage = message.toLowerCase();
@@ -1192,19 +1200,42 @@
         credentials: "same-origin",
         ...options
       });
-      const body = await res.json();
       const requestID = res.headers.get("X-Request-ID") || "";
+      let responseText = "";
+      try {
+        responseText = await res.text();
+      } catch (err) {
+        throw createAPIError("读取服务器响应失败：" + sanitizedOperationMessage(err), res.status, requestID, "");
+      }
+      let body = null;
+      let parseError = null;
+      if (responseText.trim()) {
+        try {
+          body = JSON.parse(responseText);
+        } catch (err) {
+          parseError = err;
+        }
+      }
+      if (res.status === 401) {
+        state.auth = { authenticated: false, setup_required: false };
+        showAuth();
+      }
+      const validBody = body && typeof body === "object" && !Array.isArray(body);
+      if (!validBody) {
+        const message = !responseText.trim() || body === null && !parseError
+          ? "服务器返回空响应"
+          : (parseError ? "服务器返回无法解析的响应" : "服务器响应格式无效");
+        throw createAPIError(message + " (HTTP " + res.status + ")", res.status, requestID, "");
+      }
       if (requestID && !body.request_id) body.request_id = requestID;
       if (!body.ok) {
-        if (res.status === 401) {
-          state.auth = { authenticated: false, setup_required: false };
-          showAuth();
-        }
-        const err = new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
-        err.status = res.status;
-        err.requestID = requestID || body.request_id || "";
-        err.errorCode = body.error_code || body.code || "";
-        throw err;
+        const message = (body.error || "") + (body.output ? "\n" + body.output : "");
+        throw createAPIError(
+          message || "请求失败 (HTTP " + res.status + ")",
+          res.status,
+          requestID || body.request_id || "",
+          body.error_code || body.code || "",
+        );
       }
       return body;
     }
@@ -2350,7 +2381,7 @@
       const p = selectedProfile();
       if (!p) return false;
       const activeTask = ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name);
-      if (activeTask?.type === "aws-" + command) {
+      if (activeTask) {
         setStatus(activeTask.label);
         renderSelected();
         return false;
@@ -2411,7 +2442,7 @@
       const p = selectedProfile();
       if (!p) return;
       const activeTask = ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name);
-      if (activeTask?.type === "aws-" + command) {
+      if (activeTask) {
         setStatus(activeTask.label);
         renderSelected();
         return;
@@ -2556,9 +2587,10 @@
         setStatus(pending.enabled ? "自动释放已开启。" : "自动释放已关闭，已取消等待或重试周期。");
       } catch (err) {
         await loadReleaseReminders().catch(() => {});
-        const detail = String(err.message || err || "未知错误");
-        setOutput(detail);
-        setStatus(err.status === 409 ? "自动释放状态已变化，数据已刷新：" + detail : "自动释放设置失败：" + detail);
+        showOperationError(
+          err.status === 409 ? "自动释放状态已变化，数据已刷新" : "自动释放设置失败",
+          err,
+        );
       } finally {
         state.autoReleaseSubmitting = false;
         renderAutoReleaseDialog();
@@ -2589,8 +2621,7 @@
         closeReleaseReminderEditor();
         setStatus("释放提醒时间已更新。");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("保存提醒时间失败");
+        showOperationError("保存提醒时间失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -2683,8 +2714,7 @@
         setOutput(JSON.stringify(body.data || {}, null, 2));
         setStatus("记录已清理");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("清理记录失败");
+        showOperationError("清理记录失败", err);
       } finally {
         setBusy(false);
         renderProfiles();
@@ -2737,8 +2767,7 @@
         setStatus(reused ? "已复用 SSH 隧道并打开新的 VNC 窗口" : "已启动 SSH 隧道并打开 VNC");
         await loadEvents(false).catch(() => {});
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("VNC 打开失败");
+        showOperationError("VNC 打开失败", err);
       } finally {
         setBusy(false);
         renderProfiles();
@@ -3759,8 +3788,7 @@
           }
         } else {
           await updateTransferRecord(record.id, savedJob, true).catch((err) => {
-            setOutput(String(err.message || err));
-            setStatus(label + "已启动，记录绑定待重试");
+            showOperationError(label + "已启动，记录绑定待重试", err);
             loadSyncJobs(p.name);
           });
         }
@@ -3774,8 +3802,7 @@
         if (record?.id && !job) {
           await failTransferRecord(record.id, err).catch(() => {});
         }
-        setOutput(String(err.message || err));
-        setStatus(label + "启动失败");
+        showOperationError(label + "启动失败", err);
       } finally {
         if (state.busy) setBusy(false);
         renderProfiles();
@@ -3922,8 +3949,9 @@
           renderSelected();
         };
       } catch (err) {
-        terminalAppend(String(err.message || err) + "\r\n");
+        terminalAppend(sanitizedOperationMessage(err) + "\r\n");
         terminalSetStatus("终端打开失败");
+        showOperationError("终端打开失败", err);
         renderSelected();
       }
     }
@@ -4018,8 +4046,7 @@
         closeMemberForm();
         setStatus(editingEmail ? "成员已保存" : "成员已添加");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus(editingEmail ? "成员保存失败" : "成员添加失败");
+        showOperationError(editingEmail ? "成员保存失败" : "成员添加失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4038,8 +4065,7 @@
         await loadProfiles();
         setStatus(enabled ? "成员已停用" : "成员已启用");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("成员状态更新失败");
+        showOperationError("成员状态更新失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4087,8 +4113,7 @@
         closeMemberPasswordEditor();
         setStatus("成员密码已修改");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("成员密码修改失败");
+        showOperationError("成员密码修改失败", err);
       } finally {
         setBusy(false);
         renderMembers();
@@ -4134,8 +4159,7 @@
         closeOwnPasswordEditor();
         setStatus("密码已修改");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("密码修改失败");
+        showOperationError("密码修改失败", err);
       } finally {
         setBusy(false);
       }
@@ -4173,8 +4197,7 @@
         showAPIToken(member, body.data?.token || "");
         setStatus(action === "delete" ? "令牌已删除" : "令牌已生成");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus(action === "delete" ? "令牌删除失败" : "令牌生成失败");
+        showOperationError(action === "delete" ? "令牌删除失败" : "令牌生成失败", err);
       } finally {
         setBusy(false);
         renderUser();
@@ -4428,8 +4451,7 @@
         await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         setStatus("Profile 已保存");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("Profile 保存失败");
+        showOperationError("Profile 保存失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4449,8 +4471,7 @@
         await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         setStatus("Profile 已删除");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("Profile 删除失败");
+        showOperationError("Profile 删除失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4469,8 +4490,7 @@
         await Promise.all([loadManagedProfiles(), loadProfiles()]);
         setStatus(enabled ? "Profile 已恢复正常" : "Profile 已停用");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("Profile 状态更新失败");
+        showOperationError("Profile 状态更新失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4491,8 +4511,7 @@
         await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
         setStatus("成员 Profile 已保存");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("成员 Profile 保存失败");
+        showOperationError("成员 Profile 保存失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4510,8 +4529,7 @@
         await loadManagedProfiles();
         setStatus(grant ? "Profile 已授权" : "Profile 授权已移除");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("Profile 授权更新失败");
+        showOperationError("Profile 授权更新失败", err);
       } finally {
         setBusy(false);
         renderSelected();
@@ -4534,8 +4552,7 @@
         renderSettings();
         setStatus("设置已保存");
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus("设置保存失败");
+        showOperationError("设置保存失败", err);
       } finally {
         setBusy(false);
         renderSelected();

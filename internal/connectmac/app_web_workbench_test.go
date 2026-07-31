@@ -108,15 +108,33 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	api := webInlineFunctionSource(t, html, `async function api(path, options = {})`)
 	for _, want := range []string{
 		`res.headers.get("X-Request-ID")`,
+		`await res.text()`,
+		`JSON.parse(`,
+		`body && typeof body === "object"`,
 		`body.request_id`,
-		`err.requestID`,
-		`err.errorCode`,
+		`createAPIError(`,
 		`body.error_code || body.code`,
-		`err.status = res.status;`,
 		`res.status === 401`,
 	} {
 		if !strings.Contains(api, want) {
 			t.Errorf("api response metadata handling is missing %q", want)
+		}
+	}
+	headerRead := strings.Index(api, `res.headers.get("X-Request-ID")`)
+	bodyRead := strings.Index(api, `await res.text()`)
+	bodyParse := strings.Index(api, `JSON.parse(`)
+	if headerRead < 0 || bodyRead < headerRead || bodyParse < bodyRead {
+		t.Error("api must capture X-Request-ID before reading and parsing the response body")
+	}
+	apiError := webInlineFunctionSource(t, html, `function createAPIError(message, status, requestID, errorCode)`)
+	for _, want := range []string{
+		`sanitizedOperationMessage(message)`,
+		`error.status = status;`,
+		`error.requestID = requestID || "";`,
+		`error.errorCode = errorCode || "";`,
+	} {
+		if !strings.Contains(apiError, want) {
+			t.Errorf("createAPIError is missing %q", want)
 		}
 	}
 
@@ -137,7 +155,7 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	runAWS := extractWebSource(t, html, "async function runAWS(", "\n    async function previewAWS(")
 	for _, want := range []string{
 		`ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name)`,
-		`activeTask?.type === "aws-" + command`,
+		`if (activeTask)`,
 		`任务已提交，页面会自动更新进度`,
 		`任务已提交，状态刷新失败，页面将继续自动更新`,
 		`closeAWSConfirm();`,
@@ -167,13 +185,51 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	}
 
 	previewAWS := extractWebSource(t, html, "async function previewAWS(", "\n    function showAWSConfirm(")
-	if !strings.Contains(previewAWS, `showOperationError(`) {
-		t.Error("previewAWS must use showOperationError")
+	for _, want := range []string{`if (activeTask)`, `setStatus(activeTask.label);`, `showOperationError(`} {
+		if !strings.Contains(previewAWS, want) {
+			t.Errorf("previewAWS is missing %q", want)
+		}
 	}
 
 	refreshStatus := extractWebSource(t, html, "async function refreshStatus(profile, showOutput, options", "\n    async function runAWS(")
 	if !strings.Contains(refreshStatus, `showOperationError(`) {
 		t.Error("foreground AWS status failures must use showOperationError")
+	}
+
+	errorPaths := []struct {
+		start string
+		end   string
+	}{
+		{"async function submitAutoRelease()", "\n    async function saveReleaseReminder()"},
+		{"async function saveReleaseReminder()", "\n    const beijingTimeFormatter"},
+		{"async function cleanupLocalRecords()", "\n    async function confirmPendingAWS()"},
+		{"async function startTunnel(profile)", "\n    async function openSync(profile)"},
+		{"async function runSync(direction)", "\n    function terminalSetStatus"},
+		{"async function connectLocalTerminal(profile)", "\n    function closeTerminal("},
+		{"async function addMember()", "\n    async function toggleMember("},
+		{"async function toggleMember(", "\n    async function resetMemberPassword("},
+		{"async function saveMemberPassword()", "\n    function openOwnPasswordEditor()"},
+		{"async function changeOwnPassword()", "\n    async function generateOwnToken()"},
+		{"async function runAPITokenAction(", "\n    function showAPIToken("},
+		{"async function saveManagedProfile()", "\n    async function deleteManagedProfile("},
+		{"async function deleteManagedProfile(", "\n    async function setManagedProfileStatus("},
+		{"async function setManagedProfileStatus(", "\n    async function saveMemberProfiles()"},
+		{"async function saveMemberProfiles()", "\n    async function setProfileAccess("},
+		{"async function setProfileAccess(", "\n    async function saveSettings()"},
+		{"async function saveSettings()", "\n    async function loadEvents("},
+	}
+	for _, path := range errorPaths {
+		source := extractWebSource(t, html, path.start, path.end)
+		if !strings.Contains(source, `showOperationError(`) {
+			t.Errorf("%s must use showOperationError", path.start)
+		}
+		if strings.Contains(source, `setOutput(String(err.message || err))`) {
+			t.Errorf("%s must not emit raw operation errors", path.start)
+		}
+	}
+	autoRelease := extractWebSource(t, html, "async function submitAutoRelease()", "\n    async function saveReleaseReminder()")
+	if !strings.Contains(autoRelease, `err.status === 409`) || !strings.Contains(autoRelease, `await loadReleaseReminders().catch`) {
+		t.Error("auto release must preserve conflict refresh behavior")
 	}
 
 	bootstrapCSS := strings.Index(html, `href="/vendor/bootstrap/bootstrap.min.css"`)

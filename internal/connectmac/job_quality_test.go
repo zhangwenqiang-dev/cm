@@ -639,6 +639,130 @@ func TestJobManagerDeferredWithoutLifecycleBlocksDuplicate(t *testing.T) {
 	}
 }
 
+func TestJobManagerRejectsOppositeAWSLifecycleOperationForProfile(t *testing.T) {
+	tests := []struct {
+		existingType string
+		incomingType string
+	}{
+		{existingType: "aws-open", incomingType: "aws-destroy"},
+		{existingType: "aws-destroy", incomingType: "aws-open"},
+	}
+	for _, test := range tests {
+		t.Run(test.existingType+"_blocks_"+test.incomingType, func(t *testing.T) {
+			manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+			existing, err := manager.Create(Job{
+				ID:      test.existingType + "-active",
+				Type:    test.existingType,
+				Profile: "mac",
+			})
+			if err != nil {
+				t.Fatalf("create existing lifecycle job: %v", err)
+			}
+			if _, err := manager.Create(Job{
+				ID:      test.incomingType + "-other",
+				Type:    test.incomingType,
+				Profile: "other",
+			}); err != nil {
+				t.Fatalf("create opposite operation for other profile: %v", err)
+			}
+			artifact := filepath.Join(t.TempDir(), "opposite-operation-config.yaml")
+			if err := os.WriteFile(artifact, []byte("secret config"), 0o600); err != nil {
+				t.Fatalf("write opposite operation artifact: %v", err)
+			}
+			_, err = manager.Create(Job{
+				ID:           test.incomingType + "-blocked",
+				Type:         test.incomingType,
+				Profile:      "mac",
+				CleanupPaths: []string{artifact},
+			})
+			if !IsDuplicateActiveJob(err, test.incomingType, "mac") {
+				t.Fatalf("opposite operation error = %v", err)
+			}
+			if !strings.Contains(err.Error(), "active "+test.existingType+" job") ||
+				!strings.Contains(err.Error(), "cannot create "+test.incomingType) {
+				t.Fatalf("cross-operation error is inaccurate: %v", err)
+			}
+			var duplicate *DuplicateActiveJobError
+			if !errors.As(err, &duplicate) || duplicate.Existing.ID != existing.ID {
+				t.Fatalf("duplicate existing job = %+v", duplicate)
+			}
+			if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("opposite operation artifact was not cleaned: %v", err)
+			}
+		})
+	}
+}
+
+func TestJobManagerPreventsConcurrentOppositeAWSLifecycleOperations(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "jobs")
+	attempts := []struct {
+		jobType string
+		manager JobManager
+	}{
+		{jobType: "aws-open", manager: NewJobManager(dir)},
+		{jobType: "aws-destroy", manager: NewJobManager(dir)},
+	}
+	start := make(chan struct{})
+	results := make(chan struct {
+		jobType string
+		err     error
+	}, len(attempts))
+	var wg sync.WaitGroup
+	for _, attempt := range attempts {
+		wg.Add(1)
+		go func(attempt struct {
+			jobType string
+			manager JobManager
+		}) {
+			defer wg.Done()
+			<-start
+			_, err := attempt.manager.Create(Job{Type: attempt.jobType, Profile: "mac"})
+			results <- struct {
+				jobType string
+				err     error
+			}{jobType: attempt.jobType, err: err}
+		}(attempt)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes, duplicates := 0, 0
+	for result := range results {
+		switch {
+		case result.err == nil:
+			successes++
+		case IsDuplicateActiveJob(result.err, result.jobType, "mac"):
+			duplicates++
+		default:
+			t.Fatalf("%s create error = %v", result.jobType, result.err)
+		}
+	}
+	if successes != 1 || duplicates != 1 {
+		t.Fatalf("successes=%d duplicates=%d, want 1/1", successes, duplicates)
+	}
+	jobs, err := attempts[0].manager.listRaw()
+	if err != nil {
+		t.Fatalf("list concurrent lifecycle jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Profile != "mac" {
+		t.Fatalf("concurrent lifecycle jobs = %+v", jobs)
+	}
+}
+
+func TestJobManagerCreateUniquePreservesNonAWSJobTypeScope(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	if _, err := manager.CreateUnique(Job{ID: "sync-active", Type: "sync", Profile: "mac"}); err != nil {
+		t.Fatalf("create first non-AWS unique job: %v", err)
+	}
+	if _, err := manager.CreateUnique(Job{ID: "other-active", Type: "other", Profile: "mac"}); err != nil {
+		t.Fatalf("different non-AWS type should not conflict: %v", err)
+	}
+	if _, err := manager.CreateUnique(Job{ID: "sync-duplicate", Type: "sync", Profile: "mac"}); !IsDuplicateActiveJob(err, "sync", "mac") {
+		t.Fatalf("same non-AWS type duplicate error = %v", err)
+	}
+}
+
 func TestJobManagerArtifactLifecycle(t *testing.T) {
 	newArtifact := func(t *testing.T) string {
 		t.Helper()

@@ -104,6 +104,110 @@ assert.match(
   /scheduleJobRefresh\(\);\s+return true;/,
   "refresh failure must retry status loading and retain submission success",
 );
+assert.doesNotMatch(runAWSSource, /activeTask\?\.type/, "any active lifecycle task must block runAWS");
+const previewAWSStart = html.indexOf("async function previewAWS(");
+const previewAWSEnd = html.indexOf("\n    function showAWSConfirm(", previewAWSStart);
+const previewAWSSource = html.slice(previewAWSStart, previewAWSEnd);
+assert.match(previewAWSSource, /if \(activeTask\)/, "any active lifecycle task must block previewAWS");
+assert.doesNotMatch(previewAWSSource, /activeTask\?\.type/, "previewAWS must not allow opposite lifecycle operations");
+
+const apiSectionStart = html.indexOf("function sanitizedOperationMessage(");
+const apiSectionEnd = html.indexOf("\n    function newLocalRequestID()", apiSectionStart);
+assert.ok(apiSectionStart >= 0 && apiSectionEnd > apiSectionStart, "API helper source must be available");
+const apiSection = html.slice(apiSectionStart, apiSectionEnd);
+const apiContext = {
+  responseQueue: [],
+  state: { clientConfig: { user_api: "" }, auth: null },
+  authShown: 0,
+  fetch: async () => apiContext.responseQueue.shift(),
+};
+vm.createContext(apiContext);
+new vm.Script(`
+  const state = globalThis.state;
+  function showAuth() { globalThis.authShown += 1; }
+  ${apiSection}
+  globalThis.testAPI = api;
+`, { filename: "web/index.html:api-contract" }).runInContext(apiContext);
+
+function fakeAPIResponse(text, options = {}) {
+  const calls = [];
+  const status = options.status ?? 200;
+  return {
+    calls,
+    status,
+    ok: status >= 200 && status < 300,
+    headers: {
+      get(name) {
+        calls.push("header:" + name);
+        return options.requestID || "";
+      },
+    },
+    async text() {
+      calls.push("text");
+      return text;
+    },
+    async json() {
+      calls.push("json");
+      return JSON.parse(text);
+    },
+  };
+}
+
+const successResponse = fakeAPIResponse('{"ok":true,"data":{}}', { requestID: "req-success" });
+apiContext.responseQueue.push(successResponse);
+const successBody = await apiContext.testAPI("/api/test");
+assert.equal(successBody.request_id, "req-success");
+assert.deepEqual(successResponse.calls, ["header:X-Request-ID", "text"]);
+
+for (const testCase of [
+  { name: "empty", text: "", status: 503, requestID: "req-empty" },
+  { name: "null", text: "null", status: 502, requestID: "req-null" },
+  { name: "malformed", text: "<html>bad gateway</html>", status: 502, requestID: "req-malformed" },
+]) {
+  const response = fakeAPIResponse(testCase.text, testCase);
+  apiContext.responseQueue.push(response);
+  await assert.rejects(
+    apiContext.testAPI("/api/test"),
+    (error) => {
+      assert.equal(error.status, testCase.status, testCase.name);
+      assert.equal(error.requestID, testCase.requestID, testCase.name);
+      assert.equal(error.errorCode, "", testCase.name);
+      assert.ok(error.message.length > 0, testCase.name);
+      return true;
+    },
+  );
+  assert.deepEqual(response.calls, ["header:X-Request-ID", "text"], testCase.name);
+}
+
+const errorResponse = fakeAPIResponse(
+  '{"ok":false,"error":"token=server-secret","error_code":"upstream_failed"}',
+  { status: 500, requestID: "req-error" },
+);
+apiContext.responseQueue.push(errorResponse);
+await assert.rejects(
+  apiContext.testAPI("/api/test"),
+  (error) => {
+    assert.equal(error.status, 500);
+    assert.equal(error.requestID, "req-error");
+    assert.equal(error.errorCode, "upstream_failed");
+    assert.doesNotMatch(error.message, /server-secret/);
+    assert.match(error.message, /\[REDACTED\]/);
+    return true;
+  },
+);
+
+const unauthorizedResponse = fakeAPIResponse(
+  '{"ok":false,"error":"unauthorized"}',
+  { status: 401, requestID: "req-unauthorized" },
+);
+apiContext.responseQueue.push(unauthorizedResponse);
+await assert.rejects(apiContext.testAPI("/api/test"), (error) => {
+  assert.equal(error.status, 401);
+  assert.equal(error.requestID, "req-unauthorized");
+  return true;
+});
+assert.equal(apiContext.authShown, 1);
+assert.equal(apiContext.state.auth.authenticated, false);
 
 const profileRefreshCases = [
   {

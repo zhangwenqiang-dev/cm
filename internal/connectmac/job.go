@@ -122,7 +122,17 @@ type DuplicateActiveJobError struct {
 }
 
 func (e *DuplicateActiveJobError) Error() string {
-	return fmt.Sprintf("active %s job already exists for profile %s: %s", e.Type, e.Profile, e.Existing.ID)
+	existingType := e.Existing.Type
+	if existingType == "" {
+		existingType = e.Type
+	}
+	return fmt.Sprintf(
+		"active %s job already exists for profile %s: %s; cannot create %s",
+		existingType,
+		e.Profile,
+		e.Existing.ID,
+		e.Type,
+	)
 }
 
 func IsDuplicateActiveJob(err error, jobType, profile string) bool {
@@ -222,6 +232,15 @@ func jobBlocksUniqueCreation(job Job) bool {
 		job.Status == JobStatusDeferred
 }
 
+func uniqueJobTypesConflict(requestedType, existingType string) bool {
+	requestedAWSLifecycle := requestedType == "aws-open" || requestedType == "aws-destroy"
+	existingAWSLifecycle := existingType == "aws-open" || existingType == "aws-destroy"
+	if requestedAWSLifecycle {
+		return existingAWSLifecycle
+	}
+	return requestedType == existingType
+}
+
 func (m JobManager) create(job Job, unique bool) (Job, error) {
 	m = m.normalize()
 	if job.StartedAt.IsZero() {
@@ -247,7 +266,9 @@ func (m JobManager) create(job Job, unique bool) (Job, error) {
 				return err
 			}
 			for _, existing := range jobs {
-				if existing.Type == job.Type && existing.Profile == job.Profile && jobBlocksUniqueCreation(existing) {
+				if uniqueJobTypesConflict(job.Type, existing.Type) &&
+					existing.Profile == job.Profile &&
+					jobBlocksUniqueCreation(existing) {
 					return &DuplicateActiveJobError{Type: job.Type, Profile: job.Profile, Existing: existing}
 				}
 			}

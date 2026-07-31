@@ -786,12 +786,14 @@ func TestWebAWSLifecycleStaleJobCannotMutateAfterNewerLifecycle(t *testing.T) {
 				return &fakeAWSClient{status: AWSStatus{}}, nil
 			}
 			older := createWebAWSLifecycleJob(t, &app, tt.olderCommand, JobStatusSuccess)
-			newer := createWebAWSLifecycleJob(t, &app, tt.newerCommand, JobStatusRunning)
-			if _, err := app.JobManager.Update(newer.ID, func(current Job) (Job, error) {
-				current.StartedAt = older.StartedAt.Add(time.Minute)
-				return current, nil
-			}); err != nil {
-				t.Fatalf("make newer job: %v", err)
+			newerSeed := older
+			newerSeed.ID = ""
+			newerSeed.Type = "aws-" + tt.newerCommand
+			newerSeed.RequestID = "req-lifecycle-" + tt.newerCommand
+			newerSeed.Status = JobStatusRunning
+			newerSeed.StartedAt = older.StartedAt.Add(time.Minute)
+			if _, err := app.JobManager.create(newerSeed, false); err != nil {
+				t.Fatalf("seed legacy conflicting lifecycle job: %v", err)
 			}
 
 			if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, older); err != nil {

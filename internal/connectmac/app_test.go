@@ -5492,6 +5492,11 @@ function setBusy(value, message) {
 }
 function setStatus(value) { statuses.push(value); }
 function setOutput(value) { outputs.push(value); }
+function showOperationError(summary, error) {
+  setStatus(summary);
+  setOutput(String(error?.message || error || "未知错误"));
+  return true;
+}
 function showView(value) { views.push(value); }
 function renderProfiles() { renderProfileCount++; }
 function renderSelected() { renderSelectedCount++; }
