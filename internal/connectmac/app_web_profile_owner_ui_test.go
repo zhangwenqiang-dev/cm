@@ -24,7 +24,7 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 		`const owner = profile.owners?.[0];`,
 		`seededOwners[profile.name] = owner;`,
 		`state.profileOwners = seededOwners;`,
-		`await loadProfileOwners();`,
+		`await loadProfileOwners({ signal: abortScope.signal, required: requireChain });`,
 	} {
 		if !strings.Contains(loadProfiles, want) {
 			t.Fatalf("profile loading does not seed embedded owners before reconciliation: missing %q", want)
@@ -36,18 +36,19 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 	initializeFresh := strings.Index(loadProfiles, `const seededOwners = {};`)
 	overlayEmbedded := strings.Index(loadProfiles, `seededOwners[profile.name] = owner;`)
 	commitFallback := strings.Index(loadProfiles, `state.profileOwners = seededOwners;`)
-	reconcile := strings.Index(loadProfiles, `await loadProfileOwners();`)
+	reconcile := strings.Index(loadProfiles, `await loadProfileOwners({ signal: abortScope.signal, required: requireChain });`)
 	if initializeFresh < 0 || overlayEmbedded < 0 || commitFallback < 0 || reconcile < 0 ||
 		initializeFresh > overlayEmbedded || overlayEmbedded > commitFallback || commitFallback > reconcile {
 		t.Fatal("profile owner fallback must start fresh, overlay embedded owners, then reconcile")
 	}
 
-	loadOwners := webFunctionForContractTest(t, html, "async function loadProfileOwners()", "function applyProfileOwners()")
+	loadOwners := webFunctionForContractTest(t, html, "async function loadProfileOwners(options = {})", "function applyProfileOwners()")
 	if strings.Contains(loadOwners, "clientConfig") || strings.Contains(loadOwners, "user_api") {
 		t.Fatal("profile owner loading must not depend on clientConfig.user_api")
 	}
 	for _, want := range []string{
-		`const body = await api("/api/profile-owners");`,
+		`const requestOptions = options.signal ? { signal: options.signal } : {};`,
+		`const body = await api("/api/profile-owners", requestOptions);`,
 		`const nextOwners = {};`,
 		`nextOwners[item.profile_name] = item.owner;`,
 		`state.profileOwners = nextOwners;`,
@@ -59,6 +60,9 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 	catchStart := strings.Index(loadOwners, "} catch (err) {")
 	if catchStart < 0 {
 		t.Fatal("profile owner reconciliation must tolerate endpoint failures")
+	}
+	if !strings.Contains(loadOwners[catchStart:], "if (options.required) throw err;") {
+		t.Fatal("required profile owner reconciliation must propagate shared deadline cancellation")
 	}
 	if strings.Contains(loadOwners[catchStart:], "state.profileOwners =") {
 		t.Fatal("failed profile owner reconciliation must preserve the seeded/current owner map")

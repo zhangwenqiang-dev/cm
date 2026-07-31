@@ -382,12 +382,12 @@ func TestWebWorkbenchManagement(t *testing.T) {
 
 	api := webInlineFunctionSource(t, html, `async function api(path, options = {})`)
 	for _, want := range []string{
-		`const { timeoutMs = 0, ...fetchOptions } = options;`,
-		`const controller = timeoutMs > 0 ? new AbortController() : null;`,
-		`timedOut = true;`,
-		`controller.abort()`,
+		`const { timeoutMs = 0, signal: callerSignal, ...fetchOptions } = options;`,
+		`createAbortScope(callerSignal, timeoutMs)`,
+		`signal: abortScope.signal`,
+		`abortScope.timedOut()`,
 		`"component_timeout"`,
-		`window.clearTimeout(timer)`,
+		`abortScope.cleanup()`,
 	} {
 		if !strings.Contains(api, want) {
 			t.Errorf("timeout-aware api contract missing %q", want)
@@ -423,8 +423,12 @@ func TestWebWorkbenchManagement(t *testing.T) {
 	loadProfiles := webInlineFunctionSource(t, html, `async function loadProfiles(options = {})`)
 	for _, want := range []string{
 		`const timeoutMs = Number(options.timeoutMs) || 0;`,
-		`timeoutMs > 0 ? { timeoutMs } : {}`,
+		`createAbortScope(options.signal, timeoutMs)`,
+		`const requestOptions = abortScope.signal ? { signal: abortScope.signal } : {};`,
 		`api("/api/profiles", requestOptions)`,
+		`loadProfileOwners({ signal: abortScope.signal, required: requireChain })`,
+		`loadReleaseReminders({ signal: abortScope.signal, required: requireChain })`,
+		`abortScope.cleanup();`,
 	} {
 		if !strings.Contains(loadProfiles, want) {
 			t.Errorf("optional Profile load timeout contract missing %q", want)
@@ -484,26 +488,252 @@ func TestWebWorkbenchManagement(t *testing.T) {
 
 	for _, contract := range []struct {
 		function string
-		reload   string
 		close    string
 		success  string
+		reload   string
+		partial  string
 	}{
-		{`async function addMember()`, `await loadMembers();`, `closeMemberForm();`, `announceManagementSuccess(`},
-		{`async function saveMemberPassword()`, `await loadMembers();`, `closeMemberPasswordEditor();`, `announceManagementSuccess(`},
-		{`async function changeOwnPassword()`, `renderUserPage();`, `closeOwnPasswordEditor();`, `announceManagementSuccess(`},
-		{`async function saveManagedProfile()`, `await Promise.all([loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);`, `closeProfileForm();`, `announceManagementSuccess(`},
-		{`async function saveMemberProfiles()`, `await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);`, `closeMemberProfileEditor();`, `announceManagementSuccess(`},
+		{`async function addMember()`, `closeMemberForm();`, `announceManagementSuccess(`, `await loadMembers();`, `但列表刷新失败`},
+		{`async function saveMemberPassword()`, `closeMemberPasswordEditor();`, `announceManagementSuccess(`, `await loadMembers();`, `但列表刷新失败`},
+		{`async function changeOwnPassword()`, `closeOwnPasswordEditor();`, `announceManagementSuccess(`, `renderUserPage();`, ``},
+		{`async function saveManagedProfile()`, `closeProfileForm();`, `announceManagementSuccess(`, `await Promise.all([loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);`, `Profile 已保存，但列表刷新失败`},
+		{`async function saveMemberProfiles()`, `closeMemberProfileEditor();`, `announceManagementSuccess(`, `await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);`, `成员 Profile 已保存，但列表刷新失败`},
 	} {
 		source := webInlineFunctionSource(t, html, contract.function)
-		reloadAt := strings.Index(source, contract.reload)
 		closeAt := strings.Index(source, contract.close)
 		successAt := strings.Index(source, contract.success)
-		if reloadAt < 0 || closeAt < reloadAt || successAt < closeAt {
-			t.Errorf("%s must reload, render/close, then announce success", contract.function)
+		reloadAt := strings.Index(source, contract.reload)
+		if closeAt < 0 || successAt < closeAt || reloadAt < successAt {
+			t.Errorf("%s must close and announce mutation success before refreshing affected data", contract.function)
 		}
 		if !strings.Contains(source, `showOperationError(`) {
 			t.Errorf("%s must keep correlated failure feedback", contract.function)
 		}
+		if contract.partial != "" && !strings.Contains(source, contract.partial) {
+			t.Errorf("%s must distinguish post-success refresh failure", contract.function)
+		}
+	}
+}
+
+func TestWebAPIAbortCompositionBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for API abort behavior test: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	abortScope := extractWebSource(t, html, "function createAbortScope(", "\n\n    async function api(")
+	apiSource := webInlineFunctionSource(t, html, `async function api(path, options = {})`)
+	harness := `
+import assert from "node:assert/strict";
+
+const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+const activeTimers = new Set();
+const window = {
+  setTimeout(callback, ms) {
+    let id = null;
+    id = nativeSetTimeout(() => {
+      activeTimers.delete(id);
+      callback();
+    }, ms);
+    activeTimers.add(id);
+    return id;
+  },
+  clearTimeout(id) {
+    activeTimers.delete(id);
+    nativeClearTimeout(id);
+  }
+};
+const state = { clientConfig: { user_api: "" }, auth: {} };
+function apiURL(path) { return path; }
+function showAuth() {}
+function sanitizedOperationMessage(value) { return String(value?.message || value || ""); }
+function createAPIError(message, status, requestID, errorCode) {
+  const error = new Error(message);
+  error.status = status;
+  error.requestID = requestID || "";
+  error.errorCode = errorCode || "";
+  return error;
+}
+class TrackSignal {
+  constructor() {
+    this.aborted = false;
+    this.reason = undefined;
+    this.listeners = new Set();
+  }
+  addEventListener(type, listener) {
+    if (type === "abort") this.listeners.add(listener);
+  }
+  removeEventListener(type, listener) {
+    if (type === "abort") this.listeners.delete(listener);
+  }
+  abort(reason = new DOMException("caller abort", "AbortError")) {
+    if (this.aborted) return;
+    this.aborted = true;
+    this.reason = reason;
+    for (const listener of [...this.listeners]) listener();
+  }
+}
+let fetchImpl = null;
+async function fetch(path, options) {
+  return fetchImpl(path, options);
+}
+function abortablePendingFetch(path, options) {
+  return new Promise((resolve, reject) => {
+    const signal = options.signal;
+    const rejectAbort = () => {
+      signal.removeEventListener("abort", rejectAbort);
+      reject(signal.reason || new DOMException("aborted", "AbortError"));
+    };
+    if (signal.aborted) rejectAbort();
+    else signal.addEventListener("abort", rejectAbort, { once: true });
+  });
+}
+function okResponse(requestID = "req-normal") {
+  return {
+    status: 200,
+    headers: { get: (name) => name === "X-Request-ID" ? requestID : "" },
+    text: async () => JSON.stringify({ ok: true, data: {} })
+  };
+}
+
+` + abortScope + "\n" + apiSource + `
+
+fetchImpl = abortablePendingFetch;
+const caller = new TrackSignal();
+const callerRequest = api("/caller", { signal: caller, timeoutMs: 1000 });
+caller.abort();
+await assert.rejects(callerRequest, (error) => error?.name === "AbortError");
+assert.equal(caller.listeners.size, 0, "caller listener must be removed after caller abort");
+assert.equal(activeTimers.size, 0, "caller abort must clear timeout timer");
+
+fetchImpl = abortablePendingFetch;
+await assert.rejects(
+  api("/timeout", { timeoutMs: 5 }),
+  (error) => error?.status === 408 && error?.errorCode === "component_timeout"
+);
+assert.equal(activeTimers.size, 0, "elapsed timeout must be removed from active timers");
+
+const normalCaller = new TrackSignal();
+fetchImpl = async () => okResponse();
+const normal = await api("/normal", { signal: normalCaller, timeoutMs: 1000 });
+assert.equal(normal.request_id, "req-normal");
+assert.equal(normalCaller.listeners.size, 0, "normal completion must remove caller listener");
+assert.equal(activeTimers.size, 0, "normal completion must clear timeout timer");
+`
+	script := filepath.Join(t.TempDir(), "api_abort_behavior.mjs")
+	if err := os.WriteFile(script, []byte(harness), 0o600); err != nil {
+		t.Fatalf("write API abort behavior script: %v", err)
+	}
+	output, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("API abort node behavior test failed: %v\n%s", err, output)
+	}
+}
+
+func TestWebProfileLoadUsesSharedDeadlineBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for Profile deadline behavior test: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	abortScope := extractWebSource(t, html, "function createAbortScope(", "\n\n    async function api(")
+	loadProfiles := extractWebSource(t, html, "async function loadProfiles(options = {})", "\n    async function loadReleaseReminders(")
+	harness := `
+import assert from "node:assert/strict";
+
+const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+const activeTimers = new Set();
+const window = {
+  setTimeout(callback, ms) {
+    let id = null;
+    id = nativeSetTimeout(() => {
+      activeTimers.delete(id);
+      callback();
+    }, ms);
+    activeTimers.add(id);
+    return id;
+  },
+  clearTimeout(id) {
+    activeTimers.delete(id);
+    nativeClearTimeout(id);
+  }
+};
+function createAPIError(message, status, requestID, errorCode) {
+  const error = new Error(message);
+  error.status = status;
+  error.requestID = requestID || "";
+  error.errorCode = errorCode || "";
+  return error;
+}
+function waitWithSignal(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = nativeSetTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      nativeClearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal.reason || new DOMException("aborted", "AbortError"));
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+const seenSignals = [];
+async function api(path, options = {}) {
+  seenSignals.push(options.signal);
+  await waitWithSignal(8, options.signal);
+  return { data: { profiles: [] } };
+}
+async function loadProfileOwners(options = {}) {
+  seenSignals.push(options.signal);
+  await waitWithSignal(8, options.signal);
+  return true;
+}
+async function loadReleaseReminders(options = {}) {
+  seenSignals.push(options.signal);
+  await waitWithSignal(40, options.signal);
+  return true;
+}
+const state = { profiles: [], profileOwners: {}, selected: "" };
+let profileRefreshGeneration = 0;
+function applyProfileOwners() {}
+function renderProfiles() {}
+function renderSelected() {}
+function refreshVisibleStatuses() {}
+function $(id) { return { textContent: "" }; }
+
+` + abortScope + "\n" + loadProfiles + `
+
+const started = Date.now();
+await assert.rejects(
+  loadProfiles({ timeoutMs: 24 }),
+  (error) => error?.status === 408 && error?.errorCode === "component_timeout"
+);
+const elapsed = Date.now() - started;
+assert.equal(seenSignals.length, 3, "all Profile chain reads must start under one deadline");
+assert.ok(seenSignals.every((signal) => signal === seenSignals[0]), "Profile chain must share one signal");
+assert.ok(elapsed < 80, "shared deadline must stop the Profile chain promptly: " + elapsed);
+assert.equal(activeTimers.size, 0, "Profile deadline timer must be cleaned");
+`
+	script := filepath.Join(t.TempDir(), "profile_deadline_behavior.mjs")
+	if err := os.WriteFile(script, []byte(harness), 0o600); err != nil {
+		t.Fatalf("write Profile deadline behavior script: %v", err)
+	}
+	output, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Profile deadline node behavior test failed: %v\n%s", err, output)
 	}
 }
 

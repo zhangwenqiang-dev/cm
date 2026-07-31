@@ -692,7 +692,7 @@ func TestWebAutoReleaseRefreshAndPollingContract(t *testing.T) {
 	if reminderLoaderStart < 0 {
 		t.Fatal("release reminder loader is missing")
 	}
-	reminderLoaderEnd := strings.Index(html[reminderLoaderStart:], "async function loadProfileOwners()")
+	reminderLoaderEnd := strings.Index(html[reminderLoaderStart:], "async function loadProfileOwners(options = {})")
 	if reminderLoaderEnd < 0 {
 		t.Fatal("release reminder loader boundary is missing")
 	}

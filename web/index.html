@@ -1406,20 +1406,58 @@ cm local-agent start</pre>
       return path;
     }
 
+    function createAbortScope(callerSignal, timeoutMs = 0) {
+      const duration = Number(timeoutMs) || 0;
+      if (!callerSignal && duration <= 0) {
+        return { signal: undefined, timedOut: () => false, cleanup: () => {} };
+      }
+      const controller = new AbortController();
+      let timeoutTriggered = false;
+      let timer = null;
+      let cleaned = false;
+      const abortFromCaller = () => {
+        if (!controller.signal.aborted) controller.abort(callerSignal?.reason);
+      };
+      if (callerSignal) {
+        if (callerSignal.aborted) {
+          abortFromCaller();
+        } else {
+          callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+        }
+      }
+      if (duration > 0 && !controller.signal.aborted) {
+        timer = window.setTimeout(() => {
+          if (controller.signal.aborted) return;
+          timeoutTriggered = true;
+          controller.abort(new DOMException("请求超时", "AbortError"));
+        }, duration);
+      }
+      return {
+        signal: controller.signal,
+        timedOut: () => timeoutTriggered,
+        cleanup: () => {
+          if (cleaned) return;
+          cleaned = true;
+          if (timer !== null) {
+            window.clearTimeout(timer);
+            timer = null;
+          }
+          if (callerSignal) {
+            callerSignal.removeEventListener("abort", abortFromCaller);
+          }
+        }
+      };
+    }
+
     async function api(path, options = {}) {
-      const { timeoutMs = 0, ...fetchOptions } = options;
-      const controller = timeoutMs > 0 ? new AbortController() : null;
-      let timedOut = false;
-      const timer = controller ? window.setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs) : null;
+      const { timeoutMs = 0, signal: callerSignal, ...fetchOptions } = options;
+      const abortScope = createAbortScope(callerSignal, timeoutMs);
       try {
         const res = await fetch(apiURL(path), {
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
           ...fetchOptions,
-          ...(controller ? { signal: controller.signal } : {})
+          ...(abortScope.signal ? { signal: abortScope.signal } : {})
         });
         const requestID = res.headers.get("X-Request-ID") || "";
         let responseText = "";
@@ -1460,12 +1498,12 @@ cm local-agent start</pre>
         }
         return body;
       } catch (err) {
-        if (timedOut) {
+        if (abortScope.timedOut()) {
           throw createAPIError("组件加载超时，请重试", 408, "", "component_timeout");
         }
         throw err;
       } finally {
-        if (timer) window.clearTimeout(timer);
+        abortScope.cleanup();
       }
     }
 
@@ -1948,34 +1986,46 @@ cm local-agent start</pre>
     async function loadProfiles(options = {}) {
       const startedGeneration = profileRefreshGeneration;
       const timeoutMs = Number(options.timeoutMs) || 0;
-      const requestOptions = timeoutMs > 0 ? { timeoutMs } : {};
-      const body = await api("/api/profiles", requestOptions);
-      state.profiles = body.data.profiles || [];
-      const seededOwners = {};
-      for (const profile of state.profiles) {
-        const owner = profile.owners?.[0];
-        if (owner) {
-          seededOwners[profile.name] = owner;
+      const abortScope = createAbortScope(options.signal, timeoutMs);
+      const requireChain = timeoutMs > 0 || !!options.signal;
+      try {
+        const requestOptions = abortScope.signal ? { signal: abortScope.signal } : {};
+        const body = await api("/api/profiles", requestOptions);
+        state.profiles = body.data.profiles || [];
+        const seededOwners = {};
+        for (const profile of state.profiles) {
+          const owner = profile.owners?.[0];
+          if (owner) {
+            seededOwners[profile.name] = owner;
+          }
         }
-      }
-      state.profileOwners = seededOwners;
-      await loadProfileOwners();
-      await loadReleaseReminders();
-      applyProfileOwners();
-      $("profileCount").textContent = String(state.profiles.length);
-      if (!state.selected && state.profiles.length) {
-        state.selected = state.profiles[0].name;
-      }
-      renderProfiles();
-      renderSelected();
-      if (options.refreshStatuses !== false) {
-        refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });
+        state.profileOwners = seededOwners;
+        await loadProfileOwners({ signal: abortScope.signal, required: requireChain });
+        await loadReleaseReminders({ signal: abortScope.signal, required: requireChain });
+        applyProfileOwners();
+        $("profileCount").textContent = String(state.profiles.length);
+        if (!state.selected && state.profiles.length) {
+          state.selected = state.profiles[0].name;
+        }
+        renderProfiles();
+        renderSelected();
+        if (options.refreshStatuses !== false) {
+          refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });
+        }
+      } catch (err) {
+        if (abortScope.timedOut()) {
+          throw createAPIError("Profile 加载超时，请重试", 408, "", "component_timeout");
+        }
+        throw err;
+      } finally {
+        abortScope.cleanup();
       }
     }
 
     async function loadReleaseReminders(options = {}) {
       try {
-        const body = await api("/api/release-reminders");
+        const requestOptions = options.signal ? { signal: options.signal } : {};
+        const body = await api("/api/release-reminders", requestOptions);
         const reminders = body.data?.reminders || [];
         state.reminders = {};
         for (const reminder of reminders) {
@@ -1991,9 +2041,10 @@ cm local-agent start</pre>
       }
     }
 
-    async function loadProfileOwners() {
+    async function loadProfileOwners(options = {}) {
       try {
-        const body = await api("/api/profile-owners");
+        const requestOptions = options.signal ? { signal: options.signal } : {};
+        const body = await api("/api/profile-owners", requestOptions);
         const owners = body.data?.owners || [];
         const nextOwners = {};
         for (const item of owners) {
@@ -2004,6 +2055,7 @@ cm local-agent start</pre>
         state.profileOwners = nextOwners;
         return true;
       } catch (err) {
+        if (options.required) throw err;
         return false;
       }
     }
@@ -4461,16 +4513,22 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify(editingEmail ? { original_email: editingEmail, name, email, role } : { name, email, role, password })
         });
-        await loadMembers();
-        renderMembers();
-        closeMemberForm();
-        announceManagementSuccess(editingEmail ? "成员已保存" : "成员已添加");
       } catch (err) {
         showOperationError(editingEmail ? "成员保存失败" : "成员添加失败", err);
-      } finally {
         setBusy(false);
         renderSelected();
+        return;
       }
+      setBusy(false);
+      closeMemberForm();
+      announceManagementSuccess(editingEmail ? "成员已保存" : "成员已添加");
+      try {
+        await loadMembers();
+        renderMembers();
+      } catch (err) {
+        showOperationError((editingEmail ? "成员已保存" : "成员已添加") + "，但列表刷新失败", err);
+      }
+      renderSelected();
     }
 
     async function toggleMember(email, enabled) {
@@ -4526,15 +4584,20 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ email, password })
         });
-        await loadMembers();
-        renderMembers();
-        closeMemberPasswordEditor();
-        announceManagementSuccess("成员密码已修改");
       } catch (err) {
         showOperationError("成员密码修改失败", err);
-      } finally {
         setBusy(false);
         renderMembers();
+        return;
+      }
+      setBusy(false);
+      closeMemberPasswordEditor();
+      announceManagementSuccess("成员密码已修改");
+      try {
+        await loadMembers();
+        renderMembers();
+      } catch (err) {
+        showOperationError("成员密码已修改，但列表刷新失败", err);
       }
     }
 
@@ -4569,14 +4632,15 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ current_password: current, new_password: next, confirm_password: confirm })
         });
-        renderUserPage();
-        closeOwnPasswordEditor();
-        announceManagementSuccess("密码已修改");
       } catch (err) {
         showOperationError("密码修改失败", err);
-      } finally {
         setBusy(false);
+        return;
       }
+      setBusy(false);
+      closeOwnPasswordEditor();
+      announceManagementSuccess("密码已修改");
+      renderUserPage();
     }
 
     async function generateOwnToken() {
@@ -4869,17 +4933,23 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ profile_yaml: profileYAML })
         });
+      } catch (err) {
+        showOperationError("Profile 保存失败", err);
+        setBusy(false);
+        renderSelected();
+        return;
+      }
+      setBusy(false);
+      closeProfileForm();
+      announceManagementSuccess("Profile 已保存");
+      try {
         await Promise.all([loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);
         renderManagedProfiles();
         renderProfiles();
-        closeProfileForm();
-        announceManagementSuccess("Profile 已保存");
       } catch (err) {
-        showOperationError("Profile 保存失败", err);
-      } finally {
-        setBusy(false);
-        renderSelected();
+        showOperationError("Profile 已保存，但列表刷新失败", err);
       }
+      renderSelected();
     }
 
     async function deleteManagedProfile(profile) {
@@ -4931,18 +5001,24 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ member_email: memberEmail, profiles })
         });
+      } catch (err) {
+        showOperationError("成员 Profile 保存失败", err);
+        setBusy(false);
+        renderSelected();
+        return;
+      }
+      setBusy(false);
+      closeMemberProfileEditor();
+      announceManagementSuccess("成员 Profile 已保存");
+      try {
         await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);
         renderMembers();
         renderManagedProfiles();
         renderProfiles();
-        closeMemberProfileEditor();
-        announceManagementSuccess("成员 Profile 已保存");
       } catch (err) {
-        showOperationError("成员 Profile 保存失败", err);
-      } finally {
-        setBusy(false);
-        renderSelected();
+        showOperationError("成员 Profile 已保存，但列表刷新失败", err);
       }
+      renderSelected();
     }
 
     async function setProfileAccess(profile, memberEmail, grant) {
