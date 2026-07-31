@@ -125,6 +125,23 @@
       gap: 10px;
     }
     h2 { margin: 0; font-size: 14px; font-weight: 650; letter-spacing: 0; }
+    .selected-title {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+      text-align: left;
+    }
+    .selected-profile-name,
+    .selected-apple-email {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .selected-profile-name { font-weight: 700; }
+    .selected-apple-email {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 500;
+    }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     input, select {
       min-height: 32px;
@@ -788,9 +805,11 @@
 
         <section id="operationsView" class="view hidden card shadow-sm">
           <div class="section-head card-header">
-            <h2 id="selectedTitle">未选择</h2>
+            <h2 class="selected-title">
+              <span id="selectedProfileName" class="selected-profile-name">未选择</span>
+              <span id="selectedAppleEmail" class="selected-apple-email">-</span>
+            </h2>
             <div class="toolbar">
-              <button id="backHomeBtn">返回首页</button>
               <button id="statusBtn">状态</button>
               <button id="openMacBtn" class="primary">打开</button>
               <button id="releaseMacBtn" class="danger">释放</button>
@@ -1033,7 +1052,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["backHomeBtn", "statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncPushTerminalRetryBtn", "syncPullTerminalRetryBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncPushTerminalRetryBtn", "syncPullTerminalRetryBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1846,7 +1865,8 @@
 
     function renderSelected() {
       const p = selectedProfile();
-      $("selectedTitle").textContent = p ? (p.name + " · " + (p.apple_email || "无 Apple 邮箱")) : "未选择";
+      $("selectedProfileName").textContent = p ? p.name : "未选择";
+      $("selectedAppleEmail").textContent = p ? (p.apple_email || "无 Apple 邮箱") : "-";
       const disabled = !p;
       const status = p ? state.statuses[p.name] : null;
       const statusKnown = !!status && status.decision !== "error" && !status.error;
@@ -4441,7 +4461,6 @@
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", () => { renderProfiles(); refreshVisibleStatuses(); });
     $("statusFilter").addEventListener("change", () => { renderProfiles(); refreshVisibleStatuses(); });
-    $("backHomeBtn").addEventListener("click", () => showView("profilesView"));
     $("statusBtn").addEventListener("click", loadStatus);
     $("openMacBtn").addEventListener("click", () => previewAWS("open"));
     $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
