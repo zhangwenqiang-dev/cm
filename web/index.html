@@ -136,6 +136,24 @@
       font: inherit;
     }
     input { width: 240px; }
+    #includeSystemEventsWrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      margin: 0;
+      padding-left: 0;
+      white-space: nowrap;
+    }
+    #includeSystemEvents {
+      float: none;
+      flex: 0 0 auto;
+      width: 2em;
+      height: 1em;
+      min-height: 1em;
+      margin: 0;
+      padding: 0;
+    }
     button {
       min-height: 32px;
       border: 1px solid var(--line);
@@ -781,10 +799,10 @@
               <button id="syncBtn" class="local-action">传输</button>
               <button id="terminalBtn" class="local-action">连接</button>
               <button id="eventsBtn">事件</button>
-              <label id="includeSystemEventsWrap" class="admin-only">
-                <input id="includeSystemEvents" type="checkbox">
-                包含系统事件
-              </label>
+              <div id="includeSystemEventsWrap" class="admin-only form-check form-switch">
+                <input id="includeSystemEvents" class="form-check-input" type="checkbox">
+                <label class="form-check-label" for="includeSystemEvents">包含系统事件</label>
+              </div>
             </div>
           </div>
           <div class="details">

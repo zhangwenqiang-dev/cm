@@ -171,8 +171,11 @@ func TestWebEventsUIIncludesAdminSystemToggleAndLabels(t *testing.T) {
 	}
 	html := string(data)
 	for _, want := range []string{
-		`id="includeSystemEventsWrap" class="admin-only"`,
-		`id="includeSystemEvents" type="checkbox"`,
+		`id="includeSystemEventsWrap" class="admin-only form-check form-switch"`,
+		`id="includeSystemEvents" class="form-check-input" type="checkbox"`,
+		`class="form-check-label" for="includeSystemEvents">包含系统事件</label>`,
+		`#includeSystemEventsWrap {`,
+		`#includeSystemEvents {`,
 		`includeSystem ? "&include_system=1" : ""`,
 		`event.source === "system" ? "[系统] " : ""`,
 		`$("includeSystemEvents").disabled = !isAdmin()`,
