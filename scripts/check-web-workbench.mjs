@@ -50,6 +50,37 @@ for (const lifecycle_state of ["pending", "waiting"]) {
     "creating",
   );
 }
+for (const type of ["aws-open", "aws-destroy"]) {
+  for (const [status, lifecycle_state] of [
+    ["failed", "pending"],
+    ["interrupted", "waiting"],
+  ]) {
+    assert.equal(
+      effectiveState({
+        profileName: "build-mac",
+        status: { decision: "create" },
+        jobs: [{ profile: "build-mac", type, status, lifecycle_state }],
+      }),
+      "stopped",
+      `${type} ${status}+${lifecycle_state} must be inactive`,
+    );
+  }
+
+  for (const [status, lifecycle_state] of [
+    ["success", "pending"],
+    ["deferred", "waiting"],
+  ]) {
+    assert.equal(
+      effectiveState({
+        profileName: "build-mac",
+        status: { decision: "create" },
+        jobs: [{ profile: "build-mac", type, status, lifecycle_state }],
+      }),
+      type === "aws-open" ? "creating" : "releasing",
+      `${type} ${status}+${lifecycle_state} must follow lifecycle state`,
+    );
+  }
+}
 assert.equal(
   effectiveState({
     profileName: "build-mac",

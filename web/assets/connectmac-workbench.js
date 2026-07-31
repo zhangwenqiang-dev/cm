@@ -2,6 +2,7 @@
   "use strict";
 
   const ACTIVE_JOB_STATUSES = new Set(["starting", "running", "deferred"]);
+  const TERMINAL_JOB_STATUSES = new Set(["failed", "interrupted"]);
   const ACTIVE_LIFECYCLE_STATES = new Set(["pending", "waiting"]);
   const ACTIVE_AUTO_RELEASE_STATES = new Set(["running", "retrying", "notifying"]);
   const EFFECTIVE_STATES = new Set([
@@ -16,6 +17,7 @@
   function activeLifecycleJob(job, type, profileName) {
     if (!job || job.type !== type) return false;
     if (job.profile !== profileName) return false;
+    if (TERMINAL_JOB_STATUSES.has(job.status)) return false;
 
     const lifecycleState = String(job.lifecycle_state || job.lifecycleState || "").trim();
     if (lifecycleState) return ACTIVE_LIFECYCLE_STATES.has(lifecycleState);
