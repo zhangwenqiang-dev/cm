@@ -581,15 +581,59 @@ func TestJobBlocksUniqueCreationForProcessOrLifecycleActivity(t *testing.T) {
 	}{
 		{name: "process starting", job: Job{Status: JobStatusStarting}, want: true},
 		{name: "process running", job: Job{Status: JobStatusRunning}, want: true},
+		{name: "process deferred without lifecycle", job: Job{Status: JobStatusDeferred}, want: true},
 		{name: "lifecycle pending", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecyclePending}, want: true},
-		{name: "lifecycle waiting", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecycleWaiting}, want: true},
-		{name: "lifecycle finalized", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecycleFinalized}, want: false},
+		{name: "success lifecycle waiting", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecycleWaiting}, want: true},
+		{name: "failed overrides stale pending", job: Job{Status: JobStatusFailed, LifecycleState: JobLifecyclePending}, want: false},
+		{name: "interrupted overrides stale waiting", job: Job{Status: JobStatusInterrupted, LifecycleState: JobLifecycleWaiting}, want: false},
+		{name: "deferred lifecycle finalized", job: Job{Status: JobStatusDeferred, LifecycleState: JobLifecycleFinalized}, want: false},
+		{name: "success lifecycle finalized", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecycleFinalized}, want: false},
 		{name: "lifecycle failed", job: Job{Status: JobStatusFailed, LifecycleState: JobLifecycleFailed}, want: false},
+		{name: "success without lifecycle", job: Job{Status: JobStatusSuccess}, want: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if got := jobBlocksUniqueCreation(test.job); got != test.want {
 				t.Fatalf("jobBlocksUniqueCreation(%+v) = %t, want %t", test.job, got, test.want)
+			}
+		})
+	}
+}
+
+func TestJobManagerDeferredWithoutLifecycleBlocksDuplicate(t *testing.T) {
+	for _, jobType := range []string{"aws-open", "aws-destroy"} {
+		t.Run(jobType, func(t *testing.T) {
+			manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+			if _, err := manager.Create(Job{
+				ID:      jobType + "-deferred",
+				Type:    jobType,
+				Profile: "mac",
+				Status:  JobStatusDeferred,
+			}); err != nil {
+				t.Fatalf("create deferred job: %v", err)
+			}
+			if _, err := manager.Create(Job{
+				ID:      jobType + "-other",
+				Type:    jobType,
+				Profile: "other",
+				Status:  JobStatusDeferred,
+			}); err != nil {
+				t.Fatalf("create deferred job for other profile: %v", err)
+			}
+			artifact := filepath.Join(t.TempDir(), "duplicate-deferred-config.yaml")
+			if err := os.WriteFile(artifact, []byte("secret config"), 0o600); err != nil {
+				t.Fatalf("write deferred duplicate artifact: %v", err)
+			}
+			if _, err := manager.Create(Job{
+				ID:           jobType + "-deferred-duplicate",
+				Type:         jobType,
+				Profile:      "mac",
+				CleanupPaths: []string{artifact},
+			}); !IsDuplicateActiveJob(err, jobType, "mac") {
+				t.Fatalf("deferred duplicate error = %v", err)
+			}
+			if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("deferred duplicate artifact was not cleaned: %v", err)
 			}
 		})
 	}

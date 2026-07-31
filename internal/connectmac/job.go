@@ -210,10 +210,16 @@ func (m JobManager) createUniqueLocked(job Job) (Job, error) {
 }
 
 func jobBlocksUniqueCreation(job Job) bool {
+	if job.Status == JobStatusFailed || job.Status == JobStatusInterrupted {
+		return false
+	}
+	lifecycleState := JobLifecycleState(strings.TrimSpace(string(job.LifecycleState)))
+	if lifecycleState != "" {
+		return lifecycleState == JobLifecyclePending || lifecycleState == JobLifecycleWaiting
+	}
 	return job.Status == JobStatusStarting ||
 		job.Status == JobStatusRunning ||
-		job.LifecycleState == JobLifecyclePending ||
-		job.LifecycleState == JobLifecycleWaiting
+		job.Status == JobStatusDeferred
 }
 
 func (m JobManager) create(job Job, unique bool) (Job, error) {
