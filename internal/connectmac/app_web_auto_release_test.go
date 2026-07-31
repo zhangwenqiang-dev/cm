@@ -62,7 +62,7 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 		}
 	}
 
-	profileStatusSummary := extractWebSource(t, html, "function profileStatusSummary(status, profileName)", "\n    async function refreshVisibleStatuses()")
+	profileStatusSummary := extractWebSource(t, html, "function profileStatusSummary(status, profileName)", "\n    async function refreshVisibleStatuses(")
 	for _, want := range []string{
 		`autoReleaseActive(state.reminders[profileName], profileName)`,
 		`return "正在释放";`,

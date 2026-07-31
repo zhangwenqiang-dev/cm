@@ -184,11 +184,55 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		`state.auth?.authenticated`,
 		`profileRefreshTimer`,
 		`profileRefreshInFlight`,
+		`new AbortController()`,
+		`profileRefreshGeneration`,
 		`状态更新失败，正在重试`,
 		`最后更新（北京时间）`,
 	} {
 		if !strings.Contains(scheduleProfileRefresh, want) {
 			t.Errorf("scheduleProfileRefresh is missing %q", want)
+		}
+	}
+
+	refreshVisibleStatuses := extractWebSource(t, html, "async function refreshVisibleStatuses(", "\n    function clearProfileRefreshTimer()")
+	for _, want := range []string{
+		`!state.auth?.authenticated`,
+		`document.visibilityState !== "visible"`,
+		`return false;`,
+		`generation !== profileRefreshGeneration`,
+		`renderProfiles();`,
+		`renderSelected();`,
+	} {
+		if !strings.Contains(refreshVisibleStatuses, want) {
+			t.Errorf("refreshVisibleStatuses is missing %q", want)
+		}
+	}
+
+	stopProfileRefresh := webInlineFunctionSource(t, html, `function stopProfileRefresh()`)
+	for _, want := range []string{
+		`clearProfileRefreshTimer();`,
+		`profileRefreshController.abort();`,
+		`profileRefreshController = null;`,
+		`profileRefreshGeneration += 1;`,
+	} {
+		if !strings.Contains(stopProfileRefresh, want) {
+			t.Errorf("stopProfileRefresh is missing %q", want)
+		}
+	}
+
+	clearProfileRefreshTimer := webInlineFunctionSource(t, html, `function clearProfileRefreshTimer()`)
+	if !strings.Contains(clearProfileRefreshTimer, `window.clearTimeout(profileRefreshTimer)`) {
+		t.Error("clearProfileRefreshTimer must clear the active timer")
+	}
+
+	refreshStatus := extractWebSource(t, html, "async function refreshStatus(profile, showOutput, signal)", "\n    async function runAWS(")
+	for _, want := range []string{
+		`api("/api/aws/status?profile=" + encodeURIComponent(profile), { signal: signal })`,
+		`err.name === "AbortError"`,
+		`signal?.aborted`,
+	} {
+		if !strings.Contains(refreshStatus, want) {
+			t.Errorf("refreshStatus signal handling is missing %q", want)
 		}
 	}
 }
