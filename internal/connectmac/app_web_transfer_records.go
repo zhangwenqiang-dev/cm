@@ -251,7 +251,7 @@ func (a App) transferProfileForMember(member Member, name string) (Profile, erro
 }
 
 func (a App) writeTransferLog(level, message string, member Member, record TransferRecord, elapsedMS int64, detail string) {
-	_ = a.LogManager.Write(LogEntry{
+	a.writeRuntimeLog(LogEntry{
 		Level: level, Action: webTransferLogAction, Message: strings.TrimSpace(message + " " + detail),
 		Profile: record.ProfileName, AppleEmail: record.AppleEmail, MemberEmail: member.Email,
 		TransferID: record.ID, LocalJobID: record.LocalJobID, Direction: record.Direction,
@@ -261,7 +261,7 @@ func (a App) writeTransferLog(level, message string, member Member, record Trans
 }
 
 func (a App) logTransferAuthRejection(memberEmail, profile, direction, message string) {
-	_ = a.LogManager.Write(LogEntry{Level: "warn", Action: webTransferLogAction, Message: "authorization rejected: " + message, MemberEmail: memberEmail, Profile: profile, Direction: direction})
+	a.writeRuntimeLog(LogEntry{Level: "warn", Action: webTransferLogAction, Message: "authorization rejected: " + message, MemberEmail: memberEmail, Profile: profile, Direction: direction})
 }
 
 func (a App) logTransferPersistenceError(member Member, record TransferRecord, err error) {

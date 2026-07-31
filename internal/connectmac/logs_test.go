@@ -75,6 +75,7 @@ func TestLogManagerStructuredRedaction(t *testing.T) {
 	entry := LogEntry{
 		RequestID:        "request-1",
 		JobID:            "job-1",
+		SessionIDHash:    "sha256:session-1",
 		Operation:        "aws.open",
 		Source:           "web",
 		Phase:            "requested",
@@ -162,6 +163,7 @@ func TestLogManagerStructuredRedaction(t *testing.T) {
 	}
 	if got.RequestID != entry.RequestID ||
 		got.JobID != entry.JobID ||
+		got.SessionIDHash != entry.SessionIDHash ||
 		got.Operation != entry.Operation ||
 		got.Source != entry.Source ||
 		got.Phase != entry.Phase ||

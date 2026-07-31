@@ -283,7 +283,7 @@ func (a App) advanceAutoReleaseReminders(ctx context.Context, configPath string,
 	coordinator := a.newAutoReleaseCoordinator(configPath)
 	coordinator.Now = func() time.Time { return now }
 	if err := coordinator.Scan(ctx); err != nil {
-		_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.worker", Message: err.Error()})
+		a.writeRuntimeLog(LogEntry{Level: "error", Action: "release-reminder.worker", Operation: "auto-release", Source: "background-worker", Phase: "scan", ErrorCode: classifyOperationalError(err).Code, Message: err.Error()})
 	}
 }
 
@@ -325,8 +325,19 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 			if event.Action == "retrying" || event.Action == "failed" {
 				level = "error"
 			}
-			_ = a.LogManager.Write(LogEntry{Level: level, Action: "auto-release." + event.Action, Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail, Message: event.Message})
-			_ = a.MemberStore.RecordEvent(OperationEvent{Action: "auto-release." + event.Action, Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail, Confirmed: true, Status: event.Action, Message: event.Message})
+			action := "auto-release." + event.Action
+			a.writeRuntimeLog(LogEntry{
+				Level: level, Action: action, Operation: "auto-release",
+				Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail,
+				Source: "background-worker", Phase: event.Action, Status: event.Action,
+				Message: event.Message,
+			})
+			_ = a.recordEventWithFallback(OperationEvent{
+				Action: action, Profile: event.Reminder.ProfileName,
+				AppleEmail: event.Reminder.AppleEmail, Source: "background-worker",
+				Phase: event.Action, Confirmed: true, Status: event.Action,
+				Message: event.Message,
+			})
 		},
 	}
 }
@@ -1890,13 +1901,13 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 			OwnerEmail string `json:"owner_email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws." + command, Message: "invalid json body"})
+			a.writeRuntimeLog(LogEntry{Level: "error", Action: "web.aws." + command, Operation: "aws." + command, Source: "web", Phase: "validate", ErrorCode: "validation_error", Message: "invalid json body"})
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
 		req.Profile = strings.TrimSpace(req.Profile)
 		if req.Profile == "" {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws." + command, Message: "profile is required"})
+			a.writeRuntimeLog(LogEntry{Level: "error", Action: "web.aws." + command, Operation: "aws." + command, Source: "web", Phase: "validate", ErrorCode: "validation_error", Message: "profile is required"})
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
@@ -1913,7 +1924,7 @@ func (a App) webAWSActionHandler(configPath, command string) http.HandlerFunc {
 		}
 		if req.Confirm {
 			if err := a.validateWebAWSOwner(r, configPath, command, req.Profile, req.OwnerEmail); err != nil {
-				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.aws.open", Profile: req.Profile, Message: err.Error()})
+				a.writeRuntimeLog(LogEntry{Level: "error", Action: "web.aws.open", Operation: "aws.open", Profile: req.Profile, Source: "web", Phase: "validate", ErrorCode: classifyOperationalError(err).Code, Message: err.Error()})
 				writeWebError(w, http.StatusBadRequest, err.Error())
 				return
 			}
@@ -1975,13 +1986,13 @@ func (a App) webTunnelStartHandler(configPath string) http.HandlerFunc {
 			Profile string `json:"profile"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.tunnel.start", Message: "invalid json body"})
+			a.writeRuntimeLog(LogEntry{Level: "error", Action: "web.tunnel.start", Operation: "tunnel.start", Source: "web", Phase: "validate", ErrorCode: "validation_error", Message: "invalid json body"})
 			writeWebError(w, http.StatusBadRequest, "invalid json body")
 			return
 		}
 		req.Profile = strings.TrimSpace(req.Profile)
 		if req.Profile == "" {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.tunnel.start", Message: "profile is required"})
+			a.writeRuntimeLog(LogEntry{Level: "error", Action: "web.tunnel.start", Operation: "tunnel.start", Source: "web", Phase: "validate", ErrorCode: "validation_error", Message: "profile is required"})
 			writeWebError(w, http.StatusBadRequest, "profile is required")
 			return
 		}
@@ -2147,7 +2158,7 @@ func (a App) webAWSStatusWithCleanup(ctx context.Context, profile Profile) (MacP
 		}
 		if shouldAutoCleanupProfileRecords(status) {
 			if _, err := a.cleanupProfileLocalRecordsLocked(profile.Name, "auto-status"); err != nil {
-				_ = a.LogManager.Write(LogEntry{Level: "error", Action: "release-reminder.cleanup.auto", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail, Message: err.Error()})
+				a.writeRuntimeLog(LogEntry{Level: "error", Action: "release-reminder.cleanup.auto", Operation: "release-reminder.cleanup", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail, Source: "background-worker", Phase: "failed", ErrorCode: classifyOperationalError(err).Code, Message: err.Error()})
 			}
 		}
 		return nil
@@ -2651,17 +2662,18 @@ func (a App) recordWebEventForRequest(r *http.Request, configPath, profileRef, a
 		op = a.operationContextForRequest(r)
 	}
 	event := OperationEvent{
-		Action:      eventAction,
-		Profile:     profileRef,
-		MemberID:    op.Actor.MemberID,
-		MemberEmail: op.Actor.MemberEmail,
-		MemberName:  op.Actor.MemberName,
-		RequestID:   op.RequestID,
-		Source:      op.Source,
-		Phase:       eventPhase,
-		Confirmed:   confirmed,
-		Status:      status,
-		Message:     message,
+		Action:        eventAction,
+		Profile:       profileRef,
+		MemberID:      op.Actor.MemberID,
+		MemberEmail:   op.Actor.MemberEmail,
+		MemberName:    op.Actor.MemberName,
+		RequestID:     op.RequestID,
+		SessionIDHash: op.SessionIDHash,
+		Source:        op.Source,
+		Phase:         eventPhase,
+		Confirmed:     confirmed,
+		Status:        status,
+		Message:       message,
 	}
 	if cfg, err := LoadConfig(configPath); err == nil {
 		if profile, err := resolveProfileRef(cfg, profileRef); err == nil {
@@ -2669,7 +2681,7 @@ func (a App) recordWebEventForRequest(r *http.Request, configPath, profileRef, a
 			event.AppleEmail = profile.AWS.AccountEmail
 		}
 	}
-	_ = a.MemberStore.RecordEvent(event)
+	_ = a.recordEventWithFallback(event)
 }
 
 func (a App) webCommandConfigPath(r *http.Request, configPath string) (string, func(), error) {
@@ -2704,7 +2716,7 @@ func (a App) writeWebTempConfig(r *http.Request, configPath string) (string, fun
 }
 
 func (a App) logProfileError(action string, profile Profile, message string) {
-	_ = a.LogManager.Write(LogEntry{
+	a.writeRuntimeLog(LogEntry{
 		Level:      "error",
 		Action:     action,
 		Profile:    profile.Name,
@@ -2725,7 +2737,7 @@ func (a App) logWebResponse(action, profileRef string, resp webAPIResponse) {
 	if message == "" {
 		message = fmt.Sprintf("code=%d ok=%t", resp.Code, resp.OK)
 	}
-	_ = a.LogManager.Write(LogEntry{Level: level, Action: action, Profile: profileRef, Message: message})
+	a.writeRuntimeLog(LogEntry{Level: level, Action: action, Profile: profileRef, Message: message})
 }
 
 func webAWSStatusData(profile Profile, plan MacPlan, status AWSStatus) webAWSStatus {

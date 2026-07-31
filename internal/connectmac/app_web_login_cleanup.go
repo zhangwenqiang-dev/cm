@@ -29,7 +29,11 @@ func (a App) cleanupLocalConfigAfterLogin(configPath string) {
 		return
 	}
 	if backup != "" {
-		_ = a.LogManager.Write(LogEntry{Level: "info", Action: "web.auth.cleanup", Message: "backed up old local profiles to " + backup})
+		a.writeRuntimeLog(LogEntry{
+			Level: "info", Action: "web.auth.cleanup", Operation: "config.cleanup",
+			Source: "system", Phase: "completed",
+			Message: "backed up old local profiles to " + backup,
+		})
 	}
 }
 

@@ -598,7 +598,9 @@ Service log: journalctl -u connectmac
 ```
 
 JSONL and audit records include correlation fields such as `request_id`,
-`job_id`, `profile`, `source`, `phase`, `duration_ms`, and `error_code`.
+`job_id`, `session_id_hash`, `profile`, `source`, `phase`, `duration_ms`, and
+`error_code`. `session_id_hash` is an irreversible SHA-256 correlation value;
+the session cookie or API token is never stored.
 Passwords, tokens, webhook URLs, PEM contents, SSH commands, terminal contents,
 and transferred file contents are not logged.
 

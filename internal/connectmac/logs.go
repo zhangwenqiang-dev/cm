@@ -46,6 +46,7 @@ type LogEntry struct {
 	AWSProfile       string `json:"aws_profile,omitempty"`
 	RequestID        string `json:"request_id,omitempty"`
 	JobID            string `json:"job_id,omitempty"`
+	SessionIDHash    string `json:"session_id_hash,omitempty"`
 	Operation        string `json:"operation,omitempty"`
 	Source           string `json:"source,omitempty"`
 	Phase            string `json:"phase,omitempty"`
@@ -295,6 +296,7 @@ func sanitizeLogEntry(entry LogEntry) LogEntry {
 	entry.AWSProfile = sanitizeLogText(entry.AWSProfile)
 	entry.RequestID = sanitizeLogText(entry.RequestID)
 	entry.JobID = sanitizeLogText(entry.JobID)
+	entry.SessionIDHash = sanitizeLogText(entry.SessionIDHash)
 	entry.Operation = sanitizeLogText(entry.Operation)
 	entry.Source = sanitizeLogText(entry.Source)
 	entry.Phase = sanitizeLogText(entry.Phase)

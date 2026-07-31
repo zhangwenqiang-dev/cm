@@ -99,11 +99,12 @@ func TestClassifyOperationalError(t *testing.T) {
 
 func TestOperationContextRoundTrip(t *testing.T) {
 	value := OperationContext{
-		RequestID: "request-1",
-		JobID:     "job-1",
-		Source:    "web",
-		Route:     "/api/aws/open",
-		Method:    "POST",
+		RequestID:     "request-1",
+		JobID:         "job-1",
+		SessionIDHash: "sha256:session-1",
+		Source:        "web",
+		Route:         "/api/aws/open",
+		Method:        "POST",
 		Actor: AuditActor{
 			MemberID:    "member-1",
 			MemberEmail: "member@example.com",
@@ -117,6 +118,19 @@ func TestOperationContextRoundTrip(t *testing.T) {
 	}
 	if got := operationContextFrom(nil); got != (OperationContext{}) {
 		t.Fatalf("operationContextFrom(nil) = %+v", got)
+	}
+}
+
+func TestHashSessionIdentifierIsStableAndDoesNotExposeInput(t *testing.T) {
+	got := hashSessionIdentifier("session-secret")
+	if got == "" || got == "session-secret" || !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("hashSessionIdentifier() = %q", got)
+	}
+	if got != hashSessionIdentifier("session-secret") {
+		t.Fatal("session identifier hash is not stable")
+	}
+	if hashSessionIdentifier(" ") != "" {
+		t.Fatal("blank session identifier must not produce a hash")
 	}
 }
 

@@ -312,7 +312,11 @@ func (a App) requireWebRole(next http.HandlerFunc, roles ...string) http.Handler
 			return
 		}
 		if _, ok := a.requireWebRoleValue(r, roles...); !ok {
-			a.recordAuthorizationDenied(r, "login or required role is missing")
+			a.recordAuthorizationDenied(r, fmt.Sprintf(
+				"path=%s required_roles=%s reason=login_or_required_role_missing",
+				r.URL.Path,
+				strings.Join(roles, ","),
+			))
 			writeWebError(w, http.StatusUnauthorized, "login required")
 			return
 		}

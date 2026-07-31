@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,12 +19,22 @@ type AuditActor struct {
 }
 
 type OperationContext struct {
-	RequestID string
-	JobID     string
-	Source    string
-	Route     string
-	Method    string
-	Actor     AuditActor
+	RequestID     string
+	JobID         string
+	SessionIDHash string
+	Source        string
+	Route         string
+	Method        string
+	Actor         AuditActor
+}
+
+func hashSessionIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 type ClassifiedError struct {
@@ -169,6 +180,13 @@ func (a App) writeRuntimeLog(entry LogEntry) {
 		message = strings.NewReplacer("\r", " ", "\n", " ").Replace(sanitizeLogText(message))
 		_, _ = fmt.Fprintln(writer, message)
 	}
+}
+
+func (a App) recordEventWithFallback(event OperationEvent) error {
+	if err := a.MemberStore.RecordEvent(event); err != nil {
+		return a.recordEventPersistenceFailure(event, err)
+	}
+	return nil
 }
 
 func elapsedDurationMS(startedAt time.Time) int64 {

@@ -57,32 +57,49 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 		}
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(req *http.Request) bool {
-				return req.Host == req.Header.Get("Origin") || req.Header.Get("Origin") == "" || sameWebOrigin(req)
+				return sameWebOrigin(req)
 			},
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			_ = a.LogManager.Write(LogEntry{Level: "error", Action: "web.terminal", Profile: profile.Name, Message: err.Error()})
+			op := a.operationContextForRequest(r)
+			classified := classifyOperationalError(err)
+			a.writeRuntimeLog(LogEntry{
+				Level: classified.Level, Action: "terminal.failed", Operation: "terminal",
+				Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
+				ActorMemberID: op.Actor.MemberID, ActorMemberEmail: op.Actor.MemberEmail,
+				ActorMemberName: op.Actor.MemberName, RequestID: op.RequestID,
+				SessionIDHash: op.SessionIDHash, Source: "web-server",
+				Phase: "upgrade", ErrorCode: classified.Code, Outcome: "failure",
+				Message: err.Error(),
+			})
 			return
 		}
 		startedAt := time.Now()
 		op := a.operationContextForRequest(r)
 		a.writeRuntimeLog(LogEntry{
 			Action: "terminal.opened", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
-			RequestID: op.RequestID, Source: "web-server", Phase: "opened", Outcome: "success", Message: "terminal.opened",
+			ActorMemberID: op.Actor.MemberID, ActorMemberEmail: op.Actor.MemberEmail,
+			ActorMemberName: op.Actor.MemberName, RequestID: op.RequestID,
+			SessionIDHash: op.SessionIDHash, Source: "web-server",
+			Phase: "opened", Outcome: "success", Message: "terminal.opened",
 		})
-		a.recordWebEvent(configPath, profile.Name, "terminal", true, webAPIResponse{OK: true, Output: "opened web terminal"})
+		a.recordWebEventForRequest(r, configPath, profile.Name, "terminal", true, webAPIResponse{OK: true, Output: "opened web terminal"})
 		proxyErr := a.proxyWebTerminal(r.Context(), conn, profile)
 		entry := LogEntry{
 			Action: "terminal.closed", Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
-			RequestID: op.RequestID, Source: "web-server", Phase: "closed",
-			DurationMS: time.Since(startedAt).Milliseconds(), Outcome: "success", Message: "terminal.closed",
+			ActorMemberID: op.Actor.MemberID, ActorMemberEmail: op.Actor.MemberEmail,
+			ActorMemberName: op.Actor.MemberName, RequestID: op.RequestID,
+			SessionIDHash: op.SessionIDHash, Source: "web-server", Phase: "closed",
+			DurationMS: positiveDurationMS(time.Since(startedAt)), Outcome: "success",
+			Message: "terminal.closed reason=normal",
 		}
 		if !normalTerminalClose(proxyErr) {
 			classified := classifyOperationalError(proxyErr)
 			entry.Level = classified.Level
 			entry.ErrorCode = classified.Code
 			entry.Outcome = "failure"
+			entry.Message = "terminal.closed reason=error"
 		}
 		a.writeRuntimeLog(entry)
 	}
@@ -91,7 +108,7 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 func sameWebOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return true
+		return false
 	}
 	return origin == "http://"+r.Host || origin == "https://"+r.Host
 }

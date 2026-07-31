@@ -110,6 +110,10 @@ func TestWebMemberMutationCreatesOneTerminalAudit(t *testing.T) {
 		`{"name":"Operator","email":"operator@example.com","role":"operator","password":"member-secret-password"}`,
 	))
 	addWebAuth(t, &app, req, "admin")
+	sessionCookie, err := req.Cookie(webSessionCookie)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec := httptest.NewRecorder()
 
 	app.newWebHandler("").ServeHTTP(rec, req)
@@ -131,11 +135,85 @@ func TestWebMemberMutationCreatesOneTerminalAudit(t *testing.T) {
 	if event.MemberEmail != "admin@example.com" || event.TargetMemberEmail != "operator@example.com" {
 		t.Fatalf("event actor/target = %+v", event)
 	}
-	if event.RequestID == "" || event.Source != "web" {
+	if event.RequestID == "" || event.SessionIDHash == "" || event.Source != "web" {
 		t.Fatalf("event correlation = %+v", event)
+	}
+	if event.SessionIDHash != hashSessionIdentifier("cookie:"+sessionCookie.Value) ||
+		strings.Contains(mustJSON(t, event), sessionCookie.Value) {
+		t.Fatalf("event session correlation is unsafe: %+v", event)
 	}
 	if strings.Contains(mustJSON(t, event), "member-secret-password") {
 		t.Fatalf("audit leaked password: %+v", event)
+	}
+}
+
+func TestWebSessionIdentifierHashSupportsCookieAndBearerWithoutExposingCredentials(t *testing.T) {
+	cookieRequest := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	cookieRequest.AddCookie(&http.Cookie{Name: webSessionCookie, Value: "cookie-secret"})
+	cookieHash := webSessionIdentifierHash(cookieRequest)
+	if cookieHash == "" || cookieHash == "cookie-secret" {
+		t.Fatalf("cookie session hash = %q", cookieHash)
+	}
+
+	bearerRequest := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	bearerRequest.Header.Set("Authorization", "Bearer bearer-secret")
+	bearerHash := webSessionIdentifierHash(bearerRequest)
+	if bearerHash == "" || bearerHash == cookieHash || strings.Contains(bearerHash, "bearer-secret") {
+		t.Fatalf("bearer session hash = %q", bearerHash)
+	}
+}
+
+func TestWebLoginSuccessAuditUsesIssuedSessionHash(t *testing.T) {
+	app, handler := newWebAuditApp(t)
+	if _, err := app.MemberStore.SetupAdmin("Admin", "admin@example.com", "password123"); err != nil {
+		t.Fatal(err)
+	}
+	challenge := webChallengeThroughHandler(t, handler)
+	body := fmt.Sprintf(
+		`{"username":"admin@example.com","password":"password123","challenge_token":%q,"challenge_answer":%q}`,
+		challenge.token,
+		challenge.answer,
+	)
+	rec := performWebAuditRequest(t, handler, nil, "/api/auth/login", body)
+	assertWebResponseEnvelope(t, rec, http.StatusOK, true)
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("login did not issue a session cookie")
+	}
+	events, err := app.MemberStore.RecentEvents("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "auth.login.succeeded" {
+		t.Fatalf("login events = %+v", events)
+	}
+	want := hashSessionIdentifier("cookie:" + cookies[0].Value)
+	if events[0].SessionIDHash != want || strings.Contains(mustJSON(t, events[0]), cookies[0].Value) {
+		t.Fatalf("login session correlation is unsafe: %+v", events[0])
+	}
+}
+
+func TestWebTerminalOriginRequiresSameOrigin(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+		want   bool
+	}{
+		{name: "missing", want: false},
+		{name: "same https", origin: "https://cm.example.com", want: true},
+		{name: "cross origin", origin: "https://evil.example.com", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "https://cm.example.com/api/terminal/ws", nil)
+			req.Host = "cm.example.com"
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			if got := sameWebOrigin(req); got != test.want {
+				t.Fatalf("sameWebOrigin() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
@@ -166,6 +244,33 @@ func TestWebAuthorizationDeniedCreatesOneFailedAudit(t *testing.T) {
 	}
 	if event.MemberEmail != "admin@example.com" || event.TargetMemberEmail != "target@example.com" {
 		t.Fatalf("event actor/target = %+v", event)
+	}
+}
+
+func TestWebReadAuthorizationDeniedCreatesOneFailedAudit(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	req := httptest.NewRequest(http.MethodGet, "/api/members", nil)
+	addWebAuth(t, &app, req, "operator")
+	rec := httptest.NewRecorder()
+
+	app.newWebHandler("").ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	events, err := app.MemberStore.RecentEvents("", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %+v, want one", events)
+	}
+	event := events[0]
+	if event.Action != "authorization.denied" || event.MemberEmail != "admin@example.com" ||
+		event.RequestID == "" || event.SessionIDHash == "" || event.Source != "web" ||
+		!strings.Contains(event.Message, "required_roles=admin") {
+		t.Fatalf("read authorization event = %+v", event)
 	}
 }
 

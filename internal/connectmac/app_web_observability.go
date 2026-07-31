@@ -134,10 +134,11 @@ func (a App) withWebObservability(next http.Handler) http.Handler {
 		w.Header().Set("X-Request-ID", requestID)
 
 		op := OperationContext{
-			RequestID: requestID,
-			Source:    "web",
-			Route:     r.URL.Path,
-			Method:    r.Method,
+			RequestID:     requestID,
+			SessionIDHash: webSessionIdentifierHash(r),
+			Source:        "web",
+			Route:         r.URL.Path,
+			Method:        r.Method,
 		}
 		state := &webAuditState{}
 		ctx := context.WithValue(withOperationContext(r.Context(), op), webAuditStateKey{}, state)
@@ -177,6 +178,11 @@ func (a App) withWebObservability(next http.Handler) http.Handler {
 				if response.overflow {
 					response.reset()
 					writeWebError(response, http.StatusInternalServerError, errBufferedWebResponseTooLarge.Error())
+				}
+				if state.event != nil {
+					if err := a.recordAudit(r.Context(), *state.event); err != nil {
+						_ = a.recordEventPersistenceFailure(*state.event, err)
+					}
 				}
 				response.flushTo(w)
 				return
@@ -229,21 +235,11 @@ func (a App) withWebObservability(next http.Handler) http.Handler {
 				state.event.TargetMemberEmail = spec.targetMemberEmail
 			}
 		}
+		if state.event.SessionIDHash == "" {
+			state.event.SessionIDHash = webResponseSessionIdentifierHash(response.header)
+		}
 		if err := a.recordAudit(r.Context(), *state.event); err != nil {
-			classified := classifyOperationalError(err)
-			a.writeRuntimeLog(LogEntry{
-				Level:            "error",
-				Action:           "audit.persistence.failed",
-				RequestID:        requestID,
-				Operation:        state.event.Action,
-				Source:           "web",
-				Phase:            "persist",
-				ErrorCode:        classified.Code,
-				ActorMemberID:    op.Actor.MemberID,
-				ActorMemberEmail: op.Actor.MemberEmail,
-				ActorMemberName:  op.Actor.MemberName,
-				Message:          "failed to persist web audit event",
-			})
+			_ = a.recordEventPersistenceFailure(*state.event, err)
 			// The business mutation may already be committed. Preserve its response
 			// so a client retry cannot repeat a successful password, token, or member
 			// mutation. The local runtime failure log remains available for repair.
@@ -260,15 +256,16 @@ func (a App) serveWebWithRecovery(w http.ResponseWriter, r *http.Request, next h
 		}
 		op := operationContextFrom(r.Context())
 		a.writeRuntimeLog(LogEntry{
-			Level:      "error",
-			Action:     "web.panic",
-			RequestID:  op.RequestID,
-			Operation:  r.URL.Path,
-			Source:     "web",
-			Phase:      "handler",
-			ErrorCode:  "internal_error",
-			HTTPStatus: http.StatusInternalServerError,
-			Message:    "web request failed unexpectedly",
+			Level:         "error",
+			Action:        "web.panic",
+			RequestID:     op.RequestID,
+			SessionIDHash: op.SessionIDHash,
+			Operation:     r.URL.Path,
+			Source:        "web",
+			Phase:         "handler",
+			ErrorCode:     "internal_error",
+			HTTPStatus:    http.StatusInternalServerError,
+			Message:       "web request failed unexpectedly",
 		})
 		if !tracked.committed {
 			writeWebErrorResponse(tracked, http.StatusInternalServerError, "internal server error")
@@ -284,15 +281,16 @@ func (a App) serveRawWebWithRecovery(w http.ResponseWriter, r *http.Request, nex
 		}
 		op := operationContextFrom(r.Context())
 		a.writeRuntimeLog(LogEntry{
-			Level:      "error",
-			Action:     "web.panic",
-			RequestID:  op.RequestID,
-			Operation:  r.URL.Path,
-			Source:     "web",
-			Phase:      "handler",
-			ErrorCode:  "internal_error",
-			HTTPStatus: http.StatusInternalServerError,
-			Message:    "web upgrade request failed unexpectedly",
+			Level:         "error",
+			Action:        "web.panic",
+			RequestID:     op.RequestID,
+			SessionIDHash: op.SessionIDHash,
+			Operation:     r.URL.Path,
+			Source:        "web",
+			Phase:         "handler",
+			ErrorCode:     "internal_error",
+			HTTPStatus:    http.StatusInternalServerError,
+			Message:       "web upgrade request failed unexpectedly",
 		})
 	}()
 	next.ServeHTTP(w, r)
@@ -308,15 +306,16 @@ func (a App) serveBufferedWebWithRecovery(w *bufferedWebResponse, r *http.Reques
 		writeWebError(w, http.StatusInternalServerError, "internal server error")
 		op := operationContextFrom(r.Context())
 		a.writeRuntimeLog(LogEntry{
-			Level:      "error",
-			Action:     "web.panic",
-			RequestID:  op.RequestID,
-			Operation:  r.URL.Path,
-			Source:     "web",
-			Phase:      "handler",
-			ErrorCode:  "internal_error",
-			HTTPStatus: http.StatusInternalServerError,
-			Message:    "web request failed unexpectedly",
+			Level:         "error",
+			Action:        "web.panic",
+			RequestID:     op.RequestID,
+			SessionIDHash: op.SessionIDHash,
+			Operation:     r.URL.Path,
+			Source:        "web",
+			Phase:         "handler",
+			ErrorCode:     "internal_error",
+			HTTPStatus:    http.StatusInternalServerError,
+			Message:       "web request failed unexpectedly",
 		})
 	}()
 	next.ServeHTTP(w, r)
@@ -359,6 +358,9 @@ func (a App) recordAudit(ctx context.Context, event OperationEvent) error {
 	if event.JobID == "" {
 		event.JobID = op.JobID
 	}
+	if event.SessionIDHash == "" {
+		event.SessionIDHash = op.SessionIDHash
+	}
 	if event.Source == "" {
 		event.Source = op.Source
 	}
@@ -378,26 +380,47 @@ func (a App) recordAudit(ctx context.Context, event OperationEvent) error {
 }
 
 func (a App) recordAuthorizationDenied(r *http.Request, reason string) {
-	if !isWebMutation(r.Method) {
-		return
-	}
 	state, _ := r.Context().Value(webAuditStateKey{}).(*webAuditState)
 	if state == nil || state.event != nil {
 		return
 	}
 	op := a.operationContextForRequest(r)
 	state.event = &OperationEvent{
-		Action:      "authorization.denied",
-		MemberID:    op.Actor.MemberID,
-		MemberEmail: op.Actor.MemberEmail,
-		MemberName:  op.Actor.MemberName,
-		RequestID:   op.RequestID,
-		Source:      "web",
-		Phase:       "authorize",
-		Status:      "failed",
-		ErrorCode:   "authorization_denied",
-		Message:     strings.TrimSpace(reason),
+		Action:        "authorization.denied",
+		Profile:       strings.TrimSpace(r.URL.Query().Get("profile")),
+		MemberID:      op.Actor.MemberID,
+		MemberEmail:   op.Actor.MemberEmail,
+		MemberName:    op.Actor.MemberName,
+		RequestID:     op.RequestID,
+		SessionIDHash: op.SessionIDHash,
+		Source:        "web",
+		Phase:         "authorize",
+		Status:        "failed",
+		ErrorCode:     "authorization_denied",
+		Message:       strings.TrimSpace(reason),
 	}
+}
+
+func (a App) recordEventPersistenceFailure(event OperationEvent, err error) error {
+	classified := classifyOperationalError(err)
+	a.writeRuntimeLog(LogEntry{
+		Level:            classified.Level,
+		Action:           "audit.persistence.failed",
+		Profile:          event.Profile,
+		AppleEmail:       event.AppleEmail,
+		ActorMemberID:    event.MemberID,
+		ActorMemberEmail: event.MemberEmail,
+		ActorMemberName:  event.MemberName,
+		RequestID:        event.RequestID,
+		JobID:            event.JobID,
+		SessionIDHash:    event.SessionIDHash,
+		Operation:        event.Action,
+		Source:           event.Source,
+		Phase:            "persist",
+		ErrorCode:        classified.Code,
+		Message:          "failed to persist audit event",
+	})
+	return err
 }
 
 func auditActorForMember(member Member) AuditActor {
@@ -531,6 +554,7 @@ func (a App) webTerminalAuditEvent(r *http.Request, spec webAuditSpec, status in
 		MemberEmail:       actor.MemberEmail,
 		MemberName:        actor.MemberName,
 		RequestID:         op.RequestID,
+		SessionIDHash:     op.SessionIDHash,
 		Source:            "web",
 		Phase:             "completed",
 		TargetMemberEmail: spec.targetMemberEmail,
@@ -687,6 +711,29 @@ func webClientIP(r *http.Request) string {
 		}
 	}
 	return truncateAuditValue(host, 64)
+}
+
+func webSessionIdentifierHash(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if cookie, err := r.Cookie(webSessionCookie); err == nil && strings.TrimSpace(cookie.Value) != "" {
+		return hashSessionIdentifier("cookie:" + cookie.Value)
+	}
+	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); authorization != "" {
+		return hashSessionIdentifier("authorization:" + authorization)
+	}
+	return ""
+}
+
+func webResponseSessionIdentifierHash(header http.Header) string {
+	response := &http.Response{Header: header}
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == webSessionCookie && strings.TrimSpace(cookie.Value) != "" {
+			return hashSessionIdentifier("cookie:" + cookie.Value)
+		}
+	}
+	return ""
 }
 
 func truncateAuditValue(value string, limit int) string {
