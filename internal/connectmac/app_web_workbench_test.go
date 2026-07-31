@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -257,6 +258,97 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	}
 	if !strings.Contains(css, "@media (max-width: 820px) {\n  .workbench {\n    padding: 12px;\n  }") {
 		t.Error("mobile .workbench rule must override padding at 820px")
+	}
+}
+
+func TestWebWorkbenchAccessibility(t *testing.T) {
+	htmlData, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cssData, err := os.ReadFile(filepath.Join("..", "..", "web", "assets", "connectmac-workbench.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlData)
+	css := string(cssData)
+
+	for _, want := range []string{
+		`aria-live="polite"`,
+		`aria-describedby="workbenchActionReason"`,
+		`aria-label="Profile 状态筛选"`,
+		`aria-label="搜索 Profile、Apple 邮箱或 Region"`,
+		`id="localAgentStatus" class="local-agent-status" aria-live="polite"`,
+		`id="assignMemberSelect" class="inline-select" aria-label="确认打开负责人"`,
+		`id="syncPushLocalPath" aria-label="上传本机路径"`,
+		`id="syncPushRemotePath" aria-label="上传远程目录"`,
+		`id="syncPullRemotePath" aria-label="下载远程路径"`,
+		`id="syncPullLocalPath" aria-label="下载本机目录"`,
+		`id="syncPushBrowseBtn" aria-label="选择上传本机路径"`,
+		`id="syncPullBrowseBtn" aria-label="选择下载本机目录"`,
+		`id="workbenchEmptyTask" class="workbench-empty-task" role="status" aria-live="polite"`,
+		`id="authStatus" class="status-line" role="status" aria-live="polite"`,
+		`id="localAgentRepairStatus" class="status-line" aria-live="polite"`,
+		`<span class="action-icon" aria-hidden="true">`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("accessibility contract missing %q", want)
+		}
+	}
+
+	applyAction := webInlineFunctionSource(t, html, `function applyWorkbenchAction(id, action)`)
+	for _, want := range []string{
+		`button.setAttribute("aria-describedby", "workbenchActionReason");`,
+		`button.removeAttribute("aria-describedby");`,
+	} {
+		if !strings.Contains(applyAction, want) {
+			t.Errorf("workbench action accessibility is missing %q", want)
+		}
+	}
+
+	renderWorkbench := webInlineFunctionSource(t, html, `function renderWorkbench(p, status, reminder)`)
+	for _, want := range []string{
+		`const disabledReasons = [...new Set(Object.values(model.actions)`,
+		`.filter((action) => action.visible && !action.enabled && action.reason)`,
+		`disabledReasons.join("；")`,
+	} {
+		if !strings.Contains(renderWorkbench, want) {
+			t.Errorf("workbench disabled-reason association is missing %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		`button:focus-visible`,
+		`input:focus-visible`,
+		`select:focus-visible`,
+		`summary:focus-visible`,
+		`[tabindex]:focus-visible`,
+		`outline: 3px solid rgba(36, 107, 254, .35);`,
+		`outline-offset: 2px;`,
+		`flex: 0 0 auto;`,
+		`min-height: 38px;`,
+		`white-space: nowrap;`,
+		`.profile-card-value`,
+		`overflow-wrap: anywhere;`,
+		`@media (prefers-reduced-motion: reduce)`,
+		`scroll-behavior: auto !important;`,
+		`transition-duration: .01ms !important;`,
+		`animation-duration: .01ms !important;`,
+		`animation-iteration-count: 1 !important;`,
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("accessibility CSS contract missing %q", want)
+		}
+	}
+
+	combinedCSS := string(cssData) + "\n" + html
+	if regexp.MustCompile(`(?i)font-size\s*:\s*[^;{}]*(?:vw|dvw|svw)`).MatchString(combinedCSS) {
+		t.Error("responsive typography must not scale font size from viewport width")
+	}
+	for _, unsupported := range []string{`:has(`, `subgrid`, `container-type:`} {
+		if strings.Contains(combinedCSS, unsupported) {
+			t.Errorf("browser compatibility contract rejects %q", unsupported)
+		}
 	}
 }
 

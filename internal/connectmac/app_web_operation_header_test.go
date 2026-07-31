@@ -13,6 +13,11 @@ func TestWebOperationHeaderUsesVerticalProfileIdentityWithoutHomeButton(t *testi
 		t.Fatal(err)
 	}
 	html := string(data)
+	cssData, err := os.ReadFile(filepath.Join("..", "..", "web", "assets", "connectmac-workbench.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssData)
 
 	for _, want := range []string{
 		`class="workbench-head`,
@@ -28,6 +33,17 @@ func TestWebOperationHeaderUsesVerticalProfileIdentityWithoutHomeButton(t *testi
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("operation header is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`.workbench-actions button {`,
+		`flex: 0 0 auto;`,
+		`white-space: nowrap;`,
+		`.profile-card-value`,
+		`overflow-wrap: anywhere;`,
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("operation header CSS is missing %q", want)
 		}
 	}
 

@@ -758,23 +758,23 @@ cm local-agent start</pre>
       <h1 id="authTitle">ConnectMac 登录</h1>
       <p id="authSubtitle">请输入用户名、密码，并完成校验后登录。</p>
       <div id="setupForm" class="form-grid hidden">
-        <input id="setupName" placeholder="管理员姓名">
-        <input id="setupEmail" placeholder="管理员邮箱 / 用户名">
-        <input id="setupPassword" type="password" placeholder="管理员密码，至少 8 位">
+        <input id="setupName" aria-label="管理员姓名" placeholder="管理员姓名">
+        <input id="setupEmail" aria-label="管理员邮箱或用户名" placeholder="管理员邮箱 / 用户名">
+        <input id="setupPassword" type="password" aria-label="管理员密码" placeholder="管理员密码，至少 8 位">
       </div>
       <div id="loginForm" class="form-grid">
-        <input id="loginUsername" placeholder="用户名 / 邮箱">
-        <input id="loginPassword" type="password" placeholder="密码">
+        <input id="loginUsername" aria-label="用户名或邮箱" placeholder="用户名 / 邮箱">
+        <input id="loginPassword" type="password" aria-label="密码" placeholder="密码">
       </div>
       <div class="form-grid">
         <strong id="challengeQuestion">校验题加载中...</strong>
-        <input id="challengeAnswer" placeholder="请输入上面问题的答案">
+        <input id="challengeAnswer" aria-label="校验题答案" aria-describedby="challengeQuestion" placeholder="请输入上面问题的答案">
       </div>
       <div class="auth-actions">
         <button id="refreshChallengeBtn">换一题</button>
         <button id="authSubmitBtn" class="primary" disabled>登录</button>
       </div>
-      <div id="authStatus" class="status-line"></div>
+      <div id="authStatus" class="status-line" role="status" aria-live="polite"></div>
     </div>
   </div>
   <div id="appShell" class="hidden">
@@ -782,7 +782,7 @@ cm local-agent start</pre>
       <h1 class="brand-title"><img src="assets/connectmac-mark.svg" alt="" width="28" height="28">ConnectMac</h1>
       <div class="toolbar">
         <span class="local-agent-control mobile-local-hidden">
-          <span id="localAgentStatus" class="local-agent-status">本机代理未启动</span>
+          <span id="localAgentStatus" class="local-agent-status" aria-live="polite">本机代理未启动</span>
           <button id="localAgentRepairBtn" class="local-agent-repair hidden">修复本机代理</button>
         </span>
         <button id="currentUserBtn" class="user-button" title="用户页">
@@ -808,8 +808,8 @@ cm local-agent start</pre>
               <span id="profileLastUpdated" class="profile-last-updated" aria-live="polite">状态尚未更新</span>
             </div>
             <div class="toolbar">
-              <input id="search" placeholder="搜索 profile / Apple / region">
-              <select id="statusFilter">
+              <input id="search" aria-label="搜索 Profile、Apple 邮箱或 Region" placeholder="搜索 profile / Apple / region">
+              <select id="statusFilter" aria-label="Profile 状态筛选">
                 <option value="">全部状态</option>
                 <option value="ready">ready</option>
                 <option value="wait-ready">creating</option>
@@ -854,7 +854,7 @@ cm local-agent start</pre>
               <div class="workbench-eyebrow">建议操作</div>
               <h2 id="workbenchRecommendation">先刷新当前 Mac 状态</h2>
               <p id="workbenchRecommendationDetail" class="workbench-recommendation-detail">状态确认后，这里会给出下一步操作建议。</p>
-              <div class="workbench-actions workbench-mobile-actions">
+              <div class="workbench-actions workbench-mobile-actions" role="group" aria-label="Mac 操作" aria-describedby="workbenchActionReason">
                 <button id="statusBtn">状态</button>
                 <button id="openMacBtn" class="primary">打开</button>
                 <button id="releaseMacBtn" class="danger">释放</button>
@@ -875,7 +875,7 @@ cm local-agent start</pre>
                 </div>
                 <button id="eventsBtn">事件</button>
               </div>
-              <div id="workbenchEmptyTask" class="workbench-empty-task">暂无后台任务</div>
+              <div id="workbenchEmptyTask" class="workbench-empty-task" role="status" aria-live="polite">暂无后台任务</div>
               <div id="workbenchActiveTask" class="workbench-active-task hidden" aria-live="polite">
                 <strong id="workbenchTaskLabel">任务处理中</strong>
                 <progress id="workbenchTaskProgress" aria-label="生命周期任务进行中"></progress>
@@ -914,7 +914,7 @@ cm local-agent start</pre>
               <div class="metric"><span>提醒状态</span><strong id="reminderStatusValue">-</strong></div>
               <div class="metric admin-only">
                 <span>确认打开负责人</span>
-                <select id="assignMemberSelect" class="inline-select"></select>
+                <select id="assignMemberSelect" class="inline-select" aria-label="确认打开负责人"></select>
               </div>
             </div>
             <div id="technicalOutput" class="output hidden">
@@ -954,10 +954,10 @@ cm local-agent start</pre>
             <div class="sync-panel">
               <h2>上传到 Mac</h2>
               <div class="path-row">
-                <input id="syncPushLocalPath" placeholder="本地路径，空则使用 cm web 当前目录">
-                <button id="syncPushBrowseBtn">选择</button>
+                <input id="syncPushLocalPath" aria-label="上传本机路径" placeholder="本地路径，空则使用 cm web 当前目录">
+                <button id="syncPushBrowseBtn" aria-label="选择上传本机路径">选择</button>
               </div>
-              <input id="syncPushRemotePath" placeholder="远程目录，空则 ~/Downloads/">
+              <input id="syncPushRemotePath" aria-label="上传远程目录" placeholder="远程目录，空则 ~/Downloads/">
               <button id="syncPushBtn" class="primary">开始上传</button>
               <div id="syncPushProgress" class="sync-progress hidden">
                 <div class="sync-progress-row"><span id="syncPushProgressLabel">上传准备中</span><strong id="syncPushProgressPercent">0%</strong></div>
@@ -967,10 +967,10 @@ cm local-agent start</pre>
             </div>
             <div class="sync-panel">
               <h2>下载到本机</h2>
-              <input id="syncPullRemotePath" placeholder="远程路径，空则 ~/Downloads/">
+              <input id="syncPullRemotePath" aria-label="下载远程路径" placeholder="远程路径，空则 ~/Downloads/">
               <div class="path-row">
-                <input id="syncPullLocalPath" placeholder="本地目录，空则使用 cm web 当前目录">
-                <button id="syncPullBrowseBtn">选择</button>
+                <input id="syncPullLocalPath" aria-label="下载本机目录" placeholder="本地目录，空则使用 cm web 当前目录">
+                <button id="syncPullBrowseBtn" aria-label="选择下载本机目录">选择</button>
               </div>
               <button id="syncPullBtn" class="primary">开始下载</button>
               <div id="syncPullProgress" class="sync-progress hidden">
@@ -1033,10 +1033,10 @@ cm local-agent start</pre>
               <button id="saveSettingsBtn">保存设置</button>
             </div>
             <div class="settings-form">
-              <select id="settingsDefaultOwner">
+              <select id="settingsDefaultOwner" aria-label="默认负责人">
                 <option value="">默认负责人</option>
               </select>
-              <select id="settingsStatusFilter">
+              <select id="settingsStatusFilter" aria-label="默认状态筛选">
                 <option value="">默认状态筛选</option>
                 <option value="ready">ready</option>
                 <option value="wait-ready">creating</option>
@@ -1055,10 +1055,10 @@ cm local-agent start</pre>
               <button id="refreshAccountChallengeBtn">换一题</button>
             </div>
             <div class="account-form">
-              <input id="accountEmail" placeholder="新的管理员邮箱">
-              <input id="accountPassword" type="password" placeholder="当前密码">
+              <input id="accountEmail" aria-label="新的管理员邮箱" placeholder="新的管理员邮箱">
+              <input id="accountPassword" type="password" aria-label="当前管理员密码" placeholder="当前密码">
               <strong id="accountChallengeQuestion">校验题加载中...</strong>
-              <input id="accountChallengeAnswer" placeholder="校验答案">
+              <input id="accountChallengeAnswer" aria-label="管理员邮箱校验题答案" aria-describedby="accountChallengeQuestion" placeholder="校验答案">
               <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
             </div>
           </section>
@@ -2209,9 +2209,9 @@ cm local-agent start</pre>
         const statusClass = profile.enabled ? "ready" : "stopped";
         const nextEnabled = !profile.enabled;
         return "<div class=\"profile-admin-item\">" +
-          "<div><div class=\"name\">" + escapeHTML(profile.name) + " <span class=\"badge " + statusClass + "\">" + statusLabel + "</span></div><div class=\"muted\">" + escapeHTML(profile.apple_email || profile.description || "-") + "</div></div>" +
-          "<div class=\"muted\">" + escapeHTML([profile.region, profile.aws_profile, profile.host].filter(Boolean).join(" · ") || "-") + "</div>" +
-          "<div class=\"muted\">已分配成员：" + grantedCount + " 个。请在成员列表中配置某个成员可用的 Profile。</div>" +
+          "<div class=\"profile-card-value\"><div class=\"name\">" + escapeHTML(profile.name) + " <span class=\"badge " + statusClass + "\">" + statusLabel + "</span></div><div class=\"muted\">" + escapeHTML(profile.apple_email || profile.description || "-") + "</div></div>" +
+          "<div class=\"muted profile-card-value\">" + escapeHTML([profile.region, profile.aws_profile, profile.host].filter(Boolean).join(" · ") || "-") + "</div>" +
+          "<div class=\"muted profile-card-value\">已分配成员：" + grantedCount + " 个。请在成员列表中配置某个成员可用的 Profile。</div>" +
           "<div class=\"row-actions\"><button data-profile-status=\"" + escapeAttr(profile.name) + "\" data-enabled=\"" + String(nextEnabled) + "\">" + (profile.enabled ? "停用" : "恢复正常") + "</button><button data-profile-edit=\"" + escapeAttr(profile.name) + "\">编辑</button><button class=\"danger\" data-profile-delete=\"" + escapeAttr(profile.name) + "\">删除</button></div>" +
         "</div>";
       }).join("") : "";
@@ -2323,6 +2323,11 @@ cm local-agent start</pre>
       button.classList.toggle("hidden", !action.visible);
       button.disabled = !action.enabled;
       button.title = action.reason || "";
+      if (action.visible && !action.enabled && action.reason) {
+        button.setAttribute("aria-describedby", "workbenchActionReason");
+      } else {
+        button.removeAttribute("aria-describedby");
+      }
     }
 
     function renderWorkbench(p, status, reminder) {
@@ -2381,8 +2386,13 @@ cm local-agent start</pre>
         $(id).classList.toggle("primary", primaryButtons[model.primary] === id);
       }
       const primaryAction = model.actions[model.primary];
+      const disabledReasons = [...new Set(Object.values(model.actions)
+        .filter((action) => action.visible && !action.enabled && action.reason)
+        .map((action) => action.reason))];
       $("workbenchActionReason").textContent =
-        primaryAction && !primaryAction.enabled ? primaryAction.reason : "";
+        primaryAction && !primaryAction.enabled
+          ? primaryAction.reason
+          : disabledReasons.join("；");
 
       return model;
     }

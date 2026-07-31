@@ -2,6 +2,15 @@
   display: grid;
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid rgba(36, 107, 254, .35);
+  outline-offset: 2px;
+}
+
 .profile-home-heading {
   min-width: 0;
   display: grid;
@@ -132,7 +141,16 @@
 }
 
 .workbench-actions button {
+  flex: 0 0 auto;
   min-width: 88px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.selected-profile-name,
+.selected-apple-email,
+.profile-card-value {
+  overflow-wrap: anywhere;
 }
 
 .local-agent-control {
@@ -359,5 +377,14 @@
     padding: 10px 12px;
     border-top: 1px solid var(--line);
     background: var(--panel);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
