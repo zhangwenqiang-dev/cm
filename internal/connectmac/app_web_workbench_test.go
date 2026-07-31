@@ -40,6 +40,14 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	if bootstrapJS < 0 || workbenchJS < bootstrapJS || inlineAppJS < workbenchJS {
 		t.Error("workbench script must load after Bootstrap JS and before the inline app script")
 	}
+
+	cssData, err := os.ReadFile(filepath.Join("..", "..", "web", "assets", "connectmac-workbench.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cssData), ".view.workbench {") {
+		t.Error("workbench stylesheet must use .view.workbench to override the later inline .view display rule")
+	}
 }
 
 func TestWebWorkbenchStateModel(t *testing.T) {
