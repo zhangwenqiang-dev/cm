@@ -1068,7 +1068,7 @@
   <script src="/vendor/bootstrap/bootstrap.bundle.min.js"></script>
   <script src="assets/connectmac-workbench.js"></script>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", statusRefreshRequests: new Map(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const transferMissingGraceMS = 10000;
     const transferMissingReloadDelayMS = 3000;
     const transferMissingMaxReloads = 4;
@@ -1081,7 +1081,7 @@
     const workbenchMobileMedia = window.matchMedia("(max-width: 820px)");
     const profileRefreshIntervalMS = 10000;
     let profileRefreshTimer = null;
-    let profileRefreshInFlight = false;
+    let profileRefreshPromise = null;
     let profileRefreshController = null;
     let profileRefreshGeneration = 0;
 
@@ -1586,6 +1586,7 @@
     }
 
     async function loadProfiles() {
+      const options = arguments[0] || {};
       const startedGeneration = profileRefreshGeneration;
       const body = await api("/api/profiles");
       state.profiles = body.data.profiles || [];
@@ -1606,7 +1607,9 @@
       }
       renderProfiles();
       renderSelected();
-      refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });
+      if (options.refreshStatuses !== false) {
+        refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });
+      }
     }
 
     async function loadReleaseReminders(options = {}) {
@@ -2103,13 +2106,17 @@
 
     async function refreshVisibleStatuses(options = {}) {
       if (!state.auth?.authenticated || document.visibilityState !== "visible") return false;
-      if (profileRefreshInFlight) return false;
-      profileRefreshInFlight = true;
       const background = options.background === true;
+      if (profileRefreshPromise !== null) {
+        if (background) return false;
+        const activeRefresh = profileRefreshPromise;
+        await activeRefresh;
+        if (!state.auth?.authenticated || document.visibilityState !== "visible") return false;
+      }
       const signal = options.signal;
       const startedGeneration = options.startedGeneration ?? profileRefreshGeneration;
       const rows = filteredProfiles();
-      try {
+      const refreshPromise = (async () => {
         const results = await Promise.all(rows.map((p) => refreshStatus(p.name, false, {
           background: background,
           signal: signal,
@@ -2126,9 +2133,15 @@
         }
         renderProfiles();
         renderSelected();
-        return results.every((result) => result !== false);
+        return results.every((result) => result === true);
+      })();
+      profileRefreshPromise = refreshPromise;
+      try {
+        return await refreshPromise;
       } finally {
-        profileRefreshInFlight = false;
+        if (profileRefreshPromise === refreshPromise) {
+          profileRefreshPromise = null;
+        }
       }
     }
 
@@ -2160,7 +2173,7 @@
           stopProfileRefresh();
           return;
         }
-        if (profileRefreshInFlight) {
+        if (profileRefreshPromise !== null) {
           scheduleProfileRefresh();
           return;
         }
@@ -2221,46 +2234,73 @@
     }
 
     async function refreshStatus(profile, showOutput, options = {}) {
-      if (!profile || state.loadingStatus.has(profile)) return true;
+      if (!profile) return false;
       const background = options.background === true;
       const signal = options.signal;
       const startedGeneration = options.startedGeneration ?? profileRefreshGeneration;
-      state.loadingStatus.add(profile);
-      try {
-        const body = await api("/api/aws/status?profile=" + encodeURIComponent(profile), { signal: signal });
-        const shouldApply = ConnectMacWorkbench.shouldApplyProfileRefresh({
-          startedGeneration: startedGeneration,
-          currentGeneration: profileRefreshGeneration,
-          authenticated: state.auth?.authenticated === true,
-          visible: document.visibilityState === "visible",
-          aborted: signal?.aborted === true
-        });
-        if ((background && !shouldApply) || (!background && !state.auth?.authenticated)) return null;
-        state.statuses[profile] = body.data;
+      const finish = (result) => {
         if (showOutput) {
-          setOutput(body.output || "");
-          setStatus("状态已更新");
+          if (result.applied && result.ok) {
+            setOutput(result.body?.output || "");
+            setStatus("状态已更新");
+          } else if (result.applied) {
+            setOutput(String(result.error?.message || result.error || ""));
+            setStatus("状态读取失败");
+          }
         }
-        return true;
-      } catch (err) {
-        if (err.name === "AbortError" || signal?.aborted) return null;
-        const shouldApply = ConnectMacWorkbench.shouldApplyProfileRefresh({
-          startedGeneration: startedGeneration,
-          currentGeneration: profileRefreshGeneration,
-          authenticated: state.auth?.authenticated === true,
-          visible: document.visibilityState === "visible",
-          aborted: signal?.aborted === true
-        });
-        if ((background && !shouldApply) || (!background && !state.auth?.authenticated)) return null;
-        state.statuses[profile] = { decision: "error", error: String(err.message || err), ready: false };
-        if (showOutput) {
-          setOutput(String(err.message || err));
-          setStatus("状态读取失败");
+        return result.applied ? result.ok : null;
+      };
+
+      const existingRequest = state.statusRefreshRequests.get(profile);
+      if (existingRequest) {
+        const result = await existingRequest;
+        if (!background && !result.applied && state.auth?.authenticated) {
+          return refreshStatus(profile, showOutput, { background: false });
         }
-        return false;
-      } finally {
-        state.loadingStatus.delete(profile);
+        return finish(result);
       }
+
+      const requestPromise = (async () => {
+        try {
+          const body = await api("/api/aws/status?profile=" + encodeURIComponent(profile), { signal: signal });
+          const shouldApply = ConnectMacWorkbench.shouldApplyProfileRefresh({
+            startedGeneration: startedGeneration,
+            currentGeneration: profileRefreshGeneration,
+            authenticated: state.auth?.authenticated === true,
+            visible: document.visibilityState === "visible",
+            aborted: signal?.aborted === true
+          });
+          if ((background && !shouldApply) || (!background && !state.auth?.authenticated)) {
+            return { applied: false, ok: false, aborted: signal?.aborted === true };
+          }
+          state.statuses[profile] = body.data;
+          return { applied: true, ok: true, body: body, aborted: false };
+        } catch (err) {
+          if (err.name === "AbortError" || signal?.aborted) {
+            return { applied: false, ok: false, error: err, aborted: true };
+          }
+          const shouldApply = ConnectMacWorkbench.shouldApplyProfileRefresh({
+            startedGeneration: startedGeneration,
+            currentGeneration: profileRefreshGeneration,
+            authenticated: state.auth?.authenticated === true,
+            visible: document.visibilityState === "visible",
+            aborted: signal?.aborted === true
+          });
+          if ((background && !shouldApply) || (!background && !state.auth?.authenticated)) {
+            return { applied: false, ok: false, error: err, aborted: false };
+          }
+          state.statuses[profile] = { decision: "error", error: String(err.message || err), ready: false };
+          return { applied: true, ok: false, error: err, aborted: false };
+        }
+      })();
+      let trackedPromise;
+      trackedPromise = requestPromise.finally(() => {
+        if (state.statusRefreshRequests.get(profile) === trackedPromise) {
+          state.statusRefreshRequests.delete(profile);
+        }
+      });
+      state.statusRefreshRequests.set(profile, trackedPromise);
+      return finish(await trackedPromise);
     }
 
     async function runAWS(command, confirm = false) {
@@ -4585,16 +4625,23 @@
       return escapeHTML(value);
     }
 
-    $("refresh").addEventListener("click", async () => {
+    async function refreshAllData() {
+      stopProfileRefresh();
       setBusy(true, "正在刷新数据...");
       try {
         if (isAdmin()) {
           await loadMembers();
           await loadManagedProfiles();
         }
-        await loadProfiles();
+        await loadProfiles({ refreshStatuses: false });
         await loadJobs();
         await detectLocalAgent();
+        const startedGeneration = profileRefreshGeneration;
+        const refreshed = await refreshVisibleStatuses({
+          background: false,
+          startedGeneration: startedGeneration
+        });
+        if (refreshed === null || !state.auth?.authenticated || document.visibilityState !== "visible") return;
         setStatus("刷新完成");
       } catch (err) {
         setOutput(String(err.message || err));
@@ -4602,8 +4649,11 @@
       } finally {
         setBusy(false);
         renderSelected();
+        scheduleProfileRefresh();
       }
-    });
+    }
+
+    $("refresh").addEventListener("click", refreshAllData);
     $("authSubmitBtn").addEventListener("click", submitAuth);
     $("refreshChallengeBtn").addEventListener("click", () => loadChallenge().catch((err) => { $("authStatus").textContent = String(err.message || err); }));
     $("logoutBtn").addEventListener("click", logout);

@@ -183,7 +183,7 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		`document.visibilityState`,
 		`state.auth?.authenticated`,
 		`profileRefreshTimer`,
-		`profileRefreshInFlight`,
+		`profileRefreshPromise`,
 		`new AbortController()`,
 		`profileRefreshGeneration`,
 		`background: true`,
@@ -201,6 +201,8 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		`!state.auth?.authenticated`,
 		`document.visibilityState !== "visible"`,
 		`return false;`,
+		`profileRefreshPromise`,
+		`await activeRefresh`,
 		`ConnectMacWorkbench.shouldApplyProfileRefresh({`,
 		`background: background`,
 		`startedGeneration: startedGeneration`,
@@ -231,6 +233,14 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 
 	refreshStatus := extractWebSource(t, html, "async function refreshStatus(profile, showOutput, options", "\n    async function runAWS(")
 	for _, want := range []string{
+		`state.statusRefreshRequests.get(profile)`,
+		`await existingRequest`,
+		`return finish(result);`,
+		`setOutput(result.body?.output || "");`,
+		`return refreshStatus(profile, showOutput, { background: false });`,
+		`requestPromise.finally(`,
+		`state.statusRefreshRequests.get(profile) === trackedPromise`,
+		`state.statusRefreshRequests.delete(profile)`,
 		`api("/api/aws/status?profile=" + encodeURIComponent(profile), { signal: signal })`,
 		`ConnectMacWorkbench.shouldApplyProfileRefresh({`,
 		`startedGeneration`,
@@ -261,14 +271,43 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 	if assignmentCount != 2 {
 		t.Errorf("refreshStatus status assignment count = %d, want 2", assignmentCount)
 	}
+	waitForExisting := strings.Index(refreshStatus, `await existingRequest`)
+	retryForeground := strings.Index(refreshStatus, `return refreshStatus(profile, showOutput, { background: false });`)
+	if waitForExisting < 0 || retryForeground < waitForExisting {
+		t.Error("manual refresh must await an existing request before retrying an aborted or stale background refresh")
+	}
 
 	loadProfiles := extractWebSource(t, html, "async function loadProfiles()", "\n    async function loadReleaseReminders(")
 	for _, want := range []string{
+		`const options = arguments[0] || {};`,
 		`const startedGeneration = profileRefreshGeneration;`,
+		`options.refreshStatuses !== false`,
 		`refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });`,
 	} {
 		if !strings.Contains(loadProfiles, want) {
 			t.Errorf("loadProfiles background refresh is missing %q", want)
 		}
+	}
+	if strings.Contains(loadProfiles, `await refreshVisibleStatuses({ background: true`) {
+		t.Error("loadProfiles initial background refresh must not delay login")
+	}
+
+	refreshAllData := extractWebSource(t, html, "async function refreshAllData()", "\n\n    $(\"refresh\").addEventListener")
+	for _, want := range []string{
+		`stopProfileRefresh();`,
+		`await loadProfiles({ refreshStatuses: false });`,
+		`await refreshVisibleStatuses({`,
+		`background: false`,
+		`setStatus("刷新完成");`,
+		`scheduleProfileRefresh();`,
+	} {
+		if !strings.Contains(refreshAllData, want) {
+			t.Errorf("manual top refresh is missing %q", want)
+		}
+	}
+	awaitStatuses := strings.Index(refreshAllData, `await refreshVisibleStatuses({`)
+	refreshComplete := strings.Index(refreshAllData, `setStatus("刷新完成");`)
+	if awaitStatuses < 0 || refreshComplete < awaitStatuses {
+		t.Error("manual top refresh must await visible statuses before reporting completion")
 	}
 }
