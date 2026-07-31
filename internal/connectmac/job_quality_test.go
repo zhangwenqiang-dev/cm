@@ -496,6 +496,43 @@ func TestJobManagerAWSDestroyUniquenessAllowsOtherProfilesAndTerminalReplacement
 	}
 }
 
+func TestJobManagerAWSOpenUniquenessByProfileAndActiveState(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	first, err := manager.Create(Job{ID: "open-mac-1", Type: "aws-open", Profile: "mac"})
+	if err != nil {
+		t.Fatalf("create first open: %v", err)
+	}
+
+	artifact := filepath.Join(t.TempDir(), "duplicate-open-config.yaml")
+	if err := os.WriteFile(artifact, []byte("secret config"), 0o600); err != nil {
+		t.Fatalf("write duplicate artifact: %v", err)
+	}
+	if _, err := manager.Create(Job{
+		ID:           "open-mac-duplicate",
+		Type:         "aws-open",
+		Profile:      "mac",
+		CleanupPaths: []string{artifact},
+	}); !IsDuplicateActiveJob(err, "aws-open", "mac") {
+		t.Fatalf("duplicate open error = %v", err)
+	}
+	if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("duplicate open artifact was not cleaned: %v", err)
+	}
+
+	if _, err := manager.Create(Job{ID: "open-other", Type: "aws-open", Profile: "other"}); err != nil {
+		t.Fatalf("create open for other profile: %v", err)
+	}
+
+	first.Status = JobStatusSuccess
+	first.FinishedAt = time.Now()
+	if err := manager.Save(first); err != nil {
+		t.Fatalf("finish first open: %v", err)
+	}
+	if _, err := manager.Create(Job{ID: "open-mac-2", Type: "aws-open", Profile: "mac"}); err != nil {
+		t.Fatalf("create open after terminal job: %v", err)
+	}
+}
+
 func TestJobManagerArtifactLifecycle(t *testing.T) {
 	newArtifact := func(t *testing.T) string {
 		t.Helper()

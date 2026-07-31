@@ -4,6 +4,8 @@ import vm from "node:vm";
 
 const workbenchURL = new URL("../web/assets/connectmac-workbench.js", import.meta.url);
 const source = fs.readFileSync(workbenchURL, "utf8");
+const indexURL = new URL("../web/index.html", import.meta.url);
+const html = fs.readFileSync(indexURL, "utf8");
 const context = { window: {} };
 
 vm.createContext(context);
@@ -84,6 +86,24 @@ for (const [status, lifecycle_state] of [
 }
 assert.equal(activeLifecycleTask([], "build-mac"), null);
 assert.equal(activeLifecycleTask([{ profile: "build-mac", type: "sync", status: "running" }], "build-mac"), null);
+
+const runAWSStart = html.indexOf("async function runAWS(");
+const runAWSEnd = html.indexOf("\n    async function previewAWS(", runAWSStart);
+assert.ok(runAWSStart >= 0 && runAWSEnd > runAWSStart, "runAWS source must be available");
+const runAWSSource = html.slice(runAWSStart, runAWSEnd);
+const submitFailureIndex = runAWSSource.indexOf("任务提交失败");
+const closeConfirmationIndex = runAWSSource.indexOf("closeAWSConfirm();");
+const refreshIndex = runAWSSource.indexOf("await Promise.all([loadJobs({ refreshReminders: true })");
+const refreshFailureIndex = runAWSSource.indexOf("任务已提交，状态刷新失败，页面将继续自动更新");
+assert.ok(submitFailureIndex >= 0, "confirmed POST failures must be identified as submission failures");
+assert.ok(closeConfirmationIndex > submitFailureIndex, "confirmation must close only after the POST succeeds");
+assert.ok(refreshIndex > closeConfirmationIndex, "post-submit refresh must start after submitted state is visible");
+assert.ok(refreshFailureIndex > refreshIndex, "post-submit refresh must have its own warning");
+assert.match(
+  runAWSSource.slice(refreshFailureIndex),
+  /scheduleJobRefresh\(\);\s+return true;/,
+  "refresh failure must retry status loading and retain submission success",
+);
 
 const profileRefreshCases = [
   {

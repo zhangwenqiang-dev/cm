@@ -183,7 +183,7 @@ func (m JobManager) normalize() JobManager {
 }
 
 func (m JobManager) Create(job Job) (Job, error) {
-	if job.Type == "aws-destroy" {
+	if job.Type == "aws-open" || job.Type == "aws-destroy" {
 		return m.CreateUnique(job)
 	}
 	return m.create(job, false)

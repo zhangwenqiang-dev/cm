@@ -2363,28 +2363,43 @@
       setBusy(true, confirm ? "正在启动后台任务..." : "正在生成预览...");
       setStatus(confirm ? "后台任务启动中..." : "预览中...");
       try {
-        const body = await api("/api/aws/" + command, {
-          method: "POST",
-          body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true, owner_email: ownerEmail })
-        });
+        let body;
+        try {
+          body = await api("/api/aws/" + command, {
+            method: "POST",
+            body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true, owner_email: ownerEmail })
+          });
+        } catch (err) {
+          const operation = command === "open" ? "打开 Mac" : "释放 Mac";
+          showOperationError(confirm ? operation + "任务提交失败" : operation + "预览失败", err);
+          return false;
+        }
         if (confirm) {
           closeAWSConfirm();
           state.pendingAWS = null;
           setOutput("");
           setStatus("任务已提交，页面会自动更新进度");
-          await Promise.all([loadJobs({ refreshReminders: true }), refreshStatus(p.name, false), loadEvents(false), loadProfiles()]);
+          try {
+            await Promise.all([loadJobs({ refreshReminders: true }), refreshStatus(p.name, false), loadEvents(false), loadProfiles()]);
+          } catch (err) {
+            const refreshSummary = "任务已提交，状态刷新失败，页面将继续自动更新";
+            if (!showOperationError(refreshSummary, err)) setStatus(refreshSummary);
+            scheduleJobRefresh();
+            return true;
+          }
           setStatus("任务已提交，页面会自动更新进度");
-        } else {
+          return true;
+        }
+        try {
           const outputText = (body.output || "") + (body.error || "");
           setOutput(outputText);
           setStatus("预览完成");
           await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false)]);
+          return true;
+        } catch (err) {
+          showOperationError(command === "open" ? "打开预览失败" : "释放预览失败", err);
+          return false;
         }
-        return true;
-      } catch (err) {
-        const operation = command === "open" ? "打开 Mac" : "释放 Mac";
-        showOperationError(confirm ? operation + "任务提交失败" : operation + "预览失败", err);
-        return false;
       } finally {
         setBusy(false);
         renderProfiles();

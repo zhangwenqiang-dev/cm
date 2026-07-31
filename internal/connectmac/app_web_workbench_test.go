@@ -139,14 +139,22 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name)`,
 		`activeTask?.type === "aws-" + command`,
 		`任务已提交，页面会自动更新进度`,
+		`任务已提交，状态刷新失败，页面将继续自动更新`,
 		`closeAWSConfirm();`,
 		`state.pendingAWS = null;`,
 		`await Promise.all([loadJobs({ refreshReminders: true })`,
 		`showOperationError(`,
+		`return true;`,
 	} {
 		if !strings.Contains(runAWS, want) {
 			t.Errorf("runAWS lifecycle feedback is missing %q", want)
 		}
+	}
+	if strings.Count(runAWS, `catch (err)`) < 2 {
+		t.Error("runAWS must separate confirmed submission failure from post-submit refresh failure")
+	}
+	if strings.Count(runAWS, `任务提交失败`) != 1 {
+		t.Error("runAWS must report submission failure only for the confirmed POST")
 	}
 	for _, unwanted := range []string{
 		`后台任务已启动`,
