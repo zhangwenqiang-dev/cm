@@ -9,8 +9,81 @@ const context = { window: {} };
 vm.createContext(context);
 new vm.Script(source, { filename: "web/assets/connectmac-workbench.js" }).runInContext(context);
 
-const { effectiveState, buildActionModel, stateCopyMap, stateCopy, shouldApplyProfileRefresh } =
+const {
+  activeLifecycleTask,
+  effectiveState,
+  buildActionModel,
+  stateCopyMap,
+  stateCopy,
+  shouldApplyProfileRefresh,
+} =
   context.window.ConnectMacWorkbench;
+
+const activeOpenTask = activeLifecycleTask([
+  {
+    id: "job-other",
+    type: "aws-open",
+    profile: "other-mac",
+    status: "running",
+  },
+  {
+    id: "job-open",
+    type: "aws-open",
+    profile: "build-mac",
+    status: "success",
+    lifecycle_state: "waiting",
+    request_id: "req-open",
+    actor_name: "Build Owner",
+    actor_email: "owner@example.com",
+    started_at: "2026-07-31T01:02:03Z",
+    log: "must not leak",
+    command: ["cm", "aws", "open"],
+  },
+], "build-mac");
+assert.deepEqual(
+  JSON.parse(JSON.stringify(activeOpenTask)),
+  {
+    id: "job-open",
+    type: "aws-open",
+    label: "等待 Mac 状态检查",
+    request_id: "req-open",
+    actor: "Build Owner",
+    started_at: "2026-07-31T01:02:03Z",
+    terminal: false,
+  },
+);
+assert.equal(activeLifecycleTask([
+  {
+    id: "job-destroy",
+    type: "aws-destroy",
+    profile: "build-mac",
+    status: "deferred",
+    lifecycle_state: "waiting",
+    request_id: "req-destroy",
+    actor_email: "release@example.com",
+    started_at: "2026-07-31T02:03:04Z",
+  },
+], "build-mac").label, "等待 Dedicated Host 可释放");
+for (const [status, lifecycle_state] of [
+  ["failed", "pending"],
+  ["interrupted", "waiting"],
+  ["success", "finalized"],
+  ["running", "failed"],
+]) {
+  assert.equal(
+    activeLifecycleTask([{
+      id: "terminal-job",
+      type: "aws-open",
+      profile: "build-mac",
+      status,
+      lifecycle_state,
+    }], "build-mac"),
+    null,
+    `${status}/${lifecycle_state} must not be active`,
+  );
+}
+assert.equal(activeLifecycleTask([], "build-mac"), null);
+assert.equal(activeLifecycleTask([{ profile: "build-mac", type: "sync", status: "running" }], "build-mac"), null);
 
 const profileRefreshCases = [
   {

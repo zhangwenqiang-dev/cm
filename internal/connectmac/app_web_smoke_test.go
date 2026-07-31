@@ -106,37 +106,60 @@ func TestWebObservabilitySmoke(t *testing.T) {
 	})
 
 	t.Run("mocked AWS completion records terminal state", func(t *testing.T) {
-		app, configPath := newWebAWSLifecycleTestApp(t)
-		app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
-			return &fakeAWSClient{status: readyWebAWSLifecycleStatus()}, nil
-		}
-		app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
-			return nil
-		}
-		job := createWebAWSLifecycleJob(t, &app, "open", JobStatusSuccess)
-		if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
-			t.Fatal(err)
-		}
-		stored, err := app.JobManager.Load(job.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if stored.LifecycleState != JobLifecycleFinalized {
-			t.Fatalf("lifecycle state = %q, want finalized", stored.LifecycleState)
-		}
-		events, err := app.MemberStore.QueryEvents(EventQuery{Limit: 20, IncludeSystem: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		found := false
-		for _, event := range events.Events {
-			if event.Action == "aws.open.ready" && event.JobID == job.ID && event.RequestID == job.RequestID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("terminal AWS event not found: %+v", events.Events)
+		for _, testCase := range []struct {
+			name      string
+			command   string
+			status    AWSStatus
+			event     string
+			seedState bool
+		}{
+			{name: "open ready", command: "open", status: readyWebAWSLifecycleStatus(), event: "aws.open.ready"},
+			{
+				name:      "destroy stopped",
+				command:   "destroy",
+				status:    AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-1", PublicIP: "203.0.113.10"}},
+				event:     "aws.release.stopped",
+				seedState: true,
+			},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				app, configPath := newWebAWSLifecycleTestApp(t)
+				if testCase.seedState {
+					seedWebAWSLifecycleOwner(t, &app)
+					seedWebAWSLifecycleReminder(t, &app)
+				}
+				app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+					return &fakeAWSClient{status: testCase.status}, nil
+				}
+				app.WebAWSLifecycleNotifier = func(string, ReleaseReminder, string, string) error {
+					return nil
+				}
+				job := createWebAWSLifecycleJob(t, &app, testCase.command, JobStatusSuccess)
+				if err := app.reconcileWebAWSLifecycleJob(context.Background(), configPath, job); err != nil {
+					t.Fatal(err)
+				}
+				stored, err := app.JobManager.Load(job.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.LifecycleState != JobLifecycleFinalized {
+					t.Fatalf("lifecycle state = %q, want finalized", stored.LifecycleState)
+				}
+				events, err := app.MemberStore.QueryEvents(EventQuery{Limit: 20, IncludeSystem: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, event := range events.Events {
+					if event.Action == testCase.event && event.JobID == job.ID && event.RequestID == job.RequestID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("terminal AWS event %q not found for request/job %s/%s: %+v", testCase.event, job.RequestID, job.ID, events.Events)
+				}
+			})
 		}
 	})
 

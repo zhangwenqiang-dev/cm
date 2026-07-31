@@ -843,8 +843,12 @@
               </div>
               <div id="workbenchEmptyTask" class="workbench-empty-task">当前没有进行中的任务。</div>
               <div id="workbenchActiveTask" class="workbench-active-task hidden" aria-live="polite">
-                <strong>任务处理中</strong>
-                <span>详情将在任务开始后显示。</span>
+                <strong id="workbenchTaskLabel">任务处理中</strong>
+                <progress id="workbenchTaskProgress" aria-label="生命周期任务进行中"></progress>
+                <span id="workbenchTaskElapsed">已运行：-</span>
+                <span id="workbenchTaskJobID">Job ID：-</span>
+                <span id="workbenchTaskRequestID">Request ID：-</span>
+                <span id="workbenchTaskActor">操作人：-</span>
               </div>
               <div id="includeSystemEventsWrap" class="admin-only form-check form-switch">
                 <input id="includeSystemEvents" class="form-check-input" type="checkbox">
@@ -1133,6 +1137,31 @@
       $("statusLine").textContent = value;
     }
 
+    function sanitizedOperationMessage(error) {
+      return String(error?.message || error || "未知错误")
+        .replace(/\x1b\[[0-9;]*m/g, "")
+        .replace(/((?:aws_secret_access_key|aws_access_key_id|password|token|secret|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+        .trim();
+    }
+
+    function showOperationError(summary, error) {
+      const message = sanitizedOperationMessage(error);
+      const lowerMessage = message.toLowerCase();
+      if (error?.name === "AbortError" || lowerMessage.includes("context canceled")) {
+        return false;
+      }
+      const timedOut = error?.status === 408 || error?.status === 504 ||
+        lowerMessage.includes("timeout") || lowerMessage.includes("timed out") ||
+        lowerMessage.includes("deadline exceeded") || lowerMessage.includes("超时");
+      setStatus(timedOut ? summary + "：请求超时，任务状态可能仍会更新" : summary);
+      const details = [message];
+      if (error?.errorCode) details.push("Error code: " + error.errorCode);
+      if (error?.requestID) details.push("Request ID: " + error.requestID);
+      setOutput(details.join("\n"));
+      $("technicalDetails").open = true;
+      return true;
+    }
+
     function remoteUserAPIPath(path) {
       return path.startsWith("/api/auth/") ||
         path === "/api/members" ||
@@ -1164,6 +1193,8 @@
         ...options
       });
       const body = await res.json();
+      const requestID = res.headers.get("X-Request-ID") || "";
+      if (requestID && !body.request_id) body.request_id = requestID;
       if (!body.ok) {
         if (res.status === 401) {
           state.auth = { authenticated: false, setup_required: false };
@@ -1171,6 +1202,8 @@
         }
         const err = new Error((body.error || "") + (body.output ? "\n" + body.output : ""));
         err.status = res.status;
+        err.requestID = requestID || body.request_id || "";
+        err.errorCode = body.error_code || body.code || "";
         throw err;
       }
       return body;
@@ -1974,6 +2007,17 @@
       const status = p ? state.statuses[p.name] : null;
       const reminder = p ? state.reminders[p.name] : null;
       const model = renderWorkbench(p, status, reminder);
+      const task = ConnectMacWorkbench.activeLifecycleTask(state.jobs, p?.name || "");
+      $("workbenchEmptyTask").classList.toggle("hidden", !!task);
+      $("workbenchActiveTask").classList.toggle("hidden", !task);
+      $("workbenchActiveTask").setAttribute("aria-busy", String(!!task));
+      if (task) {
+        $("workbenchTaskLabel").textContent = task.label;
+        $("workbenchTaskElapsed").textContent = "已运行：" + formatElapsedSince(task.started_at);
+        $("workbenchTaskJobID").textContent = "Job ID：" + (task.id || "-");
+        $("workbenchTaskRequestID").textContent = "Request ID：" + (task.request_id || "-");
+        $("workbenchTaskActor").textContent = "操作人：" + (task.actor || "-");
+      }
       const syncJobsLoading = !!(p && state.syncJobsLoading[p.name]);
       const transferDisabled = !model.actions.transfer.enabled;
       $("syncPushBtn").disabled = transferDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "push"), p?.name, "push");
@@ -2244,8 +2288,7 @@
             setOutput(result.body?.output || "");
             setStatus("状态已更新");
           } else if (result.applied) {
-            setOutput(String(result.error?.message || result.error || ""));
-            setStatus("状态读取失败");
+            showOperationError("状态读取失败", result.error);
           }
         }
         return result.applied ? result.ok : null;
@@ -2306,6 +2349,12 @@
     async function runAWS(command, confirm = false) {
       const p = selectedProfile();
       if (!p) return false;
+      const activeTask = ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name);
+      if (activeTask?.type === "aws-" + command) {
+        setStatus(activeTask.label);
+        renderSelected();
+        return false;
+      }
       const ownerEmail = isAdmin() ? confirmOpenOwnerValue(p.name) : (state.auth?.member?.email || "");
       if (confirm && command === "open" && isAdmin() && !ownerEmail && !profileReady(p.name)) {
         setStatus("管理员确认打开前必须选择负责人");
@@ -2318,20 +2367,23 @@
           method: "POST",
           body: JSON.stringify({ profile: p.name, confirm, background: confirm && state.settings.background_confirm !== false, notify: true, owner_email: ownerEmail })
         });
-        let outputText = (body.output || "") + (body.error || "");
-        setOutput(outputText);
-        if (confirm && !$("awsConfirmLayer").classList.contains("hidden")) {
-          $("awsConfirmOutput").textContent = outputText;
+        if (confirm) {
+          closeAWSConfirm();
+          state.pendingAWS = null;
+          setOutput("");
+          setStatus("任务已提交，页面会自动更新进度");
+          await Promise.all([loadJobs({ refreshReminders: true }), refreshStatus(p.name, false), loadEvents(false), loadProfiles()]);
+          setStatus("任务已提交，页面会自动更新进度");
+        } else {
+          const outputText = (body.output || "") + (body.error || "");
+          setOutput(outputText);
+          setStatus("预览完成");
+          await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false)]);
         }
-        setStatus(body.ok ? (confirm ? "后台任务已启动" : "预览完成") : "失败");
-        await Promise.all([loadJobs(), refreshStatus(p.name, false), loadEvents(false), confirm ? loadProfiles() : Promise.resolve()]);
         return true;
       } catch (err) {
-        setOutput(String(err.message || err));
-        if (confirm && !$("awsConfirmLayer").classList.contains("hidden")) {
-          $("awsConfirmOutput").textContent = String(err.message || err);
-        }
-        setStatus("失败");
+        const operation = command === "open" ? "打开 Mac" : "释放 Mac";
+        showOperationError(confirm ? operation + "任务提交失败" : operation + "预览失败", err);
         return false;
       } finally {
         setBusy(false);
@@ -2343,6 +2395,12 @@
     async function previewAWS(command) {
       const p = selectedProfile();
       if (!p) return;
+      const activeTask = ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name);
+      if (activeTask?.type === "aws-" + command) {
+        setStatus(activeTask.label);
+        renderSelected();
+        return;
+      }
       state.pendingAWS = null;
       closeAWSConfirm();
       setBusy(true, command === "open" ? "正在预览打开..." : "正在预览释放...");
@@ -2360,8 +2418,7 @@
         setStatus(command === "open" ? "打开预览完成" : "释放预览完成");
         await Promise.all([refreshStatus(p.name, false), loadEvents(false)]);
       } catch (err) {
-        setOutput(String(err.message || err));
-        setStatus(command === "open" ? "打开预览失败" : "释放预览失败");
+        showOperationError(command === "open" ? "打开预览失败" : "释放预览失败", err);
       } finally {
         setBusy(false);
         renderProfiles();
@@ -2552,6 +2609,16 @@
       return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}（北京时间）`;
     }
 
+    function formatElapsedSince(value) {
+      const startedAt = Date.parse(value || "");
+      if (!Number.isFinite(startedAt)) return "-";
+      const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return [hours ? hours + "小时" : "", minutes ? minutes + "分钟" : "", seconds + "秒"].filter(Boolean).join(" ");
+    }
+
     function toDateTimeLocal(value) {
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return "";
@@ -2616,11 +2683,7 @@
         closeAWSConfirm();
         return;
       }
-      const ok = await runAWS(pending.command, true);
-      if (ok) {
-        closeAWSConfirm();
-        state.pendingAWS = null;
-      }
+      await runAWS(pending.command, true);
     }
 
     async function startTunnel(profile) {

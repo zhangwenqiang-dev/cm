@@ -34,6 +34,7 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		`id="workbenchRecommendation"`,
 		`id="workbenchActionReason"`,
 		`id="workbenchTaskPanel"`,
+		`id="workbenchTaskProgress" aria-label="生命周期任务进行中"></progress>`,
 		`id="technicalDetails"`,
 		`id="technicalOutput" class="output hidden"`,
 		`id="workbenchEmptyTask"`,
@@ -53,6 +54,20 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	renderSelected := webInlineFunctionSource(t, html, `function renderSelected()`)
 	if !strings.Contains(renderSelected, `renderWorkbench(p, status, reminder);`) {
 		t.Error("renderSelected must delegate workbench state and action rendering to renderWorkbench")
+	}
+	for _, want := range []string{
+		`ConnectMacWorkbench.activeLifecycleTask(state.jobs, p?.name || "")`,
+		`$("workbenchEmptyTask").classList.toggle("hidden", !!task);`,
+		`$("workbenchActiveTask").classList.toggle("hidden", !task);`,
+		`task.label`,
+		`task.id`,
+		`task.request_id`,
+		`task.actor`,
+		`task.started_at`,
+	} {
+		if !strings.Contains(renderSelected, want) {
+			t.Errorf("renderSelected active task rendering is missing %q", want)
+		}
 	}
 
 	renderWorkbench := webInlineFunctionSource(t, html, `function renderWorkbench(p, status, reminder)`)
@@ -88,6 +103,69 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		if !strings.Contains(handler, want) {
 			t.Errorf("workbench details handler is missing %q", want)
 		}
+	}
+
+	api := webInlineFunctionSource(t, html, `async function api(path, options = {})`)
+	for _, want := range []string{
+		`res.headers.get("X-Request-ID")`,
+		`body.request_id`,
+		`err.requestID`,
+		`err.errorCode`,
+		`body.error_code || body.code`,
+		`err.status = res.status;`,
+		`res.status === 401`,
+	} {
+		if !strings.Contains(api, want) {
+			t.Errorf("api response metadata handling is missing %q", want)
+		}
+	}
+
+	showOperationError := webInlineFunctionSource(t, html, `function showOperationError(summary, error)`)
+	for _, want := range []string{
+		`error?.name === "AbortError"`,
+		`context canceled`,
+		`请求超时，任务状态可能仍会更新`,
+		`error?.errorCode`,
+		`error?.requestID`,
+		`$("technicalDetails").open = true;`,
+	} {
+		if !strings.Contains(showOperationError, want) {
+			t.Errorf("showOperationError is missing %q", want)
+		}
+	}
+
+	runAWS := extractWebSource(t, html, "async function runAWS(", "\n    async function previewAWS(")
+	for _, want := range []string{
+		`ConnectMacWorkbench.activeLifecycleTask(state.jobs, p.name)`,
+		`activeTask?.type === "aws-" + command`,
+		`任务已提交，页面会自动更新进度`,
+		`closeAWSConfirm();`,
+		`state.pendingAWS = null;`,
+		`await Promise.all([loadJobs({ refreshReminders: true })`,
+		`showOperationError(`,
+	} {
+		if !strings.Contains(runAWS, want) {
+			t.Errorf("runAWS lifecycle feedback is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		`后台任务已启动`,
+		`打开成功`,
+		`释放完成`,
+	} {
+		if strings.Contains(runAWS, unwanted) {
+			t.Errorf("runAWS must not report submission as completion with %q", unwanted)
+		}
+	}
+
+	previewAWS := extractWebSource(t, html, "async function previewAWS(", "\n    function showAWSConfirm(")
+	if !strings.Contains(previewAWS, `showOperationError(`) {
+		t.Error("previewAWS must use showOperationError")
+	}
+
+	refreshStatus := extractWebSource(t, html, "async function refreshStatus(profile, showOutput, options", "\n    async function runAWS(")
+	if !strings.Contains(refreshStatus, `showOperationError(`) {
+		t.Error("foreground AWS status failures must use showOperationError")
 	}
 
 	bootstrapCSS := strings.Index(html, `href="/vendor/bootstrap/bootstrap.min.css"`)

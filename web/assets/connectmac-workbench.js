@@ -68,6 +68,41 @@
     return ACTIVE_JOB_STATUSES.has(job.status);
   }
 
+  function activeLifecycleTask(jobs, profileName) {
+    if (!profileName || !Array.isArray(jobs)) return null;
+    const active = jobs.filter((job) =>
+      activeLifecycleJob(job, "aws-destroy", profileName) ||
+      activeLifecycleJob(job, "aws-open", profileName)
+    );
+    active.sort((left, right) => {
+      if (left.type !== right.type) return left.type === "aws-destroy" ? -1 : 1;
+      return Date.parse(right.started_at || "") - Date.parse(left.started_at || "");
+    });
+    const job = active[0];
+    if (!job) return null;
+
+    const lifecycleState = String(job.lifecycle_state || job.lifecycleState || "").trim();
+    const destroying = job.type === "aws-destroy";
+    let label = destroying ? "正在释放 AWS Mac" : "正在打开 AWS Mac";
+    if (lifecycleState === "waiting") {
+      label = destroying ? "等待 Dedicated Host 可释放" : "等待 Mac 状态检查";
+    } else if (job.status === "starting") {
+      label = destroying ? "正在启动释放任务" : "正在启动打开任务";
+    } else if (job.status === "deferred") {
+      label = destroying ? "释放任务等待后续检查" : "打开任务等待后续检查";
+    }
+
+    return {
+      id: String(job.id || ""),
+      type: job.type,
+      label: label,
+      request_id: String(job.request_id || job.requestID || ""),
+      actor: String(job.actor_name || job.actor_email || job.actor || ""),
+      started_at: String(job.started_at || job.startedAt || ""),
+      terminal: false,
+    };
+  }
+
   function effectiveState(input) {
     const model = input || {};
     const status = Object.prototype.hasOwnProperty.call(model, "status") ? model.status : model;
@@ -184,6 +219,7 @@
   }
 
   window.ConnectMacWorkbench = {
+    activeLifecycleTask: activeLifecycleTask,
     effectiveState: effectiveState,
     buildActionModel: buildActionModel,
     stateCopyMap: stateCopyMap,
