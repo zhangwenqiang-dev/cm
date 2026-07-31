@@ -772,7 +772,7 @@ cm local-agent start</pre>
       </div>
       <div class="auth-actions">
         <button id="refreshChallengeBtn">换一题</button>
-        <button id="authSubmitBtn" class="primary">登录</button>
+        <button id="authSubmitBtn" class="primary" disabled>登录</button>
       </div>
       <div id="authStatus" class="status-line"></div>
     </div>
@@ -836,6 +836,9 @@ cm local-agent start</pre>
               <tbody id="profiles"></tbody>
             </table>
           </div>
+          <div id="profileEmptyState" class="empty-state hidden">
+            当前账号没有可用 Profile
+          </div>
         </section>
 
         <section id="operationsView" class="view hidden workbench">
@@ -872,7 +875,7 @@ cm local-agent start</pre>
                 </div>
                 <button id="eventsBtn">事件</button>
               </div>
-              <div id="workbenchEmptyTask" class="workbench-empty-task">当前没有进行中的任务。</div>
+              <div id="workbenchEmptyTask" class="workbench-empty-task">暂无后台任务</div>
               <div id="workbenchActiveTask" class="workbench-active-task hidden" aria-live="polite">
                 <strong id="workbenchTaskLabel">任务处理中</strong>
                 <progress id="workbenchTaskProgress" aria-label="生命周期任务进行中"></progress>
@@ -1024,6 +1027,41 @@ cm local-agent start</pre>
               <button id="openOwnPasswordBtn" class="primary">修改密码</button>
             </div>
           </div>
+          <section id="systemSettingsPanel" class="admin-only account-section">
+            <div class="section-head">
+              <h2>系统设置</h2>
+              <button id="saveSettingsBtn">保存设置</button>
+            </div>
+            <div class="settings-form">
+              <select id="settingsDefaultOwner">
+                <option value="">默认负责人</option>
+              </select>
+              <select id="settingsStatusFilter">
+                <option value="">默认状态筛选</option>
+                <option value="ready">ready</option>
+                <option value="wait-ready">creating</option>
+                <option value="create">stopped</option>
+                <option value="launch-on-host">host-ready</option>
+                <option value="blocked">blocked</option>
+                <option value="error">error</option>
+              </select>
+              <label><input id="settingsBackgroundConfirm" type="checkbox"> 确认操作默认后台执行</label>
+              <label><input id="settingsShowReleased" type="checkbox"> 显示释放/终止资源</label>
+            </div>
+          </section>
+          <section id="accountSettingsPanel" class="hidden admin-only account-section">
+            <div class="section-head">
+              <h2>管理员账号</h2>
+              <button id="refreshAccountChallengeBtn">换一题</button>
+            </div>
+            <div class="account-form">
+              <input id="accountEmail" placeholder="新的管理员邮箱">
+              <input id="accountPassword" type="password" placeholder="当前密码">
+              <strong id="accountChallengeQuestion">校验题加载中...</strong>
+              <input id="accountChallengeAnswer" placeholder="校验答案">
+              <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
+            </div>
+          </section>
         </section>
 
         <section id="userManagementView" class="view hidden card shadow-sm">
@@ -1047,38 +1085,9 @@ cm local-agent start</pre>
               <tbody id="members"></tbody>
             </table>
           </div>
-          <div class="section-head">
-            <h2>Settings</h2>
-            <button id="saveSettingsBtn" class="admin-only">保存设置</button>
-          </div>
-          <div class="settings-form admin-only">
-            <select id="settingsDefaultOwner">
-              <option value="">默认负责人</option>
-            </select>
-            <select id="settingsStatusFilter">
-              <option value="">默认状态筛选</option>
-              <option value="ready">ready</option>
-              <option value="wait-ready">creating</option>
-              <option value="create">stopped</option>
-              <option value="launch-on-host">host-ready</option>
-              <option value="blocked">blocked</option>
-              <option value="error">error</option>
-            </select>
-            <label><input id="settingsBackgroundConfirm" type="checkbox"> 确认操作默认后台执行</label>
-            <label><input id="settingsShowReleased" type="checkbox"> 显示释放/终止资源</label>
-          </div>
-          <div id="accountSettingsPanel" class="hidden admin-only">
-            <div class="section-head">
-              <h2>Account</h2>
-              <button id="refreshAccountChallengeBtn">换一题</button>
-            </div>
-            <div class="account-form">
-              <input id="accountEmail" placeholder="新的管理员邮箱">
-              <input id="accountPassword" type="password" placeholder="当前密码">
-              <strong id="accountChallengeQuestion">校验题加载中...</strong>
-              <input id="accountChallengeAnswer" placeholder="校验答案">
-              <button id="saveAccountEmailBtn" class="primary">保存管理员邮箱</button>
-            </div>
+          <div id="memberEmptyState" class="empty-state hidden">
+            <strong>尚未添加成员</strong>
+            <button id="emptyAddMemberBtn" class="primary admin-only">添加成员</button>
           </div>
         </section>
 
@@ -1092,11 +1101,16 @@ cm local-agent start</pre>
           </div>
           <div class="profile-admin">
             <div class="profile-admin-list" id="managedProfiles"></div>
+            <div id="managedProfileEmptyState" class="empty-state hidden">
+              <strong>尚未添加 Profile</strong>
+              <button id="emptyAddProfileBtn" class="primary">添加 Profile</button>
+            </div>
             <div class="form-grid">
-              <span class="muted">Profile 通过弹框表单新增或编辑。PEM 路径和 sync 过滤继续读取成员本机配置。</span>
+              <span class="muted">Profiles 通过弹框表单新增或编辑。PEM 路径和 sync 过滤继续读取成员本机配置。</span>
             </div>
           </div>
         </section>
+        <div id="managementSuccessStatus" class="visually-hidden" role="status" aria-live="polite"></div>
       </main>
     </div>
   </div>
@@ -1261,6 +1275,7 @@ cm local-agent start</pre>
     const terminalSyncMaxDurationMS = 10 * 60 * 1000;
     const terminalSyncMaxAttempts = 60;
     const terminalSyncRequestTimeoutMS = 15000;
+    const componentLoadTimeoutMS = 8000;
     const $ = (id) => document.getElementById(id);
     const workbenchMobileMedia = window.matchMedia("(max-width: 640px)");
     const profileRefreshIntervalMS = 10000;
@@ -1304,6 +1319,7 @@ cm local-agent start</pre>
       });
       $("loadingTitle").textContent = message;
       $("loadingLayer").classList.toggle("hidden", !busy);
+      $("authSubmitBtn").disabled = busy || !state.challenge?.token;
       if (!busy) {
         if (!$("awsConfirmLayer").classList.contains("hidden")) renderAWSConfirmValidation();
         scheduleDialogFocusFlush();
@@ -1319,6 +1335,18 @@ cm local-agent start</pre>
     function setStatus(text) {
       const value = text || "就绪";
       $("statusLine").textContent = value;
+    }
+
+    function announceManagementSuccess(message) {
+      $("managementSuccessStatus").textContent = "";
+      window.requestAnimationFrame(() => {
+        $("managementSuccessStatus").textContent = message || "";
+      });
+      setStatus(message);
+    }
+
+    function updateAuthSubmitState() {
+      $("authSubmitBtn").disabled = state.busy || !state.challenge?.token;
     }
 
     function sanitizedOperationMessage(error) {
@@ -1379,49 +1407,66 @@ cm local-agent start</pre>
     }
 
     async function api(path, options = {}) {
-      const res = await fetch(apiURL(path), {
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        ...options
-      });
-      const requestID = res.headers.get("X-Request-ID") || "";
-      let responseText = "";
+      const { timeoutMs = 0, ...fetchOptions } = options;
+      const controller = timeoutMs > 0 ? new AbortController() : null;
+      let timedOut = false;
+      const timer = controller ? window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs) : null;
       try {
-        responseText = await res.text();
-      } catch (err) {
-        throw createAPIError("读取服务器响应失败：" + sanitizedOperationMessage(err), res.status, requestID, "");
-      }
-      let body = null;
-      let parseError = null;
-      if (responseText.trim()) {
+        const res = await fetch(apiURL(path), {
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          ...fetchOptions,
+          ...(controller ? { signal: controller.signal } : {})
+        });
+        const requestID = res.headers.get("X-Request-ID") || "";
+        let responseText = "";
         try {
-          body = JSON.parse(responseText);
+          responseText = await res.text();
         } catch (err) {
-          parseError = err;
+          throw createAPIError("读取服务器响应失败：" + sanitizedOperationMessage(err), res.status, requestID, "");
         }
+        let body = null;
+        let parseError = null;
+        if (responseText.trim()) {
+          try {
+            body = JSON.parse(responseText);
+          } catch (err) {
+            parseError = err;
+          }
+        }
+        if (res.status === 401) {
+          state.auth = { authenticated: false, setup_required: false };
+          showAuth();
+        }
+        const validBody = body && typeof body === "object" && !Array.isArray(body);
+        if (!validBody) {
+          const message = !responseText.trim() || body === null && !parseError
+            ? "服务器返回空响应"
+            : (parseError ? "服务器返回无法解析的响应" : "服务器响应格式无效");
+          throw createAPIError(message + " (HTTP " + res.status + ")", res.status, requestID, "");
+        }
+        if (requestID && !body.request_id) body.request_id = requestID;
+        if (!body.ok) {
+          const message = (body.error || "") + (body.output ? "\n" + body.output : "");
+          throw createAPIError(
+            message || "请求失败 (HTTP " + res.status + ")",
+            res.status,
+            requestID || body.request_id || "",
+            body.error_code || body.code || "",
+          );
+        }
+        return body;
+      } catch (err) {
+        if (timedOut) {
+          throw createAPIError("组件加载超时，请重试", 408, "", "component_timeout");
+        }
+        throw err;
+      } finally {
+        if (timer) window.clearTimeout(timer);
       }
-      if (res.status === 401) {
-        state.auth = { authenticated: false, setup_required: false };
-        showAuth();
-      }
-      const validBody = body && typeof body === "object" && !Array.isArray(body);
-      if (!validBody) {
-        const message = !responseText.trim() || body === null && !parseError
-          ? "服务器返回空响应"
-          : (parseError ? "服务器返回无法解析的响应" : "服务器响应格式无效");
-        throw createAPIError(message + " (HTTP " + res.status + ")", res.status, requestID, "");
-      }
-      if (requestID && !body.request_id) body.request_id = requestID;
-      if (!body.ok) {
-        const message = (body.error || "") + (body.output ? "\n" + body.output : "");
-        throw createAPIError(
-          message || "请求失败 (HTTP " + res.status + ")",
-          res.status,
-          requestID || body.request_id || "",
-          body.error_code || body.code || "",
-        );
-      }
-      return body;
     }
 
     function newLocalRequestID() {
@@ -1644,6 +1689,7 @@ cm local-agent start</pre>
       $("authTitle").textContent = setupRequired ? "创建管理员" : "ConnectMac 登录";
       $("authSubtitle").textContent = setupRequired ? "首次使用需要创建管理员账号。" : "请输入用户名、密码，并完成校验后登录。";
       $("authSubmitBtn").textContent = setupRequired ? "创建并登录" : "登录";
+      updateAuthSubmitState();
     }
 
     function showApp() {
@@ -1671,6 +1717,7 @@ cm local-agent start</pre>
 
     function applyRoleVisibility() {
       document.querySelectorAll(".admin-only").forEach((el) => {
+        if (el.id === "accountSettingsPanel" && isAdmin()) return;
         el.classList.toggle("hidden", !isAdmin());
       });
       $("includeSystemEvents").disabled = !isAdmin();
@@ -1734,24 +1781,30 @@ cm local-agent start</pre>
     }
 
     async function loadChallenge() {
+      state.challenge = null;
+      $("refreshChallengeBtn").disabled = true;
       $("challengeQuestion").textContent = "校验题加载中...";
+      $("authStatus").textContent = "";
+      updateAuthSubmitState();
       try {
-        const body = await api("/api/auth/challenge");
+        const body = await api("/api/auth/challenge", { timeoutMs: componentLoadTimeoutMS });
         state.challenge = body.data || {};
-        $("challengeQuestion").textContent = state.challenge.question || "校验题加载失败";
+        $("challengeQuestion").textContent = state.challenge.question || "校验题加载失败，点击换一题重试";
         $("challengeAnswer").value = "";
       } catch (err) {
         state.challenge = null;
-        $("challengeQuestion").textContent = "校验题加载失败";
-        $("authStatus").textContent = String(err.message || err);
-        throw err;
+        $("challengeQuestion").textContent = "校验题加载失败，点击换一题重试";
+        $("authStatus").textContent = "无法加载校验题" + (err.requestID ? ` · Request ID: ${err.requestID}` : "");
+      } finally {
+        $("refreshChallengeBtn").disabled = false;
+        updateAuthSubmitState();
       }
     }
 
     async function loadAccountChallenge() {
       $("accountChallengeQuestion").textContent = "校验题加载中...";
       try {
-        const body = await api("/api/auth/challenge");
+        const body = await api("/api/auth/challenge", { timeoutMs: componentLoadTimeoutMS });
         state.accountChallenge = body.data || {};
         $("accountChallengeQuestion").textContent = state.accountChallenge.question || "校验题加载失败";
         $("accountChallengeAnswer").value = "";
@@ -1823,18 +1876,19 @@ cm local-agent start</pre>
 
     async function toggleAccountSettings() {
       if (!isAdmin()) return;
-      showView("userManagementView");
+      showView("userView");
       const panel = $("accountSettingsPanel");
-      const willShow = panel.classList.contains("hidden");
-      panel.classList.toggle("hidden", !willShow);
-      if (willShow) {
-        $("accountEmail").value = state.auth?.member?.email || "";
-        $("accountPassword").value = "";
-        await loadAccountChallenge().catch((err) => {
-          setOutput(String(err.message || err));
-          setStatus("账号校验题加载失败");
-        });
-      }
+      panel.classList.remove("hidden");
+      $("accountEmail").value = state.auth?.member?.email || "";
+      $("accountPassword").value = "";
+      await loadAccountChallenge().catch((err) => {
+        showOperationError("账号校验题加载失败", err);
+      });
+    }
+
+    function openCurrentUserView() {
+      $("accountSettingsPanel").classList.add("hidden");
+      showView("userView");
     }
 
     async function saveAccountEmail() {
@@ -1893,7 +1947,7 @@ cm local-agent start</pre>
     async function loadProfiles() {
       const options = arguments[0] || {};
       const startedGeneration = profileRefreshGeneration;
-      const body = await api("/api/profiles");
+      const body = await api("/api/profiles", { timeoutMs: componentLoadTimeoutMS });
       state.profiles = body.data.profiles || [];
       const seededOwners = {};
       for (const profile of state.profiles) {
@@ -1964,7 +2018,7 @@ cm local-agent start</pre>
         state.members = [];
         return;
       }
-      const body = await api("/api/members");
+      const body = await api("/api/members", { timeoutMs: componentLoadTimeoutMS });
       state.members = body.data.members || [];
       renderMembers();
       renderAssignMemberOptions();
@@ -1976,14 +2030,14 @@ cm local-agent start</pre>
         state.managedProfiles = [];
         return;
       }
-      const body = await api("/api/managed-profiles");
+      const body = await api("/api/managed-profiles", { timeoutMs: componentLoadTimeoutMS });
       state.managedProfiles = body.data?.profiles || [];
       renderManagedProfiles();
       renderMembers();
     }
 
     async function loadSettings() {
-      const body = await api("/api/settings");
+      const body = await api("/api/settings", { timeoutMs: componentLoadTimeoutMS });
       state.settings = body.data.settings || {};
       renderSettings();
     }
@@ -2013,7 +2067,10 @@ cm local-agent start</pre>
 
     function renderProfiles() {
       const rows = filteredProfiles();
+      const hasProfiles = state.profiles.length > 0;
       $("profileCount").textContent = `${rows.length}/${state.profiles.length}`;
+      $("profileEmptyState").classList.toggle("hidden", hasProfiles);
+      document.querySelector(".profile-table-scroll").classList.toggle("hidden", !hasProfiles);
       $("profiles").innerHTML = rows.length ? rows.map((p) => {
         const status = state.statuses[p.name];
         const summary = profileStatusSummary(status, p.name);
@@ -2026,7 +2083,7 @@ cm local-agent start</pre>
           "<td data-label=\"状态\"><span class=\"profile-status-summary " + summaryClass + "\">" + escapeHTML(summary) + "</span></td>" +
           "<td data-label=\"操作\"><button type=\"button\" class=\"profile-workbench-entry\" data-workbench-entry=\"" + escapeAttr(p.name) + "\"><span class=\"action-icon\" aria-hidden=\"true\">→</span><span class=\"desktop-entry-label\">进入工作台</span><span class=\"mobile-entry-label\">管理</span></button></td>" +
         "</tr>";
-      }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
+      }).join("") : (hasProfiles ? "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 Profile。</td></tr>" : "");
       document.querySelectorAll("[data-workbench-entry]").forEach((button) => {
         button.addEventListener("click", () => {
           openProfileWorkbench(button.getAttribute("data-workbench-entry"));
@@ -2046,6 +2103,9 @@ cm local-agent start</pre>
     }
 
     function renderMembers() {
+      const hasMembers = state.members.length > 0;
+      $("memberEmptyState").classList.toggle("hidden", hasMembers);
+      document.querySelector(".member-table-scroll").classList.toggle("hidden", !hasMembers);
       $("members").innerHTML = state.members.length ? state.members.map((member) => {
         const enabledText = member.enabled ? "启用" : "停用";
         const enabledClass = member.enabled ? "ready" : "stopped";
@@ -2062,7 +2122,7 @@ cm local-agent start</pre>
           "<td data-label=\"状态\"><span class=\"badge " + enabledClass + "\">" + enabledText + "</span></td>" +
           "<td data-label=\"操作\">" + actions + "</td>" +
         "</tr>";
-      }).join("") : "<tr><td colspan=\"4\" class=\"muted\">还没有成员。</td></tr>";
+      }).join("") : "";
       document.querySelectorAll("[data-member-toggle]").forEach((button) => {
         button.addEventListener("click", () => toggleMember(button.getAttribute("data-member-toggle"), button.getAttribute("data-enabled") === "true"));
       });
@@ -2086,6 +2146,9 @@ cm local-agent start</pre>
 
     function renderManagedProfiles() {
       if (!isAdmin()) return;
+      const hasProfiles = state.managedProfiles.length > 0;
+      $("managedProfileEmptyState").classList.toggle("hidden", hasProfiles);
+      $("managedProfiles").classList.toggle("hidden", !hasProfiles);
       $("managedProfiles").innerHTML = state.managedProfiles.length ? state.managedProfiles.map((profile) => {
         const grantedCount = (profile.members || []).length;
         const statusLabel = profile.enabled ? "正常" : "停用";
@@ -2097,7 +2160,7 @@ cm local-agent start</pre>
           "<div class=\"muted\">已分配成员：" + grantedCount + " 个。请在成员列表中配置某个成员可用的 Profile。</div>" +
           "<div class=\"row-actions\"><button data-profile-status=\"" + escapeAttr(profile.name) + "\" data-enabled=\"" + String(nextEnabled) + "\">" + (profile.enabled ? "停用" : "恢复正常") + "</button><button data-profile-edit=\"" + escapeAttr(profile.name) + "\">编辑</button><button class=\"danger\" data-profile-delete=\"" + escapeAttr(profile.name) + "\">删除</button></div>" +
         "</div>";
-      }).join("") : "<div class=\"muted\">还没有后台 Profile。</div>";
+      }).join("") : "";
       document.querySelectorAll("[data-profile-status]").forEach((button) => {
         button.addEventListener("click", () => setManagedProfileStatus(button.getAttribute("data-profile-status"), button.getAttribute("data-enabled") === "true"));
       });
@@ -4389,9 +4452,10 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify(editingEmail ? { original_email: editingEmail, name, email, role } : { name, email, role, password })
         });
-        closeMemberForm();
         await loadMembers();
-        setStatus(editingEmail ? "成员已保存" : "成员已添加");
+        renderMembers();
+        closeMemberForm();
+        announceManagementSuccess(editingEmail ? "成员已保存" : "成员已添加");
       } catch (err) {
         showOperationError(editingEmail ? "成员保存失败" : "成员添加失败", err);
       } finally {
@@ -4453,9 +4517,10 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ email, password })
         });
-        closeMemberPasswordEditor();
         await loadMembers();
-        setStatus("成员密码已修改");
+        renderMembers();
+        closeMemberPasswordEditor();
+        announceManagementSuccess("成员密码已修改");
       } catch (err) {
         showOperationError("成员密码修改失败", err);
       } finally {
@@ -4495,11 +4560,9 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ current_password: current, new_password: next, confirm_password: confirm })
         });
-        $("userCurrentPassword").value = "";
-        $("userNewPassword").value = "";
-        $("userConfirmPassword").value = "";
+        renderUserPage();
         closeOwnPasswordEditor();
-        setStatus("密码已修改");
+        announceManagementSuccess("密码已修改");
       } catch (err) {
         showOperationError("密码修改失败", err);
       } finally {
@@ -4797,9 +4860,11 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ profile_yaml: profileYAML })
         });
+        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        renderManagedProfiles();
+        renderProfiles();
         closeProfileForm();
-        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
-        setStatus("Profile 已保存");
+        announceManagementSuccess("Profile 已保存");
       } catch (err) {
         showOperationError("Profile 保存失败", err);
       } finally {
@@ -4857,9 +4922,12 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ member_email: memberEmail, profiles })
         });
-        closeMemberProfileEditor();
         await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
-        setStatus("成员 Profile 已保存");
+        renderMembers();
+        renderManagedProfiles();
+        renderProfiles();
+        closeMemberProfileEditor();
+        announceManagementSuccess("成员 Profile 已保存");
       } catch (err) {
         showOperationError("成员 Profile 保存失败", err);
       } finally {
@@ -4937,7 +5005,7 @@ cm local-agent start</pre>
           setOutput(state.eventItems.length ? state.eventItems.map((event) =>
             "[" + formatTime(event.created_at) + "] " + (event.source === "system" ? "[系统] " : "") +
             event.action + " " + event.status + " confirmed=" + String(!!event.confirmed) + "\n" + (event.message || "")
-          ).join("\n\n") : "No events.");
+          ).join("\n\n") : "暂无事件");
           setStatus("事件已加载");
         }
       } catch (err) {
@@ -4989,7 +5057,7 @@ cm local-agent start</pre>
           "<td data-label=\"开始时间\">" + escapeHTML(formatTime(job.started_at)) + "</td>" +
           "<td data-label=\"操作\"><button data-job-log=\"" + escapeAttr(job.id || "") + "\">查看</button></td>" +
         "</tr>"
-      ).join("") : "<tr><td colspan=\"5\" class=\"muted\">No jobs.</td></tr>";
+      ).join("") : "<tr><td colspan=\"5\" class=\"muted\">暂无后台任务</td></tr>";
       document.querySelectorAll("[data-job-log]").forEach((button) => {
         button.addEventListener("click", () => loadJobLog(button.getAttribute("data-job-log")));
       });
@@ -5105,13 +5173,14 @@ cm local-agent start</pre>
 
     $("refresh").addEventListener("click", refreshAllData);
     $("authSubmitBtn").addEventListener("click", submitAuth);
-    $("refreshChallengeBtn").addEventListener("click", () => loadChallenge().catch((err) => { $("authStatus").textContent = String(err.message || err); }));
+    $("refreshChallengeBtn").addEventListener("click", loadChallenge);
     $("logoutBtn").addEventListener("click", logout);
     $("accountSettingsBtn").addEventListener("click", toggleAccountSettings);
     $("refreshAccountChallengeBtn").addEventListener("click", () => loadAccountChallenge().catch((err) => { setOutput(String(err.message || err)); setStatus("账号校验题加载失败"); }));
     $("saveAccountEmailBtn").addEventListener("click", saveAccountEmail);
     $("saveSettingsBtn").addEventListener("click", saveSettings);
     $("openProfileFormBtn").addEventListener("click", () => openProfileForm(null));
+    $("emptyAddProfileBtn").addEventListener("click", () => openProfileForm(null));
     $("saveProfileFormBtn").addEventListener("click", saveManagedProfile);
     $("cancelProfileFormBtn").addEventListener("click", closeProfileForm);
     $("profileFormCloseBtn").addEventListener("click", closeProfileForm);
@@ -5150,7 +5219,7 @@ cm local-agent start</pre>
         renderSelected();
       }
     });
-    $("currentUserBtn").addEventListener("click", () => showView("userView"));
+    $("currentUserBtn").addEventListener("click", openCurrentUserView);
     $("generateOwnTokenBtn").addEventListener("click", generateOwnToken);
     $("openOwnPasswordBtn").addEventListener("click", openOwnPasswordEditor);
     $("changeOwnPasswordBtn").addEventListener("click", changeOwnPassword);
@@ -5173,6 +5242,7 @@ cm local-agent start</pre>
       });
     });
     $("openMemberFormBtn").addEventListener("click", () => openMemberForm(null));
+    $("emptyAddMemberBtn").addEventListener("click", () => openMemberForm(null));
     $("cancelMemberFormBtn").addEventListener("click", closeMemberForm);
     $("memberFormCloseBtn").addEventListener("click", closeMemberForm);
     $("memberFormLayer").addEventListener("click", (event) => {

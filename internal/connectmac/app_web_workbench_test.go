@@ -324,6 +324,134 @@ func TestWebWorkbenchDialogContract(t *testing.T) {
 	}
 }
 
+func TestWebWorkbenchManagement(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`Profiles 通过弹框表单新增或编辑`,
+		`id="profileEmptyState"`,
+		`id="memberEmptyState"`,
+		`id="managedProfileEmptyState"`,
+		`校验题加载失败，点击换一题重试`,
+		`const componentLoadTimeoutMS = 8000`,
+		`暂无事件`,
+		`暂无后台任务`,
+		`id="managementSuccessStatus"`,
+		`aria-live="polite"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("management/loading contract missing %q", want)
+		}
+	}
+
+	userManagement := extractWebSource(t, html, `<section id="userManagementView"`, "\n        <section id=\"profilesAdminView\"")
+	for _, unwanted := range []string{
+		`id="managedProfiles"`,
+		`id="systemSettingsPanel"`,
+		`id="accountSettingsPanel"`,
+		`<h2>Profiles</h2>`,
+	} {
+		if strings.Contains(userManagement, unwanted) {
+			t.Errorf("user management must not contain %q", unwanted)
+		}
+	}
+	userView := extractWebSource(t, html, `<section id="userView"`, "\n        <section id=\"userManagementView\"")
+	for _, want := range []string{
+		`id="systemSettingsPanel"`,
+		`id="accountSettingsPanel"`,
+		`<h2>系统设置</h2>`,
+		`<h2>管理员账号</h2>`,
+	} {
+		if !strings.Contains(userView, want) {
+			t.Errorf("user view must contain %q", want)
+		}
+	}
+	roleVisibility := webInlineFunctionSource(t, html, `function applyRoleVisibility()`)
+	if !strings.Contains(roleVisibility, `el.id === "accountSettingsPanel" && isAdmin()`) {
+		t.Error("administrator account settings must remain hidden until its explicit entry is used")
+	}
+
+	api := webInlineFunctionSource(t, html, `async function api(path, options = {})`)
+	for _, want := range []string{
+		`const { timeoutMs = 0, ...fetchOptions } = options;`,
+		`const controller = timeoutMs > 0 ? new AbortController() : null;`,
+		`timedOut = true;`,
+		`controller.abort()`,
+		`"component_timeout"`,
+		`window.clearTimeout(timer)`,
+	} {
+		if !strings.Contains(api, want) {
+			t.Errorf("timeout-aware api contract missing %q", want)
+		}
+	}
+
+	loadChallenge := webInlineFunctionSource(t, html, `async function loadChallenge()`)
+	for _, want := range []string{
+		`timeoutMs: componentLoadTimeoutMS`,
+		`state.challenge = null;`,
+		`校验题加载失败，点击换一题重试`,
+		`$("refreshChallengeBtn").disabled = false;`,
+		`updateAuthSubmitState();`,
+	} {
+		if !strings.Contains(loadChallenge, want) {
+			t.Errorf("recoverable challenge contract missing %q", want)
+		}
+	}
+
+	for _, contract := range []struct {
+		function string
+		path     string
+	}{
+		{`async function loadProfiles()`, `/api/profiles`},
+		{`async function loadMembers()`, `/api/members`},
+		{`async function loadManagedProfiles()`, `/api/managed-profiles`},
+		{`async function loadSettings()`, `/api/settings`},
+	} {
+		source := webInlineFunctionSource(t, html, contract.function)
+		if !strings.Contains(source, contract.path) || !strings.Contains(source, `timeoutMs: componentLoadTimeoutMS`) {
+			t.Errorf("%s must use the component read timeout", contract.function)
+		}
+	}
+	for _, mutation := range []string{
+		`async function runAWS(`,
+		`async function refreshStatus(`,
+		`async function runSync(`,
+		`async function connectLocalTerminal(`,
+	} {
+		source := webInlineFunctionSource(t, html, mutation)
+		if strings.Contains(source, `timeoutMs: componentLoadTimeoutMS`) {
+			t.Errorf("%s must not use the component read timeout", mutation)
+		}
+	}
+
+	for _, contract := range []struct {
+		function string
+		reload   string
+		close    string
+		success  string
+	}{
+		{`async function addMember()`, `await loadMembers();`, `closeMemberForm();`, `announceManagementSuccess(`},
+		{`async function saveMemberPassword()`, `await loadMembers();`, `closeMemberPasswordEditor();`, `announceManagementSuccess(`},
+		{`async function changeOwnPassword()`, `renderUserPage();`, `closeOwnPasswordEditor();`, `announceManagementSuccess(`},
+		{`async function saveManagedProfile()`, `await Promise.all([loadManagedProfiles(), loadProfiles()]);`, `closeProfileForm();`, `announceManagementSuccess(`},
+		{`async function saveMemberProfiles()`, `await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);`, `closeMemberProfileEditor();`, `announceManagementSuccess(`},
+	} {
+		source := webInlineFunctionSource(t, html, contract.function)
+		reloadAt := strings.Index(source, contract.reload)
+		closeAt := strings.Index(source, contract.close)
+		successAt := strings.Index(source, contract.success)
+		if reloadAt < 0 || closeAt < reloadAt || successAt < closeAt {
+			t.Errorf("%s must reload, render/close, then announce success", contract.function)
+		}
+		if !strings.Contains(source, `showOperationError(`) {
+			t.Errorf("%s must keep correlated failure feedback", contract.function)
+		}
+	}
+}
+
 func TestWebDialogFocusLifecycleContract(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
 	if err != nil {
