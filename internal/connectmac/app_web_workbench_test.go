@@ -50,12 +50,8 @@ func TestWebWorkbenchStructure(t *testing.T) {
 		}
 	}
 
-	renderSelected := strings.Index(html, `function renderSelected()`)
-	renderWorkbenchCall := -1
-	if renderSelected >= 0 {
-		renderWorkbenchCall = strings.Index(html[renderSelected:], `renderWorkbench(p, status, reminder);`)
-	}
-	if renderWorkbenchCall < 0 {
+	renderSelected := webInlineFunctionSource(t, html, `function renderSelected()`)
+	if !strings.Contains(renderSelected, `renderWorkbench(p, status, reminder);`) {
 		t.Error("renderSelected must delegate workbench state and action rendering to renderWorkbench")
 	}
 
