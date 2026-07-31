@@ -15,9 +15,11 @@ func TestWebOperationHeaderUsesVerticalProfileIdentityWithoutHomeButton(t *testi
 	html := string(data)
 
 	for _, want := range []string{
+		`class="workbench-head`,
 		`class="selected-title"`,
 		`id="selectedProfileName" class="selected-profile-name"`,
 		`id="selectedAppleEmail" class="selected-apple-email"`,
+		`id="workbenchStateBadge"`,
 		`.selected-title {`,
 		`.selected-profile-name,`,
 		`.selected-apple-email {`,

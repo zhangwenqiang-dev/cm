@@ -6,6 +6,7 @@
   <title>ConnectMac</title>
   <link rel="icon" type="image/svg+xml" href="assets/connectmac-mark.svg">
   <link rel="stylesheet" href="/vendor/bootstrap/bootstrap.min.css">
+  <link rel="stylesheet" href="assets/connectmac-workbench.css">
   <link rel="stylesheet" href="/vendor/xterm/xterm.css">
   <script src="/vendor/xterm/xterm.js"></script>
   <style>
@@ -803,74 +804,101 @@
           </div>
         </section>
 
-        <section id="operationsView" class="view hidden card shadow-sm">
-          <div class="section-head card-header">
+        <section id="operationsView" class="view hidden workbench">
+          <div class="workbench-head">
             <h2 class="selected-title">
               <span id="selectedProfileName" class="selected-profile-name">未选择</span>
               <span id="selectedAppleEmail" class="selected-apple-email">-</span>
             </h2>
-            <div class="toolbar">
-              <button id="statusBtn">状态</button>
-              <button id="openMacBtn" class="primary">打开</button>
-              <button id="releaseMacBtn" class="danger">释放</button>
-              <button id="extendReminderBtn">延长提醒</button>
-              <button id="cleanupRecordsBtn" class="admin-only">清理记录</button>
-              <button id="syncBtn" class="local-action">传输</button>
-              <button id="terminalBtn" class="local-action">连接</button>
-              <button id="eventsBtn">事件</button>
+            <span id="workbenchStateBadge" class="badge stopped">状态未知</span>
+          </div>
+          <div class="workbench-grid">
+            <div class="workbench-primary">
+              <div class="workbench-eyebrow">建议操作</div>
+              <h2 id="workbenchRecommendation">先刷新当前 Mac 状态</h2>
+              <p id="workbenchRecommendationDetail" class="workbench-recommendation-detail">状态确认后，这里会给出下一步操作建议。</p>
+              <div class="workbench-actions">
+                <button id="statusBtn">状态</button>
+                <button id="openMacBtn" class="primary">打开</button>
+                <button id="releaseMacBtn" class="danger">释放</button>
+                <button id="extendReminderBtn">延长提醒</button>
+                <button id="cleanupRecordsBtn" class="admin-only">清理记录</button>
+                <button id="syncBtn" class="local-action mobile-local-hidden">传输</button>
+                <button id="terminalBtn" class="local-action mobile-local-hidden">连接</button>
+                <button id="vncBtn" class="local-action mobile-local-hidden">VNC</button>
+              </div>
+              <p id="workbenchActionReason" class="workbench-action-reason">选择一个 profile 后开始。</p>
+            </div>
+
+            <aside id="workbenchTaskPanel" class="workbench-task-panel">
+              <div class="workbench-task-head">
+                <div>
+                  <div class="workbench-eyebrow">当前任务</div>
+                  <h2>运行进度</h2>
+                </div>
+                <button id="eventsBtn">事件</button>
+              </div>
+              <div id="workbenchEmptyTask" class="workbench-empty-task">当前没有进行中的任务。</div>
+              <div id="workbenchActiveTask" class="workbench-active-task hidden" aria-live="polite">
+                <strong>任务处理中</strong>
+                <span>详情将在任务开始后显示。</span>
+              </div>
               <div id="includeSystemEventsWrap" class="admin-only form-check form-switch">
                 <input id="includeSystemEvents" class="form-check-input" type="checkbox">
                 <label class="form-check-label" for="includeSystemEvents">包含系统事件</label>
               </div>
+              <div class="auto-release-strip">
+                <div class="auto-release-copy">
+                  <span>自动释放</span>
+                  <strong id="autoReleaseSummary">-</strong>
+                  <small id="autoReleaseTime" class="hidden"></small>
+                  <small id="autoReleaseError" class="error hidden"></small>
+                </div>
+                <div class="auto-release-actions">
+                  <button id="autoReleaseToggleBtn" aria-pressed="false">开启自动释放</button>
+                </div>
+              </div>
+            </aside>
+          </div>
+          <details id="technicalDetails" class="technical-details">
+            <summary>技术详情</summary>
+            <div class="details">
+              <div class="metric"><span>Decision</span><strong id="decisionValue">-</strong></div>
+              <div class="metric"><span>Ready</span><strong id="readyValue">-</strong></div>
+              <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
+              <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
+              <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
+              <div class="metric"><span>Host 创建</span><strong id="hostCreatedValue">-</strong></div>
+              <div class="metric"><span>提醒时间</span><strong id="reminderDueValue">-</strong></div>
+              <div class="metric"><span>提醒状态</span><strong id="reminderStatusValue">-</strong></div>
+              <div class="metric admin-only">
+                <span>确认打开负责人</span>
+                <select id="assignMemberSelect" class="inline-select"></select>
+              </div>
             </div>
-          </div>
-          <div class="details">
-            <div class="metric"><span>Decision</span><strong id="decisionValue">-</strong></div>
-            <div class="metric"><span>Ready</span><strong id="readyValue">-</strong></div>
-            <div class="metric"><span>Public IP</span><strong id="ipValue">-</strong></div>
-            <div class="metric"><span>Next</span><strong id="nextValue">-</strong></div>
-            <div class="metric"><span>负责人</span><strong id="ownerValue">-</strong></div>
-            <div class="metric"><span>Host 创建</span><strong id="hostCreatedValue">-</strong></div>
-            <div class="metric"><span>提醒时间</span><strong id="reminderDueValue">-</strong></div>
-            <div class="metric"><span>提醒状态</span><strong id="reminderStatusValue">-</strong></div>
-            <div class="metric admin-only">
-              <span>确认打开负责人</span>
-              <select id="assignMemberSelect" class="inline-select"></select>
+            <div id="technicalOutput" class="output">
+              <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
+              <pre id="output"></pre>
             </div>
-          </div>
-          <div class="auto-release-strip">
-            <div class="auto-release-copy">
-              <span>自动释放</span>
-              <strong id="autoReleaseSummary">-</strong>
-              <small id="autoReleaseTime" class="hidden"></small>
-              <small id="autoReleaseError" class="error hidden"></small>
+            <div class="technical-jobs-head">
+              <h2>后台任务</h2>
+              <button id="refreshJobs">刷新任务</button>
             </div>
-            <div class="auto-release-actions">
-              <button id="autoReleaseToggleBtn" aria-pressed="false">开启自动释放</button>
+            <div class="jobs">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 34%">Job</th>
+                    <th style="width: 22%">Profile</th>
+                    <th style="width: 16%">Status</th>
+                    <th style="width: 18%">Started</th>
+                    <th style="width: 10%">日志</th>
+                  </tr>
+                </thead>
+                <tbody id="jobs"></tbody>
+              </table>
             </div>
-          </div>
-          <div class="output">
-            <div id="statusLine" class="status-line">选择一个 profile 后开始。</div>
-            <pre id="output"></pre>
-          </div>
-          <div class="section-head card-header">
-            <h2>后台任务</h2>
-            <button id="refreshJobs">刷新任务</button>
-          </div>
-          <div class="jobs">
-            <table>
-              <thead>
-                <tr>
-                  <th style="width: 34%">Job</th>
-                  <th style="width: 22%">Profile</th>
-                  <th style="width: 16%">Status</th>
-                  <th style="width: 18%">Started</th>
-                  <th style="width: 10%">日志</th>
-                </tr>
-              </thead>
-              <tbody id="jobs"></tbody>
-            </table>
-          </div>
+          </details>
         </section>
 
         <section id="syncView" class="view hidden card shadow-sm">
@@ -1034,6 +1062,8 @@
       </main>
     </div>
   </div>
+  <script src="/vendor/bootstrap/bootstrap.bundle.min.js"></script>
+  <script src="assets/connectmac-workbench.js"></script>
   <script>
     const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", loadingStatus: new Set(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const transferMissingGraceMS = 10000;
@@ -1052,7 +1082,7 @@
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
-      for (const id of ["statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "syncPushBtn", "syncPullBtn", "syncPushTerminalRetryBtn", "syncPullTerminalRetryBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
+      for (const id of ["statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "vncBtn", "syncPushBtn", "syncPullBtn", "syncPushTerminalRetryBtn", "syncPullTerminalRetryBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn"]) {
         const el = $(id);
         if (el) el.disabled = busy;
       }
@@ -1885,6 +1915,7 @@
       $("extendReminderBtn").disabled = disabled || state.busy || !isReady || !reminder || reminder.status === "released" || releaseActive;
       $("cleanupRecordsBtn").disabled = disabled || state.busy || !isAdmin() || isReady;
       $("syncBtn").disabled = readyActionDisabled;
+      $("vncBtn").disabled = readyActionDisabled;
       $("syncPushBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "push"), p?.name, "push");
       $("syncPullBtn").disabled = readyActionDisabled || syncJobsLoading || syncJobBusy(syncJob(p?.name, "pull"), p?.name, "pull");
       $("syncPushBrowseBtn").disabled = readyActionDisabled;
@@ -4506,6 +4537,7 @@
       }
       openSync(p.name);
     });
+    $("vncBtn").addEventListener("click", () => startTunnel(state.selected));
     $("syncBackBtn").addEventListener("click", () => showView("operationsView"));
     $("syncRefreshHistoryBtn").addEventListener("click", () => loadSyncHistory());
     $("syncPushBrowseBtn").addEventListener("click", () => openLocalPicker("syncPushLocalPath"));
@@ -4566,6 +4598,5 @@
       showAuth();
     });
   </script>
-  <script src="/vendor/bootstrap/bootstrap.bundle.min.js"></script>
 </body>
 </html>
