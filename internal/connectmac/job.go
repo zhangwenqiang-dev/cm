@@ -209,6 +209,13 @@ func (m JobManager) createUniqueLocked(job Job) (Job, error) {
 	return m.create(job, true)
 }
 
+func jobBlocksUniqueCreation(job Job) bool {
+	return job.Status == JobStatusStarting ||
+		job.Status == JobStatusRunning ||
+		job.LifecycleState == JobLifecyclePending ||
+		job.LifecycleState == JobLifecycleWaiting
+}
+
 func (m JobManager) create(job Job, unique bool) (Job, error) {
 	m = m.normalize()
 	if job.StartedAt.IsZero() {
@@ -234,7 +241,7 @@ func (m JobManager) create(job Job, unique bool) (Job, error) {
 				return err
 			}
 			for _, existing := range jobs {
-				if existing.Type == job.Type && existing.Profile == job.Profile && (existing.Status == JobStatusStarting || existing.Status == JobStatusRunning) {
+				if existing.Type == job.Type && existing.Profile == job.Profile && jobBlocksUniqueCreation(existing) {
 					return &DuplicateActiveJobError{Type: job.Type, Profile: job.Profile, Existing: existing}
 				}
 			}

@@ -486,10 +486,30 @@ func TestJobManagerAWSDestroyUniquenessAllowsOtherProfilesAndTerminalReplacement
 	if _, err := manager.Create(Job{ID: "destroy-other", Type: "aws-destroy", Profile: "other"}); err != nil {
 		t.Fatalf("create other profile: %v", err)
 	}
-	first.Status = JobStatusFailed
+	first.Status = JobStatusSuccess
+	first.LifecycleState = JobLifecycleWaiting
 	first.FinishedAt = time.Now()
 	if err := manager.Save(first); err != nil {
-		t.Fatalf("finish first: %v", err)
+		t.Fatalf("move first destroy to lifecycle waiting: %v", err)
+	}
+	artifact := filepath.Join(t.TempDir(), "duplicate-destroy-config.yaml")
+	if err := os.WriteFile(artifact, []byte("secret config"), 0o600); err != nil {
+		t.Fatalf("write duplicate destroy artifact: %v", err)
+	}
+	if _, err := manager.Create(Job{
+		ID:           "destroy-mac-waiting-duplicate",
+		Type:         "aws-destroy",
+		Profile:      "mac",
+		CleanupPaths: []string{artifact},
+	}); !IsDuplicateActiveJob(err, "aws-destroy", "mac") {
+		t.Fatalf("lifecycle waiting destroy duplicate error = %v", err)
+	}
+	if _, err := os.Stat(artifact); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lifecycle waiting destroy artifact was not cleaned: %v", err)
+	}
+	first.LifecycleState = JobLifecycleFinalized
+	if err := manager.Save(first); err != nil {
+		t.Fatalf("finalize first destroy: %v", err)
 	}
 	if _, err := manager.Create(Job{ID: "destroy-mac-2", Type: "aws-destroy", Profile: "mac"}); err != nil {
 		t.Fatalf("create replacement: %v", err)
@@ -524,12 +544,54 @@ func TestJobManagerAWSOpenUniquenessByProfileAndActiveState(t *testing.T) {
 	}
 
 	first.Status = JobStatusSuccess
+	first.LifecycleState = JobLifecycleWaiting
 	first.FinishedAt = time.Now()
 	if err := manager.Save(first); err != nil {
-		t.Fatalf("finish first open: %v", err)
+		t.Fatalf("move first open to lifecycle waiting: %v", err)
+	}
+	waitingArtifact := filepath.Join(t.TempDir(), "waiting-open-config.yaml")
+	if err := os.WriteFile(waitingArtifact, []byte("secret config"), 0o600); err != nil {
+		t.Fatalf("write waiting open artifact: %v", err)
+	}
+	if _, err := manager.Create(Job{
+		ID:           "open-mac-waiting-duplicate",
+		Type:         "aws-open",
+		Profile:      "mac",
+		CleanupPaths: []string{waitingArtifact},
+	}); !IsDuplicateActiveJob(err, "aws-open", "mac") {
+		t.Fatalf("lifecycle waiting open duplicate error = %v", err)
+	}
+	if _, err := os.Stat(waitingArtifact); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lifecycle waiting open artifact was not cleaned: %v", err)
+	}
+	first.LifecycleState = JobLifecycleFinalized
+	if err := manager.Save(first); err != nil {
+		t.Fatalf("finalize first open: %v", err)
 	}
 	if _, err := manager.Create(Job{ID: "open-mac-2", Type: "aws-open", Profile: "mac"}); err != nil {
 		t.Fatalf("create open after terminal job: %v", err)
+	}
+}
+
+func TestJobBlocksUniqueCreationForProcessOrLifecycleActivity(t *testing.T) {
+	tests := []struct {
+		name string
+		job  Job
+		want bool
+	}{
+		{name: "process starting", job: Job{Status: JobStatusStarting}, want: true},
+		{name: "process running", job: Job{Status: JobStatusRunning}, want: true},
+		{name: "lifecycle pending", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecyclePending}, want: true},
+		{name: "lifecycle waiting", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecycleWaiting}, want: true},
+		{name: "lifecycle finalized", job: Job{Status: JobStatusSuccess, LifecycleState: JobLifecycleFinalized}, want: false},
+		{name: "lifecycle failed", job: Job{Status: JobStatusFailed, LifecycleState: JobLifecycleFailed}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jobBlocksUniqueCreation(test.job); got != test.want {
+				t.Fatalf("jobBlocksUniqueCreation(%+v) = %t, want %t", test.job, got, test.want)
+			}
+		})
 	}
 }
 
