@@ -298,6 +298,9 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		`await loadProfiles({ refreshStatuses: false });`,
 		`await refreshVisibleStatuses({`,
 		`background: false`,
+		`if (refreshed === false) {`,
+		`setStatus("状态刷新失败，其他数据已更新");`,
+		`if (refreshed !== true) return;`,
 		`setStatus("刷新完成");`,
 		`scheduleProfileRefresh();`,
 	} {
@@ -306,8 +309,9 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		}
 	}
 	awaitStatuses := strings.Index(refreshAllData, `await refreshVisibleStatuses({`)
+	partialFailure := strings.Index(refreshAllData, `setStatus("状态刷新失败，其他数据已更新");`)
 	refreshComplete := strings.Index(refreshAllData, `setStatus("刷新完成");`)
-	if awaitStatuses < 0 || refreshComplete < awaitStatuses {
+	if awaitStatuses < 0 || partialFailure < awaitStatuses || refreshComplete < partialFailure {
 		t.Error("manual top refresh must await visible statuses before reporting completion")
 	}
 }

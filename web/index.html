@@ -4642,6 +4642,11 @@
           startedGeneration: startedGeneration
         });
         if (refreshed === null || !state.auth?.authenticated || document.visibilityState !== "visible") return;
+        if (refreshed === false) {
+          setStatus("状态刷新失败，其他数据已更新");
+          return;
+        }
+        if (refreshed !== true) return;
         setStatus("刷新完成");
       } catch (err) {
         setOutput(String(err.message || err));
