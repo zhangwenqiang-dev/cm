@@ -370,8 +370,14 @@ func TestWebWorkbenchManagement(t *testing.T) {
 		}
 	}
 	roleVisibility := webInlineFunctionSource(t, html, `function applyRoleVisibility()`)
-	if !strings.Contains(roleVisibility, `el.id === "accountSettingsPanel" && isAdmin()`) {
-		t.Error("administrator account settings must remain hidden until its explicit entry is used")
+	for _, want := range []string{
+		`el.id === "systemSettingsPanel"`,
+		`el.id === "accountSettingsPanel"`,
+		`applyUserViewMode();`,
+	} {
+		if !strings.Contains(roleVisibility, want) {
+			t.Errorf("role visibility must preserve explicit user-view mode with %q", want)
+		}
 	}
 
 	api := webInlineFunctionSource(t, html, `async function api(path, options = {})`)
@@ -405,7 +411,6 @@ func TestWebWorkbenchManagement(t *testing.T) {
 		function string
 		path     string
 	}{
-		{`async function loadProfiles()`, `/api/profiles`},
 		{`async function loadMembers()`, `/api/members`},
 		{`async function loadManagedProfiles()`, `/api/managed-profiles`},
 		{`async function loadSettings()`, `/api/settings`},
@@ -414,6 +419,25 @@ func TestWebWorkbenchManagement(t *testing.T) {
 		if !strings.Contains(source, contract.path) || !strings.Contains(source, `timeoutMs: componentLoadTimeoutMS`) {
 			t.Errorf("%s must use the component read timeout", contract.function)
 		}
+	}
+	loadProfiles := webInlineFunctionSource(t, html, `async function loadProfiles(options = {})`)
+	for _, want := range []string{
+		`const timeoutMs = Number(options.timeoutMs) || 0;`,
+		`timeoutMs > 0 ? { timeoutMs } : {}`,
+		`api("/api/profiles", requestOptions)`,
+	} {
+		if !strings.Contains(loadProfiles, want) {
+			t.Errorf("optional Profile load timeout contract missing %q", want)
+		}
+	}
+	loadAppData := webInlineFunctionSource(t, html, `async function loadAppData(options = {})`)
+	if strings.Count(loadAppData, `loadProfiles({ timeoutMs: componentLoadTimeoutMS })`) != 2 {
+		t.Error("initial admin and member Profile loads must explicitly use the component timeout")
+	}
+	refreshLifecycleProfiles := webInlineFunctionSource(t, html, `async function refreshLifecycleProfiles(jobs)`)
+	if !strings.Contains(refreshLifecycleProfiles, `loadProfiles({ timeoutMs: 0 })`) ||
+		strings.Contains(refreshLifecycleProfiles, `componentLoadTimeoutMS`) {
+		t.Error("lifecycle Profile refresh must explicitly avoid the component timeout")
 	}
 	for _, mutation := range []string{
 		`async function runAWS(`,
@@ -427,6 +451,37 @@ func TestWebWorkbenchManagement(t *testing.T) {
 		}
 	}
 
+	for _, want := range []string{
+		`userViewMode: "personal"`,
+		`function applyUserViewMode()`,
+		`state.userViewMode = "personal";`,
+		`state.userViewMode = "settings";`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("user-view entry mode contract missing %q", want)
+		}
+	}
+	currentUserView := webInlineFunctionSource(t, html, `function openCurrentUserView()`)
+	if !strings.Contains(currentUserView, `state.userViewMode = "personal";`) ||
+		!strings.Contains(currentUserView, `showView("userView");`) {
+		t.Error("avatar entry must select the personal user-view mode")
+	}
+	accountSettings := webInlineFunctionSource(t, html, `async function toggleAccountSettings()`)
+	if !strings.Contains(accountSettings, `state.userViewMode = "settings";`) ||
+		!strings.Contains(accountSettings, `showView("userView");`) {
+		t.Error("account settings entry must select the settings user-view mode")
+	}
+	applyUserViewMode := webInlineFunctionSource(t, html, `function applyUserViewMode()`)
+	for _, want := range []string{
+		`state.userViewMode === "settings"`,
+		`$("systemSettingsPanel").classList.toggle("hidden", !showSettings);`,
+		`$("accountSettingsPanel").classList.toggle("hidden", !showSettings);`,
+	} {
+		if !strings.Contains(applyUserViewMode, want) {
+			t.Errorf("user-view mode rendering missing %q", want)
+		}
+	}
+
 	for _, contract := range []struct {
 		function string
 		reload   string
@@ -436,8 +491,8 @@ func TestWebWorkbenchManagement(t *testing.T) {
 		{`async function addMember()`, `await loadMembers();`, `closeMemberForm();`, `announceManagementSuccess(`},
 		{`async function saveMemberPassword()`, `await loadMembers();`, `closeMemberPasswordEditor();`, `announceManagementSuccess(`},
 		{`async function changeOwnPassword()`, `renderUserPage();`, `closeOwnPasswordEditor();`, `announceManagementSuccess(`},
-		{`async function saveManagedProfile()`, `await Promise.all([loadManagedProfiles(), loadProfiles()]);`, `closeProfileForm();`, `announceManagementSuccess(`},
-		{`async function saveMemberProfiles()`, `await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);`, `closeMemberProfileEditor();`, `announceManagementSuccess(`},
+		{`async function saveManagedProfile()`, `await Promise.all([loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);`, `closeProfileForm();`, `announceManagementSuccess(`},
+		{`async function saveMemberProfiles()`, `await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);`, `closeMemberProfileEditor();`, `announceManagementSuccess(`},
 	} {
 		source := webInlineFunctionSource(t, html, contract.function)
 		reloadAt := strings.Index(source, contract.reload)
@@ -835,9 +890,8 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		t.Error("manual refresh must await an existing request before retrying an aborted or stale background refresh")
 	}
 
-	loadProfiles := extractWebSource(t, html, "async function loadProfiles()", "\n    async function loadReleaseReminders(")
+	loadProfiles := extractWebSource(t, html, "async function loadProfiles(options = {})", "\n    async function loadReleaseReminders(")
 	for _, want := range []string{
-		`const options = arguments[0] || {};`,
 		`const startedGeneration = profileRefreshGeneration;`,
 		`options.refreshStatuses !== false`,
 		`refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });`,
@@ -853,7 +907,7 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 	refreshAllData := extractWebSource(t, html, "async function refreshAllData()", "\n\n    $(\"refresh\").addEventListener")
 	for _, want := range []string{
 		`stopProfileRefresh();`,
-		`await loadProfiles({ refreshStatuses: false });`,
+		`await loadProfiles({ refreshStatuses: false, timeoutMs: componentLoadTimeoutMS });`,
 		`await refreshVisibleStatuses({`,
 		`background: false`,
 		`if (refreshed === false) {`,

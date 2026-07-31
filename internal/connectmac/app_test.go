@@ -5039,7 +5039,7 @@ func TestWebJobBadgesIncludeStartingAndInterruptedLabels(t *testing.T) {
 		`job?.lifecycle_state === "pending" || job?.lifecycle_state === "waiting"`,
 		`async function refreshLifecycleProfiles(jobs)`,
 		`await Promise.all(names.map((name) => refreshStatus(name, false)))`,
-		`await loadProfiles()`,
+		`await loadProfiles({ timeoutMs: 0 })`,
 		`const lifecycleJobs = state.jobs.filter(lifecycleJobPollingNeeded)`,
 		`await refreshLifecycleProfiles(lifecycleJobs)`,
 		`"等待释放完成" : "等待 Mac ready"`,

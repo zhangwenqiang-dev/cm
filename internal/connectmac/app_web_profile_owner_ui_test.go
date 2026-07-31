@@ -18,7 +18,7 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 	}
 	html := string(data)
 
-	loadProfiles := webFunctionForContractTest(t, html, "async function loadProfiles()", "async function loadReleaseReminders(")
+	loadProfiles := webFunctionForContractTest(t, html, "async function loadProfiles(options = {})", "async function loadReleaseReminders(")
 	for _, want := range []string{
 		`const seededOwners = {};`,
 		`const owner = profile.owners?.[0];`,

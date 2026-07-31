@@ -1117,7 +1117,7 @@ cm local-agent start</pre>
   <script src="/vendor/bootstrap/bootstrap.bundle.min.js"></script>
   <script src="assets/connectmac-workbench.js"></script>
   <script>
-    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", statusRefreshRequests: new Map(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, connectionGeneration: 0, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
+    const state = { profiles: [], members: [], managedProfiles: [], reminders: {}, profileOwners: {}, confirmOpenOwners: {}, statuses: {}, jobs: [], selected: "", selectedMemberProfileEmail: "", selectedMemberPasswordEmail: "", editingMemberEmail: "", editingManagedProfile: "", selectedTokenEmail: "", selectedTokenSelf: false, view: "profilesView", userViewMode: "personal", statusRefreshRequests: new Map(), terminalConnectedProfiles: new Set(), busy: false, autoReleaseSubmitting: false, pendingAutoRelease: null, auth: null, challenge: null, accountChallenge: null, settings: {}, clientConfig: { user_api: "" }, localAgent: { secureURL: "https://127.0.0.1:18765", legacyURL: "http://127.0.0.1:18765", url: "", online: false, errorReason: "" }, localAgentMonitor: null, pendingAWS: null, eventItems: [], eventCursor: "", eventProfile: "", eventIncludeSystem: false, syncHistory: [], syncHistoryGenerations: {}, transferMilestones: {}, transferMissingConfirmations: {}, pendingTerminalSyncs: {}, terminalSyncGeneration: 0, terminalSyncRequests: new Set(), syncJobs: {}, syncLoadedJobs: {}, syncJobsLoading: {}, syncJobsGenerations: {}, syncJobsRequests: {}, syncViewGeneration: 0, syncPollTimers: {}, syncPollRequests: {}, syncPollUnavailable: {}, picker: { target: "", path: "", parent: "", entries: [] }, terminal: { socket: null, profile: "", manualClose: false, returnOnClose: false, connectionGeneration: 0, buffer: "", xterm: null, xtermReady: false, xtermMissingWarned: false } };
     const dialogTriggers = new WeakMap();
     const dialogInitialFocus = new WeakMap();
     const pendingDialogInitialFocus = new Set();
@@ -1717,9 +1717,10 @@ cm local-agent start</pre>
 
     function applyRoleVisibility() {
       document.querySelectorAll(".admin-only").forEach((el) => {
-        if (el.id === "accountSettingsPanel" && isAdmin()) return;
+        if (el.id === "systemSettingsPanel" || el.id === "accountSettingsPanel") return;
         el.classList.toggle("hidden", !isAdmin());
       });
+      applyUserViewMode();
       $("includeSystemEvents").disabled = !isAdmin();
       if (!isAdmin()) {
         $("includeSystemEvents").checked = false;
@@ -1868,6 +1869,7 @@ cm local-agent start</pre>
         state.profiles = [];
         state.members = [];
         state.statuses = {};
+        state.userViewMode = "personal";
         showAuth();
         await loadChallenge().catch(() => {});
         setBusy(false);
@@ -1876,9 +1878,8 @@ cm local-agent start</pre>
 
     async function toggleAccountSettings() {
       if (!isAdmin()) return;
+      state.userViewMode = "settings";
       showView("userView");
-      const panel = $("accountSettingsPanel");
-      panel.classList.remove("hidden");
       $("accountEmail").value = state.auth?.member?.email || "";
       $("accountPassword").value = "";
       await loadAccountChallenge().catch((err) => {
@@ -1887,7 +1888,7 @@ cm local-agent start</pre>
     }
 
     function openCurrentUserView() {
-      $("accountSettingsPanel").classList.add("hidden");
+      state.userViewMode = "personal";
       showView("userView");
     }
 
@@ -1906,7 +1907,7 @@ cm local-agent start</pre>
         });
         state.auth = body.data || state.auth;
         $("accountPassword").value = "";
-        $("accountSettingsPanel").classList.add("hidden");
+        state.userViewMode = "personal";
         showApp();
         await loadAppData();
         setStatus("管理员邮箱已更新");
@@ -1927,10 +1928,10 @@ cm local-agent start</pre>
       }
       try {
         if (isAdmin()) {
-          await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles(), loadJobs(), loadSettings()]);
+          await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS }), loadJobs(), loadSettings()]);
         } else {
           state.members = [];
-          await Promise.all([loadProfiles(), loadJobs(), loadSettings()]);
+          await Promise.all([loadProfiles({ timeoutMs: componentLoadTimeoutMS }), loadJobs(), loadSettings()]);
         }
         setStatus("加载完成");
       } catch (err) {
@@ -1944,10 +1945,11 @@ cm local-agent start</pre>
       }
     }
 
-    async function loadProfiles() {
-      const options = arguments[0] || {};
+    async function loadProfiles(options = {}) {
       const startedGeneration = profileRefreshGeneration;
-      const body = await api("/api/profiles", { timeoutMs: componentLoadTimeoutMS });
+      const timeoutMs = Number(options.timeoutMs) || 0;
+      const requestOptions = timeoutMs > 0 ? { timeoutMs } : {};
+      const body = await api("/api/profiles", requestOptions);
       state.profiles = body.data.profiles || [];
       const seededOwners = {};
       for (const profile of state.profiles) {
@@ -2429,6 +2431,12 @@ cm local-agent start</pre>
       $("autoReleaseToggleBtn").disabled = !profile || !reminder || !ready || state.busy || state.autoReleaseSubmitting || active || released;
     }
 
+    function applyUserViewMode() {
+      const showSettings = isAdmin() && state.userViewMode === "settings";
+      $("systemSettingsPanel").classList.toggle("hidden", !showSettings);
+      $("accountSettingsPanel").classList.toggle("hidden", !showSettings);
+    }
+
     function renderUserPage() {
       const member = state.auth?.member || {};
       const p = selectedProfile();
@@ -2437,6 +2445,7 @@ cm local-agent start</pre>
       $("userRoleValue").textContent = member.role || "-";
       $("userSelectedProfileValue").textContent = p ? `${p.name} · ${p.apple_email || "-"}` : "-";
       $("generateOwnTokenBtn").textContent = member.has_api_token ? "查看令牌" : "生成令牌";
+      applyUserViewMode();
     }
 
     function statusBadge(status, profileName) {
@@ -2715,7 +2724,7 @@ cm local-agent start</pre>
           setOutput("");
           setStatus("任务已提交，页面会自动更新进度");
           try {
-            await Promise.all([loadJobs({ refreshReminders: true }), refreshStatus(p.name, false), loadEvents(false), loadProfiles()]);
+            await Promise.all([loadJobs({ refreshReminders: true }), refreshStatus(p.name, false), loadEvents(false), loadProfiles({ timeoutMs: 0 })]);
           } catch (err) {
             const refreshSummary = "任务已提交，状态刷新失败，页面将继续自动更新";
             if (!showOperationError(refreshSummary, err)) setStatus(refreshSummary);
@@ -3059,7 +3068,7 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ profile: p.name })
         });
-        await Promise.all([loadProfiles(), loadProfileOwners(), loadReleaseReminders(), loadEvents(false)]);
+        await Promise.all([loadProfiles({ timeoutMs: componentLoadTimeoutMS }), loadProfileOwners(), loadReleaseReminders(), loadEvents(false)]);
         applyProfileOwners();
         setOutput(JSON.stringify(body.data || {}, null, 2));
         setStatus("记录已清理");
@@ -4473,7 +4482,7 @@ cm local-agent start</pre>
           body: JSON.stringify({ email })
         });
         await loadMembers();
-        await loadProfiles();
+        await loadProfiles({ timeoutMs: componentLoadTimeoutMS });
         setStatus(enabled ? "成员已停用" : "成员已启用");
       } catch (err) {
         showOperationError("成员状态更新失败", err);
@@ -4860,7 +4869,7 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ profile_yaml: profileYAML })
         });
-        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);
         renderManagedProfiles();
         renderProfiles();
         closeProfileForm();
@@ -4883,7 +4892,7 @@ cm local-agent start</pre>
           body: JSON.stringify({ profile })
         });
         if (state.selected === profile) state.selected = "";
-        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);
         setStatus("Profile 已删除");
       } catch (err) {
         showOperationError("Profile 删除失败", err);
@@ -4902,7 +4911,7 @@ cm local-agent start</pre>
           body: JSON.stringify({ profile, enabled })
         });
         if (!enabled && state.selected === profile) state.selected = "";
-        await Promise.all([loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);
         setStatus(enabled ? "Profile 已恢复正常" : "Profile 已停用");
       } catch (err) {
         showOperationError("Profile 状态更新失败", err);
@@ -4922,7 +4931,7 @@ cm local-agent start</pre>
           method: "POST",
           body: JSON.stringify({ member_email: memberEmail, profiles })
         });
-        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles()]);
+        await Promise.all([loadMembers(), loadManagedProfiles(), loadProfiles({ timeoutMs: componentLoadTimeoutMS })]);
         renderMembers();
         renderManagedProfiles();
         renderProfiles();
@@ -5039,7 +5048,7 @@ cm local-agent start</pre>
     async function refreshLifecycleProfiles(jobs) {
       const names = [...new Set(jobs.filter(lifecycleJobPollingNeeded).map((job) => job.profile).filter(Boolean))];
       await Promise.all(names.map((name) => refreshStatus(name, false)));
-      await loadProfiles();
+      await loadProfiles({ timeoutMs: 0 });
     }
 
     async function loadJobs(options = {}) {
@@ -5146,7 +5155,7 @@ cm local-agent start</pre>
           await loadMembers();
           await loadManagedProfiles();
         }
-        await loadProfiles({ refreshStatuses: false });
+        await loadProfiles({ refreshStatuses: false, timeoutMs: componentLoadTimeoutMS });
         await loadJobs();
         await detectLocalAgent();
         const startedGeneration = profileRefreshGeneration;
