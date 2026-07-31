@@ -50,6 +50,14 @@
     return stateCopyMap[state] || stateCopyMap.unknown;
   }
 
+  function shouldApplyProfileRefresh(input) {
+    const options = input || {};
+    return options.startedGeneration === options.currentGeneration &&
+      options.authenticated === true &&
+      options.visible === true &&
+      options.aborted === false;
+  }
+
   function activeLifecycleJob(job, type, profileName) {
     if (!job || job.type !== type) return false;
     if (job.profile !== profileName) return false;
@@ -180,5 +188,6 @@
     buildActionModel: buildActionModel,
     stateCopyMap: stateCopyMap,
     stateCopy: stateCopy,
+    shouldApplyProfileRefresh: shouldApplyProfileRefresh,
   };
 })(window);

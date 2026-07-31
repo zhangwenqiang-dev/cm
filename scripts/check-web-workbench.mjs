@@ -9,8 +9,73 @@ const context = { window: {} };
 vm.createContext(context);
 new vm.Script(source, { filename: "web/assets/connectmac-workbench.js" }).runInContext(context);
 
-const { effectiveState, buildActionModel, stateCopyMap, stateCopy } =
+const { effectiveState, buildActionModel, stateCopyMap, stateCopy, shouldApplyProfileRefresh } =
   context.window.ConnectMacWorkbench;
+
+const profileRefreshCases = [
+  {
+    name: "current visible authenticated refresh",
+    input: {
+      startedGeneration: 7,
+      currentGeneration: 7,
+      authenticated: true,
+      visible: true,
+      aborted: false,
+    },
+    expected: true,
+  },
+  {
+    name: "logout rejects stale refresh",
+    input: {
+      startedGeneration: 7,
+      currentGeneration: 7,
+      authenticated: false,
+      visible: true,
+      aborted: false,
+    },
+    expected: false,
+  },
+  {
+    name: "hidden page rejects stale refresh",
+    input: {
+      startedGeneration: 7,
+      currentGeneration: 7,
+      authenticated: true,
+      visible: false,
+      aborted: false,
+    },
+    expected: false,
+  },
+  {
+    name: "generation change rejects stale refresh",
+    input: {
+      startedGeneration: 7,
+      currentGeneration: 8,
+      authenticated: true,
+      visible: true,
+      aborted: false,
+    },
+    expected: false,
+  },
+  {
+    name: "abort rejects stale refresh",
+    input: {
+      startedGeneration: 7,
+      currentGeneration: 7,
+      authenticated: true,
+      visible: true,
+      aborted: true,
+    },
+    expected: false,
+  },
+];
+for (const testCase of profileRefreshCases) {
+  assert.equal(
+    shouldApplyProfileRefresh(testCase.input),
+    testCase.expected,
+    testCase.name,
+  );
+}
 
 const expectedStateCopy = {
   stopped: {

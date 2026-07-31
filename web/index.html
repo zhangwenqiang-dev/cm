@@ -1586,6 +1586,7 @@
     }
 
     async function loadProfiles() {
+      const startedGeneration = profileRefreshGeneration;
       const body = await api("/api/profiles");
       state.profiles = body.data.profiles || [];
       const seededOwners = {};
@@ -1605,7 +1606,7 @@
       }
       renderProfiles();
       renderSelected();
-      refreshVisibleStatuses();
+      refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });
     }
 
     async function loadReleaseReminders(options = {}) {
@@ -2104,12 +2105,23 @@
       if (!state.auth?.authenticated || document.visibilityState !== "visible") return false;
       if (profileRefreshInFlight) return false;
       profileRefreshInFlight = true;
+      const background = options.background === true;
       const signal = options.signal;
-      const generation = options.generation ?? profileRefreshGeneration;
+      const startedGeneration = options.startedGeneration ?? profileRefreshGeneration;
       const rows = filteredProfiles();
       try {
-        const results = await Promise.all(rows.map((p) => refreshStatus(p.name, false, signal)));
-        if (signal?.aborted || generation !== profileRefreshGeneration || !state.auth?.authenticated || document.visibilityState !== "visible") {
+        const results = await Promise.all(rows.map((p) => refreshStatus(p.name, false, {
+          background: background,
+          signal: signal,
+          startedGeneration: startedGeneration
+        })));
+        if (!ConnectMacWorkbench.shouldApplyProfileRefresh({
+          startedGeneration: startedGeneration,
+          currentGeneration: profileRefreshGeneration,
+          authenticated: state.auth?.authenticated === true,
+          visible: document.visibilityState === "visible",
+          aborted: signal?.aborted === true
+        })) {
           return null;
         }
         renderProfiles();
@@ -2157,8 +2169,18 @@
         const controller = new AbortController();
         profileRefreshController = controller;
         try {
-          const refreshed = await refreshVisibleStatuses({ signal: controller.signal, generation: generation });
-          if (refreshed === null || generation !== profileRefreshGeneration || !state.auth?.authenticated) return;
+          const refreshed = await refreshVisibleStatuses({
+            background: true,
+            signal: controller.signal,
+            startedGeneration: generation
+          });
+          if (refreshed === null || !ConnectMacWorkbench.shouldApplyProfileRefresh({
+            startedGeneration: generation,
+            currentGeneration: profileRefreshGeneration,
+            authenticated: state.auth?.authenticated === true,
+            visible: document.visibilityState === "visible",
+            aborted: controller.signal.aborted
+          })) return;
           if (refreshed === true) {
             const updatedAt = formatBeijingTime(new Date());
             $("profileLastUpdated").textContent = "最后更新（北京时间）：" + updatedAt;
@@ -2166,7 +2188,13 @@
             $("profileLastUpdated").textContent = "状态更新失败，正在重试";
           }
         } catch (err) {
-          if (err.name !== "AbortError" && generation === profileRefreshGeneration && state.auth?.authenticated) {
+          if (err.name !== "AbortError" && ConnectMacWorkbench.shouldApplyProfileRefresh({
+            startedGeneration: generation,
+            currentGeneration: profileRefreshGeneration,
+            authenticated: state.auth?.authenticated === true,
+            visible: document.visibilityState === "visible",
+            aborted: controller.signal.aborted
+          })) {
             $("profileLastUpdated").textContent = "状态更新失败，正在重试";
           }
         } finally {
@@ -2192,12 +2220,22 @@
       }).format(date);
     }
 
-    async function refreshStatus(profile, showOutput, signal) {
+    async function refreshStatus(profile, showOutput, options = {}) {
       if (!profile || state.loadingStatus.has(profile)) return true;
+      const background = options.background === true;
+      const signal = options.signal;
+      const startedGeneration = options.startedGeneration ?? profileRefreshGeneration;
       state.loadingStatus.add(profile);
       try {
         const body = await api("/api/aws/status?profile=" + encodeURIComponent(profile), { signal: signal });
-        if (signal?.aborted) return null;
+        const shouldApply = ConnectMacWorkbench.shouldApplyProfileRefresh({
+          startedGeneration: startedGeneration,
+          currentGeneration: profileRefreshGeneration,
+          authenticated: state.auth?.authenticated === true,
+          visible: document.visibilityState === "visible",
+          aborted: signal?.aborted === true
+        });
+        if ((background && !shouldApply) || (!background && !state.auth?.authenticated)) return null;
         state.statuses[profile] = body.data;
         if (showOutput) {
           setOutput(body.output || "");
@@ -2206,6 +2244,14 @@
         return true;
       } catch (err) {
         if (err.name === "AbortError" || signal?.aborted) return null;
+        const shouldApply = ConnectMacWorkbench.shouldApplyProfileRefresh({
+          startedGeneration: startedGeneration,
+          currentGeneration: profileRefreshGeneration,
+          authenticated: state.auth?.authenticated === true,
+          visible: document.visibilityState === "visible",
+          aborted: signal?.aborted === true
+        });
+        if ((background && !shouldApply) || (!background && !state.auth?.authenticated)) return null;
         state.statuses[profile] = { decision: "error", error: String(err.message || err), ready: false };
         if (showOutput) {
           setOutput(String(err.message || err));

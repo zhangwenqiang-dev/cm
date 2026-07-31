@@ -186,6 +186,8 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		`profileRefreshInFlight`,
 		`new AbortController()`,
 		`profileRefreshGeneration`,
+		`background: true`,
+		`startedGeneration: generation`,
 		`状态更新失败，正在重试`,
 		`最后更新（北京时间）`,
 	} {
@@ -199,7 +201,9 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		`!state.auth?.authenticated`,
 		`document.visibilityState !== "visible"`,
 		`return false;`,
-		`generation !== profileRefreshGeneration`,
+		`ConnectMacWorkbench.shouldApplyProfileRefresh({`,
+		`background: background`,
+		`startedGeneration: startedGeneration`,
 		`renderProfiles();`,
 		`renderSelected();`,
 	} {
@@ -225,14 +229,46 @@ func TestWebHomeUsesWorkbenchEntryAndRefreshTimestamp(t *testing.T) {
 		t.Error("clearProfileRefreshTimer must clear the active timer")
 	}
 
-	refreshStatus := extractWebSource(t, html, "async function refreshStatus(profile, showOutput, signal)", "\n    async function runAWS(")
+	refreshStatus := extractWebSource(t, html, "async function refreshStatus(profile, showOutput, options", "\n    async function runAWS(")
 	for _, want := range []string{
 		`api("/api/aws/status?profile=" + encodeURIComponent(profile), { signal: signal })`,
+		`ConnectMacWorkbench.shouldApplyProfileRefresh({`,
+		`startedGeneration`,
 		`err.name === "AbortError"`,
-		`signal?.aborted`,
 	} {
 		if !strings.Contains(refreshStatus, want) {
 			t.Errorf("refreshStatus signal handling is missing %q", want)
+		}
+	}
+	const helperMarker = `ConnectMacWorkbench.shouldApplyProfileRefresh({`
+	const assignmentMarker = `state.statuses[profile] =`
+	previousAssignment := -1
+	assignmentCount := 0
+	for searchFrom := 0; ; {
+		next := strings.Index(refreshStatus[searchFrom:], assignmentMarker)
+		if next < 0 {
+			break
+		}
+		assignment := searchFrom + next
+		helperCall := strings.LastIndex(refreshStatus[:assignment], helperMarker)
+		if helperCall <= previousAssignment {
+			t.Errorf("refreshStatus assignment %d must have a fresh shouldApplyProfileRefresh check", assignmentCount+1)
+		}
+		previousAssignment = assignment
+		assignmentCount++
+		searchFrom = assignment + len(assignmentMarker)
+	}
+	if assignmentCount != 2 {
+		t.Errorf("refreshStatus status assignment count = %d, want 2", assignmentCount)
+	}
+
+	loadProfiles := extractWebSource(t, html, "async function loadProfiles()", "\n    async function loadReleaseReminders(")
+	for _, want := range []string{
+		`const startedGeneration = profileRefreshGeneration;`,
+		`refreshVisibleStatuses({ background: true, startedGeneration: startedGeneration });`,
+	} {
+		if !strings.Contains(loadProfiles, want) {
+			t.Errorf("loadProfiles background refresh is missing %q", want)
 		}
 	}
 }
