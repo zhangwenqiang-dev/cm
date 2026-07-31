@@ -4,23 +4,35 @@
   const ACTIVE_JOB_STATUSES = new Set(["starting", "running", "deferred"]);
   const ACTIVE_LIFECYCLE_STATES = new Set(["pending", "waiting"]);
   const ACTIVE_AUTO_RELEASE_STATES = new Set(["running", "retrying", "notifying"]);
+  const EFFECTIVE_STATES = new Set([
+    "unknown",
+    "stopped",
+    "creating",
+    "ready",
+    "releasing",
+    "blocked",
+  ]);
 
   function activeLifecycleJob(job, type, profileName) {
     if (!job || job.type !== type) return false;
-    if (profileName && job.profile !== profileName) return false;
-    return ACTIVE_JOB_STATUSES.has(job.status) ||
-      ACTIVE_LIFECYCLE_STATES.has(job.lifecycle_state || job.lifecycleState);
+    if (job.profile !== profileName) return false;
+
+    const lifecycleState = String(job.lifecycle_state || job.lifecycleState || "").trim();
+    if (lifecycleState) return ACTIVE_LIFECYCLE_STATES.has(lifecycleState);
+    return ACTIVE_JOB_STATUSES.has(job.status);
   }
 
   function effectiveState(input) {
     const model = input || {};
     const status = Object.prototype.hasOwnProperty.call(model, "status") ? model.status : model;
-    const profileName = model.profileName || model.profile || "";
+    const profileName = model.profileName || model.profile || status?.profile || "";
     const jobs = Array.isArray(model.jobs) ? model.jobs : [];
     const reminder = model.reminder || model.autoRelease || model.auto_release || null;
 
-    const releasingJob = jobs.some((job) => activeLifecycleJob(job, "aws-destroy", profileName));
-    const creatingJob = jobs.some((job) => activeLifecycleJob(job, "aws-open", profileName));
+    const releasingJob = !!profileName &&
+      jobs.some((job) => activeLifecycleJob(job, "aws-destroy", profileName));
+    const creatingJob = !!profileName &&
+      jobs.some((job) => activeLifecycleJob(job, "aws-open", profileName));
     const autoReleaseState = reminder &&
       (reminder.auto_release_state || reminder.autoReleaseState || reminder.state);
 
@@ -59,16 +71,16 @@
 
   function buildActionModel(input) {
     const options = input || {};
-    const state = options.effectiveState || options.state || "unknown";
+    const requestedState = options.effectiveState || options.state || "unknown";
+    const state = EFFECTIVE_STATES.has(requestedState) ? requestedState : "unknown";
     const mobile = options.mobile === true || options.isMobile === true;
     const localAgentOnline = options.localAgentOnline === true ||
       options.localAgent?.online === true;
     const busy = options.busy === true;
-    const canOperate = options.canOperate !== false;
-    const canAdmin = options.canAdmin !== false;
+    const canOperate = options.canOperate === true;
+    const canAdmin = options.canAdmin === true;
     const releasing = state === "releasing";
     const ready = state === "ready";
-    const known = state !== "unknown";
     const operateAllowed = canOperate && !busy;
     const releaseReason = "Mac 正在释放";
     const notReadyReason = "Mac 尚未就绪";
@@ -101,7 +113,7 @@
       extend: action(true, ready && operateAllowed, !operateAllowed ? operateReason : (releasing ? releaseReason : notReadyReason)),
       cleanup: action(
         canAdmin,
-        canAdmin && known && !ready && !releasing && !busy,
+        canAdmin && state === "stopped" && !busy,
         !canAdmin ? "需要管理员权限" : (busy ? "操作进行中" : (releasing ? releaseReason : (ready ? "Mac 已就绪" : "状态未知"))),
       ),
       events: action(true, true, ""),

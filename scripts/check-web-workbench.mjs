@@ -53,6 +53,32 @@ for (const lifecycle_state of ["pending", "waiting"]) {
 assert.equal(
   effectiveState({
     profileName: "build-mac",
+    status: { decision: "create" },
+    jobs: [{
+      profile: "build-mac",
+      type: "aws-destroy",
+      status: "deferred",
+      lifecycle_state: "finalized",
+    }],
+  }),
+  "stopped",
+);
+assert.equal(
+  effectiveState({
+    profileName: "build-mac",
+    status: { decision: "create" },
+    jobs: [{
+      profile: "build-mac",
+      type: "aws-open",
+      status: "running",
+      lifecycle_state: "failed",
+    }],
+  }),
+  "stopped",
+);
+assert.equal(
+  effectiveState({
+    profileName: "build-mac",
     status: { decision: "wait-ready" },
     jobs: [
       { profile: "build-mac", type: "aws-open", status: "running" },
@@ -60,6 +86,27 @@ assert.equal(
     ],
   }),
   "releasing",
+);
+assert.equal(
+  effectiveState({
+    status: { profile: "mac-a", decision: "create" },
+    jobs: [{ profile: "mac-b", type: "aws-destroy", status: "running" }],
+  }),
+  "stopped",
+);
+assert.equal(
+  effectiveState({
+    status: { profile: "mac-a", decision: "create" },
+    jobs: [{ profile: "mac-a", type: "aws-open", status: "running" }],
+  }),
+  "creating",
+);
+assert.equal(
+  effectiveState({
+    status: { decision: "create" },
+    jobs: [{ profile: "mac-b", type: "aws-destroy", status: "running" }],
+  }),
+  "stopped",
 );
 for (const auto_release_state of ["running", "retrying", "notifying"]) {
   assert.equal(
@@ -159,6 +206,41 @@ assert.equal(cannotAdmin.actions.cleanup.enabled, false);
 const canAdmin = actionModel({ effectiveState: "stopped", canAdmin: true });
 assert.equal(canAdmin.actions.cleanup.visible, true);
 assert.equal(canAdmin.actions.cleanup.enabled, true);
+
+for (const missingPermission of [undefined, null]) {
+  const denied = buildActionModel({
+    effectiveState: "stopped",
+    mobile: false,
+    localAgentOnline: true,
+    busy: false,
+    canOperate: missingPermission,
+    canAdmin: missingPermission,
+  });
+  assert.equal(denied.actions.open.enabled, false);
+  assert.equal(denied.actions.cleanup.visible, false);
+  assert.equal(denied.actions.cleanup.enabled, false);
+}
+const omittedPermissions = buildActionModel({
+  effectiveState: "stopped",
+  mobile: false,
+  localAgentOnline: true,
+  busy: false,
+});
+assert.equal(omittedPermissions.actions.open.enabled, false);
+assert.equal(omittedPermissions.actions.cleanup.visible, false);
+assert.equal(omittedPermissions.actions.cleanup.enabled, false);
+
+for (const effectiveState of ["creating", "releasing", "ready", "blocked", "unknown"]) {
+  assert.equal(
+    actionModel({ effectiveState }).actions.cleanup.enabled,
+    false,
+    `${effectiveState} must not allow cleanup`,
+  );
+}
+const invalidState = actionModel({ effectiveState: "typo-state" });
+assert.equal(invalidState.state, "unknown");
+assert.equal(invalidState.primary, "refresh");
+assert.equal(invalidState.actions.cleanup.enabled, false);
 
 const primaryCases = [
   ["stopped", false, "open"],
