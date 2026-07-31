@@ -14,89 +14,110 @@ const { effectiveState, buildActionModel } = context.window.ConnectMacWorkbench;
 assert.equal(effectiveState({ status: { decision: "create" } }), "stopped");
 assert.equal(effectiveState({ status: { decision: "wait-ready" } }), "creating");
 assert.equal(effectiveState({ status: { decision: "create", ready: true } }), "ready");
+for (const status of ["starting", "running", "deferred"]) {
+  assert.equal(
+    effectiveState({
+      profileName: "build-mac",
+      status: { decision: "create" },
+      jobs: [{ profile: "build-mac", type: "aws-destroy", status }],
+    }),
+    "releasing",
+  );
+  assert.equal(
+    effectiveState({
+      profileName: "build-mac",
+      status: { decision: "create" },
+      jobs: [{ profile: "build-mac", type: "aws-open", status }],
+    }),
+    "creating",
+  );
+}
+for (const lifecycle_state of ["pending", "waiting"]) {
+  assert.equal(
+    effectiveState({
+      profileName: "build-mac",
+      status: { decision: "create" },
+      jobs: [{ profile: "build-mac", type: "aws-destroy", lifecycle_state }],
+    }),
+    "releasing",
+  );
+  assert.equal(
+    effectiveState({
+      profileName: "build-mac",
+      status: { decision: "create" },
+      jobs: [{ profile: "build-mac", type: "aws-open", lifecycle_state }],
+    }),
+    "creating",
+  );
+}
 assert.equal(
   effectiveState({
     profileName: "build-mac",
-    status: { decision: "create" },
-    jobs: [{ profile: "build-mac", type: "aws-destroy", status: "running" }],
+    status: { decision: "wait-ready" },
+    jobs: [
+      { profile: "build-mac", type: "aws-open", status: "running" },
+      { profile: "build-mac", type: "aws-destroy", status: "starting" },
+    ],
   }),
   "releasing",
 );
-assert.equal(
-  effectiveState({
-    profileName: "build-mac",
-    status: { decision: "create" },
-    jobs: [{ profile: "build-mac", type: "aws-destroy", status: "deferred" }],
-  }),
-  "releasing",
-);
-assert.equal(
-  effectiveState({
-    profileName: "build-mac",
-    status: { decision: "create" },
-    jobs: [{ profile: "build-mac", type: "aws-destroy", lifecycle_state: "waiting" }],
-  }),
-  "releasing",
-);
-assert.equal(
-  effectiveState({
-    status: { decision: "create" },
-    reminder: { auto_release_state: "retrying" },
-  }),
-  "releasing",
-);
+for (const auto_release_state of ["running", "retrying", "notifying"]) {
+  assert.equal(
+    effectiveState({
+      status: { decision: "create" },
+      reminder: { auto_release_state },
+    }),
+    "releasing",
+  );
+}
 assert.equal(effectiveState({ status: { decision: "blocked" } }), "blocked");
 assert.equal(effectiveState({ status: { decision: "error" } }), "blocked");
 assert.equal(effectiveState({ status: { decision: "launch-on-host" } }), "creating");
 assert.equal(effectiveState({ status: { decision: "ready", error: "status failed" } }), "unknown");
 assert.equal(effectiveState({ status: null }), "unknown");
 
-const desktopReady = buildActionModel({
-  state: "ready",
-  isMobile: false,
-  localAgentOnline: true,
-});
+function actionModel(overrides = {}) {
+  return buildActionModel({
+    effectiveState: "ready",
+    mobile: false,
+    localAgentOnline: true,
+    busy: false,
+    canOperate: true,
+    canAdmin: true,
+    ...overrides,
+  });
+}
+
+const desktopReady = actionModel();
+assert.deepEqual(Object.keys(desktopReady).sort(), ["actions", "primary", "state"]);
+assert.equal(desktopReady.state, "ready");
 assert.equal(desktopReady.primary, "connect");
 for (const action of ["connect", "vnc", "transfer"]) {
   assert.deepEqual(
-    JSON.parse(JSON.stringify(desktopReady[action])),
+    JSON.parse(JSON.stringify(desktopReady.actions[action])),
     { visible: true, enabled: true, reason: "" },
   );
 }
-assert.equal(desktopReady.open.enabled, false);
+assert.equal(desktopReady.actions.open.enabled, false);
 
-const mobileReady = buildActionModel({
-  state: "ready",
-  isMobile: true,
-  localAgentOnline: true,
-});
+const mobileReady = actionModel({ mobile: true });
 assert.equal(mobileReady.primary, "refresh");
 for (const action of ["connect", "vnc", "transfer"]) {
-  assert.equal(mobileReady[action].visible, false);
+  assert.equal(mobileReady.actions[action].visible, false);
 }
 
-const releasing = buildActionModel({
-  state: "releasing",
-  isMobile: false,
-  localAgentOnline: true,
-});
+const releasing = actionModel({ effectiveState: "releasing" });
 for (const action of ["open", "release", "connect", "vnc", "transfer", "cleanup"]) {
-  assert.equal(releasing[action].enabled, false, `${action} must be disabled while releasing`);
+  assert.equal(releasing.actions[action].enabled, false, `${action} must be disabled while releasing`);
 }
 
-const offline = buildActionModel({
-  state: "ready",
-  isMobile: false,
-  localAgentOnline: false,
-});
-assert.equal(offline.connect.reason, "本机代理未连接");
+const offline = actionModel({ localAgentOnline: false });
+assert.equal(offline.primary, "connect");
+assert.equal(offline.actions.connect.enabled, false);
+assert.equal(offline.actions.connect.reason, "本机代理未连接");
 
-const notReady = buildActionModel({
-  state: "creating",
-  isMobile: false,
-  localAgentOnline: true,
-});
-assert.equal(notReady.connect.reason, "Mac 尚未就绪");
+const notReady = actionModel({ effectiveState: "creating" });
+assert.equal(notReady.actions.connect.reason, "Mac 尚未就绪");
 
 const expectedActions = [
   "refresh",
@@ -112,9 +133,47 @@ const expectedActions = [
 ];
 for (const action of expectedActions) {
   assert.deepEqual(
-    Object.keys(desktopReady[action]).sort(),
+    Object.keys(desktopReady.actions[action]).sort(),
     ["enabled", "reason", "visible"],
     `${action} must use the action contract`,
+  );
+}
+
+const busyReady = actionModel({ effectiveState: "ready", busy: true });
+for (const action of ["release", "connect", "vnc", "transfer", "extend"]) {
+  assert.equal(busyReady.actions[action].enabled, false, `${action} must be locked while busy`);
+}
+const busyStopped = actionModel({ effectiveState: "stopped", busy: true });
+assert.equal(busyStopped.actions.open.enabled, false);
+assert.equal(busyStopped.actions.cleanup.enabled, false);
+
+const cannotOperate = actionModel({ effectiveState: "ready", canOperate: false });
+for (const action of ["release", "connect", "vnc", "transfer", "extend"]) {
+  assert.equal(cannotOperate.actions[action].enabled, false, `${action} requires canOperate`);
+}
+assert.equal(actionModel({ effectiveState: "stopped", canOperate: false }).actions.open.enabled, false);
+
+const cannotAdmin = actionModel({ effectiveState: "stopped", canAdmin: false });
+assert.equal(cannotAdmin.actions.cleanup.visible, false);
+assert.equal(cannotAdmin.actions.cleanup.enabled, false);
+const canAdmin = actionModel({ effectiveState: "stopped", canAdmin: true });
+assert.equal(canAdmin.actions.cleanup.visible, true);
+assert.equal(canAdmin.actions.cleanup.enabled, true);
+
+const primaryCases = [
+  ["stopped", false, "open"],
+  ["ready", false, "connect"],
+  ["ready", true, "refresh"],
+  ["creating", false, "details"],
+  ["releasing", false, "details"],
+  ["blocked", false, "refresh"],
+  ["unknown", false, "refresh"],
+];
+for (const [effectiveState, mobile, primary] of primaryCases) {
+  assert.equal(
+    actionModel({ effectiveState, mobile }).primary,
+    primary,
+    `${effectiveState}/${mobile ? "mobile" : "desktop"} primary`,
   );
 }
 

@@ -5,6 +5,13 @@
   const ACTIVE_LIFECYCLE_STATES = new Set(["pending", "waiting"]);
   const ACTIVE_AUTO_RELEASE_STATES = new Set(["running", "retrying", "notifying"]);
 
+  function activeLifecycleJob(job, type, profileName) {
+    if (!job || job.type !== type) return false;
+    if (profileName && job.profile !== profileName) return false;
+    return ACTIVE_JOB_STATUSES.has(job.status) ||
+      ACTIVE_LIFECYCLE_STATES.has(job.lifecycle_state || job.lifecycleState);
+  }
+
   function effectiveState(input) {
     const model = input || {};
     const status = Object.prototype.hasOwnProperty.call(model, "status") ? model.status : model;
@@ -12,18 +19,15 @@
     const jobs = Array.isArray(model.jobs) ? model.jobs : [];
     const reminder = model.reminder || model.autoRelease || model.auto_release || null;
 
-    const releasingJob = jobs.some((job) => {
-      if (!job || job.type !== "aws-destroy") return false;
-      if (profileName && job.profile !== profileName) return false;
-      return ACTIVE_JOB_STATUSES.has(job.status) ||
-        ACTIVE_LIFECYCLE_STATES.has(job.lifecycle_state || job.lifecycleState);
-    });
+    const releasingJob = jobs.some((job) => activeLifecycleJob(job, "aws-destroy", profileName));
+    const creatingJob = jobs.some((job) => activeLifecycleJob(job, "aws-open", profileName));
     const autoReleaseState = reminder &&
       (reminder.auto_release_state || reminder.autoReleaseState || reminder.state);
 
     if (releasingJob || ACTIVE_AUTO_RELEASE_STATES.has(autoReleaseState)) {
       return "releasing";
     }
+    if (creatingJob) return "creating";
     if (!status || status.error) return "unknown";
     if (status.ready === true) return "ready";
 
@@ -44,50 +48,71 @@
   }
 
   function action(visible, enabled, reason) {
+    const isVisible = visible === true;
+    const isEnabled = isVisible && enabled === true;
     return {
-      visible: visible,
-      enabled: enabled,
-      reason: enabled ? "" : (reason || ""),
+      visible: isVisible,
+      enabled: isEnabled,
+      reason: isEnabled ? "" : (reason || ""),
     };
   }
 
   function buildActionModel(input) {
     const options = input || {};
-    const state = options.state || options.effectiveState || "unknown";
-    const isMobile = options.isMobile === true || options.mobile === true;
+    const state = options.effectiveState || options.state || "unknown";
+    const mobile = options.mobile === true || options.isMobile === true;
     const localAgentOnline = options.localAgentOnline === true ||
-      (options.localAgent && options.localAgent.online === true);
+      options.localAgent?.online === true;
+    const busy = options.busy === true;
+    const canOperate = options.canOperate !== false;
+    const canAdmin = options.canAdmin !== false;
     const releasing = state === "releasing";
     const ready = state === "ready";
     const known = state !== "unknown";
-    const releaseReason = releasing ? "Mac 正在释放" : "";
+    const operateAllowed = canOperate && !busy;
+    const releaseReason = "Mac 正在释放";
     const notReadyReason = "Mac 尚未就绪";
+    const operateReason = busy ? "操作进行中" : "无操作权限";
 
     let localReason = "";
-    if (isMobile) {
+    if (mobile) {
       localReason = "移动端不可用";
+    } else if (!operateAllowed) {
+      localReason = operateReason;
     } else if (!ready) {
-      localReason = releasing ? releaseReason : notReadyReason;
+      localReason = notReadyReason;
     } else if (!localAgentOnline) {
       localReason = "本机代理未连接";
     }
-    const localEnabled = !isMobile && ready && localAgentOnline && !releasing;
+    const localEnabled = !mobile && ready && localAgentOnline && operateAllowed;
+    const primary = state === "stopped"
+      ? "open"
+      : (state === "ready" && !mobile
+        ? "connect"
+        : ((state === "creating" || state === "releasing") ? "details" : "refresh"));
 
-    const model = {
-      primary: !isMobile && localEnabled ? "connect" : "refresh",
+    const actions = {
       refresh: action(true, true, ""),
-      open: action(true, known && !ready && !releasing, releasing ? releaseReason : (ready ? "Mac 已就绪" : "状态未知")),
-      release: action(true, ready && !releasing, releasing ? releaseReason : notReadyReason),
-      connect: action(!isMobile, localEnabled, localReason),
-      vnc: action(!isMobile, localEnabled, localReason),
-      transfer: action(!isMobile, localEnabled, localReason),
-      extend: action(true, ready && !releasing, releasing ? releaseReason : notReadyReason),
-      cleanup: action(true, known && !ready && !releasing, releasing ? releaseReason : (ready ? "Mac 已就绪" : "状态未知")),
+      open: action(true, state === "stopped" && operateAllowed, !operateAllowed ? operateReason : (releasing ? releaseReason : "Mac 当前不可打开")),
+      release: action(true, ready && operateAllowed, !operateAllowed ? operateReason : (releasing ? releaseReason : notReadyReason)),
+      connect: action(!mobile, localEnabled, localReason),
+      vnc: action(!mobile, localEnabled, localReason),
+      transfer: action(!mobile, localEnabled, localReason),
+      extend: action(true, ready && operateAllowed, !operateAllowed ? operateReason : (releasing ? releaseReason : notReadyReason)),
+      cleanup: action(
+        canAdmin,
+        canAdmin && known && !ready && !releasing && !busy,
+        !canAdmin ? "需要管理员权限" : (busy ? "操作进行中" : (releasing ? releaseReason : (ready ? "Mac 已就绪" : "状态未知"))),
+      ),
       events: action(true, true, ""),
       details: action(true, true, ""),
     };
 
-    return model;
+    return {
+      state: state,
+      primary: primary,
+      actions: actions,
+    };
   }
 
   window.ConnectMacWorkbench = {
