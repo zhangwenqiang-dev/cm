@@ -48,6 +48,7 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 		t.Fatalf("read web index: %v", err)
 	}
 	html := string(data)
+	renderWorkbench := extractWebSource(t, html, "function renderWorkbench(p, status, reminder)", "\n    function renderSelected()")
 	for _, want := range []string{
 		`ConnectMacWorkbench.effectiveState({`,
 		`reminder: reminder,`,
@@ -55,10 +56,25 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 		`ConnectMacWorkbench.buildActionModel({`,
 		`applyWorkbenchAction("openMacBtn", model.actions.open`,
 		`applyWorkbenchAction("releaseMacBtn", model.actions.release`,
+	} {
+		if !strings.Contains(renderWorkbench, want) {
+			t.Fatalf("renderWorkbench releasing contract missing %q", want)
+		}
+	}
+
+	profileStatusSummary := extractWebSource(t, html, "function profileStatusSummary(status, profileName)", "\n    async function refreshVisibleStatuses()")
+	for _, want := range []string{
+		`autoReleaseActive(state.reminders[profileName], profileName)`,
+		`return "正在释放";`,
+	} {
+		if !strings.Contains(profileStatusSummary, want) {
+			t.Fatalf("profileStatusSummary releasing source missing %q", want)
+		}
+	}
+
+	for _, want := range []string{
 		`if (reminder?.status === "released" || reminder?.auto_release_state === "released") return false;`,
 		`reminder?.auto_release_state === "running" || reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "notifying"`,
-		`statusBadge(status, p.name)`,
-		`const cls = releasing ? "wait" : (status.ready ? "ready" : statusClass(status.decision));`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("web releasing state contract missing %q", want)

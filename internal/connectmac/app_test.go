@@ -5365,17 +5365,25 @@ func TestAppWebVNCReadinessGating(t *testing.T) {
 		t.Fatalf("read web index: %v", err)
 	}
 	html := string(data)
-	setBusy := extractWebSource(t, html, "function setBusy(busy, message", "\n    function setOutput(text)")
-	if !strings.Contains(setBusy, `document.querySelectorAll("[data-start]")`) ||
-		!strings.Contains(setBusy, `button.disabled = busy || !profileReady(profile);`) {
-		t.Fatalf("setBusy must disable VNC start buttons while busy or not ready; function = %s", setBusy)
+	renderWorkbench := extractWebSource(t, html, "function renderWorkbench(p, status, reminder)", "\n    function renderSelected()")
+	if !strings.Contains(renderWorkbench, `applyWorkbenchAction("vncBtn", model.actions.vnc);`) {
+		t.Fatalf("renderWorkbench must drive VNC availability from model.actions.vnc; function = %s", renderWorkbench)
 	}
 
-	renderProfiles := extractWebSource(t, html, "function renderProfiles()", "\n    function renderSelected()")
-	startHandler := extractWebSource(t, renderProfiles, `document.querySelectorAll("[data-start]")`, `document.querySelectorAll("[data-sync]")`)
-	if !strings.Contains(startHandler, `if (!profileReady(profile)) {`) ||
-		!strings.Contains(startHandler, `return;`) {
-		t.Fatalf("VNC click path must refuse profiles that are not ready; handler = %s", startHandler)
+	startTunnel := extractWebSource(t, html, "async function startTunnel(profile)", "\n    async function openSync(profile)")
+	for _, want := range []string{
+		`if (!profileReady(profile)) {`,
+		`setStatus("Mac 未 ready，不能打开 VNC。");`,
+		`return;`,
+	} {
+		if !strings.Contains(startTunnel, want) {
+			t.Fatalf("startTunnel readiness guard is missing %q; function = %s", want, startTunnel)
+		}
+	}
+	readinessGuard := strings.Index(startTunnel, `if (!profileReady(profile)) {`)
+	agentGuard := strings.Index(startTunnel, `if (!state.localAgent.online) {`)
+	if readinessGuard < 0 || agentGuard < 0 || readinessGuard > agentGuard {
+		t.Fatalf("startTunnel must reject non-ready profiles before checking the local agent; function = %s", startTunnel)
 	}
 }
 
@@ -5487,12 +5495,24 @@ function setOutput(value) { outputs.push(value); }
 function showView(value) { views.push(value); }
 function renderProfiles() { renderProfileCount++; }
 function renderSelected() { renderSelectedCount++; }
+function profileReady() { return scenario.ready !== false; }
 async function loadEvents(value) {
   loadEventsCalls.push(value);
   if (scenario.loadEventsError) throw scenario.loadEventsError;
 }
 
 ` + payloadFunctions + "\n" + fn + `
+
+reset({
+  profile: "not-ready-profile",
+  profileYAML: "name: not-ready-profile\napple_email: not-ready@example.com\n",
+  ready: false
+});
+await startTunnel("not-ready-profile");
+assert.deepEqual(calls, []);
+assert.deepEqual(busyTransitions, []);
+assert.deepEqual(views, []);
+assert.equal(statuses.at(-1), "Mac 未 ready，不能打开 VNC。");
 
 reset({
   profile: "reject-profile",

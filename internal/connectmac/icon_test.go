@@ -40,16 +40,13 @@ func TestConnectMacIconAssetAndLocalAgentEndpoint(t *testing.T) {
 	for _, want := range []string{
 		`href="assets/connectmac-mark.svg"`,
 		`class="brand-title"`,
-		`class=\"action-icon\" aria-hidden=\"true\">↗</span>连接`,
-		`class=\"action-icon\" aria-hidden=\"true\">▣</span>VNC`,
-		`class=\"action-icon\" aria-hidden=\"true\">⇅</span>传输`,
-		`class=\"action-icon\" aria-hidden=\"true\">✓</span>选择`,
+		`id="terminalBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">↗</span>连接</button>`,
+		`id="vncBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">▣</span>VNC</button>`,
+		`id="syncBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">⇅</span>传输</button>`,
+		`class=\"action-icon\" aria-hidden=\"true\">→</span><span class=\"desktop-entry-label\">进入工作台</span>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("Web icon contract missing %q", want)
 		}
-	}
-	if strings.Index(html, `data-sync=\"`) > strings.Index(html, `data-profile=\"`) {
-		t.Fatalf("select action must appear after transfer action")
 	}
 }

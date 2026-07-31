@@ -826,9 +826,9 @@
                 <button id="releaseMacBtn" class="danger">释放</button>
                 <button id="extendReminderBtn">延长提醒</button>
                 <button id="cleanupRecordsBtn" class="admin-only">清理记录</button>
-                <button id="syncBtn" class="local-action mobile-local-hidden">传输</button>
-                <button id="terminalBtn" class="local-action mobile-local-hidden">连接</button>
-                <button id="vncBtn" class="local-action mobile-local-hidden">VNC</button>
+                <button id="syncBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">⇅</span>传输</button>
+                <button id="terminalBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">↗</span>连接</button>
+                <button id="vncBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">▣</span>VNC</button>
               </div>
               <p id="workbenchActionReason" class="workbench-action-reason">选择一个 profile 后开始。</p>
             </div>
@@ -1713,7 +1713,7 @@
           "<td data-label=\"负责人\">" + escapeHTML(ownerNames(p).join(", ") || "-") + "</td>" +
           "<td data-label=\"Region\">" + escapeHTML(p.region || "-") + "</td>" +
           "<td data-label=\"状态\"><span class=\"profile-status-summary " + summaryClass + "\">" + escapeHTML(summary) + "</span></td>" +
-          "<td data-label=\"操作\"><button type=\"button\" class=\"profile-workbench-entry\" data-workbench-entry=\"" + escapeAttr(p.name) + "\"><span class=\"desktop-entry-label\">进入工作台</span><span class=\"mobile-entry-label\">管理</span></button></td>" +
+          "<td data-label=\"操作\"><button type=\"button\" class=\"profile-workbench-entry\" data-workbench-entry=\"" + escapeAttr(p.name) + "\"><span class=\"action-icon\" aria-hidden=\"true\">→</span><span class=\"desktop-entry-label\">进入工作台</span><span class=\"mobile-entry-label\">管理</span></button></td>" +
         "</tr>";
       }).join("") : "<tr><td colspan=\"6\" class=\"muted\">没有匹配的 profile。</td></tr>";
       document.querySelectorAll("[data-workbench-entry]").forEach((button) => {
@@ -2502,6 +2502,10 @@
 
     async function startTunnel(profile) {
       if (state.busy || !profile) return;
+      if (!profileReady(profile)) {
+        setStatus("Mac 未 ready，不能打开 VNC。");
+        return;
+      }
       if (!state.localAgent.online) {
         setStatus("本机代理未启动，请先运行 cm local-agent");
         return;
