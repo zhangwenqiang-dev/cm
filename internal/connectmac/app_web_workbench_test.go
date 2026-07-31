@@ -260,6 +260,70 @@ func TestWebWorkbenchStructure(t *testing.T) {
 	}
 }
 
+func TestWebWorkbenchDialogContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`id="awsConfirmProfile"`,
+		`id="awsConfirmApple"`,
+		`id="awsConfirmOwner"`,
+		`id="awsConfirmResourceSummary"`,
+		`id="awsConfirmEIPNotice"`,
+		`data-dialog-initial-focus`,
+		`function openDialog(`,
+		`function closeDialog(`,
+		`function trapDialogFocus(`,
+		`function validatePendingAWS(`,
+		`previewSucceeded: true`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("AWS confirmation contract missing %q", want)
+		}
+	}
+
+	confirm := webInlineFunctionSource(t, html, `async function confirmPendingAWS()`)
+	for _, want := range []string{
+		`validatePendingAWS()`,
+		`runAWS(pending.command, true)`,
+	} {
+		if !strings.Contains(confirm, want) {
+			t.Errorf("AWS confirmation validation missing %q", want)
+		}
+	}
+	validate := webInlineFunctionSource(t, html, `function validatePendingAWS()`)
+	for _, want := range []string{`profile.name !== state.pendingAWS.profile`, `model.actions.open`, `model.actions.release`} {
+		if !strings.Contains(validate, want) {
+			t.Errorf("AWS pending preview validation missing %q", want)
+		}
+	}
+
+	for _, contract := range []struct {
+		function string
+		want     string
+	}{
+		{`async function addMember()`, `focusInvalidField(`},
+		{`async function saveMemberPassword()`, `focusInvalidField(`},
+		{`async function changeOwnPassword()`, `focusInvalidField(`},
+		{`async function saveReleaseReminder()`, `focusInvalidField(`},
+		{`async function saveManagedProfile()`, `focusInvalidField(`},
+		{`async function addMember()`, `closeMemberForm();`},
+		{`async function saveMemberPassword()`, `closeMemberPasswordEditor();`},
+		{`async function changeOwnPassword()`, `closeOwnPasswordEditor();`},
+		{`async function saveReleaseReminder()`, `closeReleaseReminderEditor();`},
+		{`async function saveManagedProfile()`, `closeProfileForm();`},
+		{`async function saveMemberProfiles()`, `closeMemberProfileEditor();`},
+		{`async function runAPITokenAction(action, self, email)`, `if (action === "delete") closeAPIToken();`},
+	} {
+		source := webInlineFunctionSource(t, html, contract.function)
+		if !strings.Contains(source, contract.want) {
+			t.Errorf("%s dialog behavior missing %q", contract.function, contract.want)
+		}
+	}
+}
+
 func TestWebWorkbenchStateModel(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {

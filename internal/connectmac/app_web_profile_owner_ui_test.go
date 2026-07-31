@@ -63,6 +63,29 @@ func TestWebProfileOwnerLoadingContract(t *testing.T) {
 	if strings.Contains(loadOwners[catchStart:], "state.profileOwners =") {
 		t.Fatal("failed profile owner reconciliation must preserve the seeded/current owner map")
 	}
+	ownerValue := webFunctionForContractTest(t, html, "function confirmOpenOwnerValue(profileName)", "function setConfirmOpenOwner(")
+	if strings.Contains(ownerValue, "state.profileOwners") {
+		t.Fatal("open confirmation owner must not be inferred from a previous profile owner")
+	}
+}
+
+func TestWebProfileOwnerConfirmationDialogContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
+	if err != nil {
+		t.Fatalf("read web index: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		`isAdmin() && pending.command === "open" && !ownerEmail`,
+		`state.auth?.member?.email || ""`,
+		`$("awsConfirmOwner").textContent`,
+		`$("runAWSConfirmBtn").disabled = !validation.valid;`,
+		`focusInvalidField(`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("profile owner confirmation contract missing %q", want)
+		}
+	}
 }
 
 func TestAppWebProfileOwnersFiltersNonAdminAccess(t *testing.T) {
