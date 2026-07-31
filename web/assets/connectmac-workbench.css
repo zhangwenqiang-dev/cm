@@ -1,3 +1,7 @@
+:root {
+  --workbench-focus-ring: #174ea6;
+}
+
 .view.workbench {
   display: grid;
 }
@@ -7,7 +11,7 @@ input:focus-visible,
 select:focus-visible,
 summary:focus-visible,
 [tabindex]:focus-visible {
-  outline: 3px solid rgba(36, 107, 254, .35);
+  outline: 3px solid var(--workbench-focus-ring);
   outline-offset: 2px;
 }
 
@@ -28,7 +32,7 @@ summary:focus-visible,
 }
 
 #profilesView .profile-home-row:focus-visible {
-  outline: 3px solid rgba(36, 107, 254, .18);
+  outline: 3px solid var(--workbench-focus-ring);
   outline-offset: -3px;
 }
 
@@ -133,6 +137,7 @@ summary:focus-visible,
 }
 
 .workbench-actions {
+  min-width: 0;
   width: 100%;
   display: flex;
   flex-wrap: wrap;
@@ -142,9 +147,23 @@ summary:focus-visible,
 
 .workbench-actions button {
   flex: 0 0 auto;
+  max-width: 100%;
   min-width: 88px;
   min-height: 38px;
   white-space: nowrap;
+}
+
+.workbench-actions button[aria-disabled="true"],
+.workbench-task-head button[aria-disabled="true"] {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.workbench-actions button[aria-disabled="true"]:hover,
+.workbench-task-head button[aria-disabled="true"]:hover {
+  border-color: var(--line);
+  box-shadow: none;
+  transform: none;
 }
 
 .selected-profile-name,

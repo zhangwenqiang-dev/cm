@@ -56,6 +56,7 @@
     .auth-card p { margin: 0; color: var(--muted); }
     .auth-card input { width: 100%; }
     .form-grid { display: grid; gap: 10px; }
+    .auth-field { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
     .auth-actions { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
     header {
       min-height: 58px;
@@ -501,7 +502,7 @@
     .section-head h2 { font-size: 15px; }
     .toolbar { gap: 10px; }
     input, select, button { border-radius: 8px; }
-    input:focus, select:focus { border-color: #86aefb; box-shadow: 0 0 0 3px rgba(36, 107, 254, .12); outline: 0; }
+    input:focus, select:focus { border-color: #86aefb; box-shadow: 0 0 0 3px rgba(36, 107, 254, .12); }
     button { transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease, transform .15s ease; }
     button:hover:not(:disabled) { box-shadow: 0 2px 6px rgba(16, 24, 40, .10); transform: translateY(-1px); }
     button.primary { background: #246bfe; border-color: #246bfe; box-shadow: 0 3px 8px rgba(36, 107, 254, .20); }
@@ -758,17 +759,33 @@ cm local-agent start</pre>
       <h1 id="authTitle">ConnectMac 登录</h1>
       <p id="authSubtitle">请输入用户名、密码，并完成校验后登录。</p>
       <div id="setupForm" class="form-grid hidden">
-        <input id="setupName" aria-label="管理员姓名" placeholder="管理员姓名">
-        <input id="setupEmail" aria-label="管理员邮箱或用户名" placeholder="管理员邮箱 / 用户名">
-        <input id="setupPassword" type="password" aria-label="管理员密码" placeholder="管理员密码，至少 8 位">
+        <div class="auth-field">
+          <label for="setupName">管理员姓名</label>
+          <input id="setupName" placeholder="例如：张文强">
+        </div>
+        <div class="auth-field">
+          <label for="setupEmail">管理员邮箱 / 用户名</label>
+          <input id="setupEmail" placeholder="name@example.com">
+        </div>
+        <div class="auth-field">
+          <label for="setupPassword">管理员密码</label>
+          <input id="setupPassword" type="password" placeholder="至少 8 位">
+        </div>
       </div>
       <div id="loginForm" class="form-grid">
-        <input id="loginUsername" aria-label="用户名或邮箱" placeholder="用户名 / 邮箱">
-        <input id="loginPassword" type="password" aria-label="密码" placeholder="密码">
+        <div class="auth-field">
+          <label for="loginUsername">用户名 / 邮箱</label>
+          <input id="loginUsername" placeholder="用户名 / 邮箱">
+        </div>
+        <div class="auth-field">
+          <label for="loginPassword">密码</label>
+          <input id="loginPassword" type="password" placeholder="密码">
+        </div>
       </div>
-      <div class="form-grid">
+      <div class="form-grid auth-field">
+        <label for="challengeAnswer">校验题答案</label>
         <strong id="challengeQuestion">校验题加载中...</strong>
-        <input id="challengeAnswer" aria-label="校验题答案" aria-describedby="challengeQuestion" placeholder="请输入上面问题的答案">
+        <input id="challengeAnswer" aria-describedby="challengeQuestion" placeholder="请输入上面问题的答案">
       </div>
       <div class="auth-actions">
         <button id="refreshChallengeBtn">换一题</button>
@@ -854,15 +871,23 @@ cm local-agent start</pre>
               <div class="workbench-eyebrow">建议操作</div>
               <h2 id="workbenchRecommendation">先刷新当前 Mac 状态</h2>
               <p id="workbenchRecommendationDetail" class="workbench-recommendation-detail">状态确认后，这里会给出下一步操作建议。</p>
-              <div class="workbench-actions workbench-mobile-actions" role="group" aria-label="Mac 操作" aria-describedby="workbenchActionReason">
+              <div class="workbench-actions workbench-mobile-actions" role="group" aria-label="Mac 操作">
                 <button id="statusBtn">状态</button>
+                <span id="statusBtnReason" class="visually-hidden"></span>
                 <button id="openMacBtn" class="primary">打开</button>
+                <span id="openMacBtnReason" class="visually-hidden"></span>
                 <button id="releaseMacBtn" class="danger">释放</button>
+                <span id="releaseMacBtnReason" class="visually-hidden"></span>
                 <button id="extendReminderBtn">延长提醒</button>
+                <span id="extendReminderBtnReason" class="visually-hidden"></span>
                 <button id="cleanupRecordsBtn" class="admin-only">清理记录</button>
+                <span id="cleanupRecordsBtnReason" class="visually-hidden"></span>
                 <button id="syncBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">⇅</span>传输</button>
+                <span id="syncBtnReason" class="visually-hidden"></span>
                 <button id="terminalBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">↗</span>连接</button>
+                <span id="terminalBtnReason" class="visually-hidden"></span>
                 <button id="vncBtn" class="local-action mobile-local-hidden"><span class="action-icon" aria-hidden="true">▣</span>VNC</button>
+                <span id="vncBtnReason" class="visually-hidden"></span>
               </div>
               <p id="workbenchActionReason" class="workbench-action-reason">选择一个 profile 后开始。</p>
             </div>
@@ -874,6 +899,7 @@ cm local-agent start</pre>
                   <h2>运行进度</h2>
                 </div>
                 <button id="eventsBtn">事件</button>
+                <span id="eventsBtnReason" class="visually-hidden"></span>
               </div>
               <div id="workbenchEmptyTask" class="workbench-empty-task" role="status" aria-live="polite">暂无后台任务</div>
               <div id="workbenchActiveTask" class="workbench-active-task hidden" aria-live="polite">
@@ -1290,9 +1316,20 @@ cm local-agent start</pre>
 
     function setBusy(busy, message = "处理中...") {
       state.busy = busy;
+      const workbenchActions = new Set([
+        "statusBtn",
+        "openMacBtn",
+        "releaseMacBtn",
+        "extendReminderBtn",
+        "cleanupRecordsBtn",
+        "syncBtn",
+        "terminalBtn",
+        "vncBtn",
+        "eventsBtn",
+      ]);
       for (const id of ["statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "autoReleaseToggleBtn", "autoReleaseCloseBtn", "autoReleaseCancelBtn", "autoReleaseConfirmBtn", "cleanupRecordsBtn", "syncBtn", "vncBtn", "syncPushBtn", "syncPullBtn", "syncPushTerminalRetryBtn", "syncPullTerminalRetryBtn", "syncRefreshHistoryBtn", "syncPushBrowseBtn", "syncPullBrowseBtn", "syncPushLocalPath", "syncPushRemotePath", "syncPullRemotePath", "syncPullLocalPath", "terminalBtn", "eventsBtn", "refresh", "refreshMembers", "refreshManagedProfilesBtn", "openProfileFormBtn", "saveProfileFormBtn", "cancelProfileFormBtn", "profileFormCloseBtn", "saveMemberProfilesBtn", "cancelMemberProfilesBtn", "memberProfileCloseBtn", "selectAllMemberProfilesBtn", "clearMemberProfilesBtn", "memberPasswordCloseBtn", "cancelMemberPasswordBtn", "saveMemberPasswordBtn", "memberNewPassword", "memberConfirmPassword", "ownPasswordCloseBtn", "cancelOwnPasswordBtn", "openOwnPasswordBtn", "generateOwnTokenBtn", "apiTokenCloseBtn", "closeAPITokenBtn", "copyAPITokenBtn", "regenerateAPITokenBtn", "deleteAPITokenBtn", "awsConfirmCloseBtn", "cancelAWSConfirmBtn", "runAWSConfirmBtn", "releaseReminderCloseBtn", "cancelReleaseReminderBtn", "saveReleaseReminderBtn", "openMemberFormBtn", "memberFormCloseBtn", "cancelMemberFormBtn", "addMemberBtn", "memberName", "memberEmail", "memberPassword", "memberRole", "assignMemberSelect", "saveSettingsBtn", "settingsDefaultOwner", "settingsStatusFilter", "settingsBackgroundConfirm", "settingsShowReleased", "logoutBtn", "authSubmitBtn", "refreshChallengeBtn", "accountSettingsBtn", "currentUserBtn", "refreshAccountChallengeBtn", "saveAccountEmailBtn", "accountEmail", "accountPassword", "accountChallengeAnswer", "userCurrentPassword", "userNewPassword", "userConfirmPassword", "changeOwnPasswordBtn", "localAgentRepairBtn", "copyLocalAgentCommandsBtn", "recheckLocalAgentBtn", "localAgentRepairCloseBtn"]) {
         const el = $(id);
-        if (el) el.disabled = busy;
+        if (el && !workbenchActions.has(id)) el.disabled = busy;
       }
       document.querySelectorAll("[data-profile], [data-workbench-entry]").forEach((button) => {
         button.disabled = busy;
@@ -1323,6 +1360,14 @@ cm local-agent start</pre>
       if (!busy) {
         if (!$("awsConfirmLayer").classList.contains("hidden")) renderAWSConfirmValidation();
         scheduleDialogFocusFlush();
+      }
+      if (state.auth) {
+        const profile = selectedProfile();
+        renderWorkbench(
+          profile,
+          profile ? state.statuses[profile.name] : null,
+          profile ? state.reminders[profile.name] : null,
+        );
       }
     }
 
@@ -1620,12 +1665,25 @@ cm local-agent start</pre>
       }, 5000);
     }
 
+    function updateLiveRegion(id, text) {
+      const node = $(id);
+      if (!node || node.textContent === text) return false;
+      node.textContent = text;
+      return true;
+    }
+
     function renderLocalAgentStatus() {
       document.body.classList.toggle("local-agent-off", !state.localAgent.online);
-      $("localAgentStatus").textContent = state.localAgent.online ? "本机代理已连接" : (state.localAgent.errorReason || localAgentOfflineMessage);
+      updateLiveRegion(
+        "localAgentStatus",
+        state.localAgent.online ? "本机代理已连接" : (state.localAgent.errorReason || localAgentOfflineMessage),
+      );
       $("localAgentRepairBtn").classList.toggle("hidden", state.localAgent.online);
       if (!$("localAgentRepairLayer").classList.contains("hidden")) {
-        $("localAgentRepairStatus").textContent = state.localAgent.online ? "本机代理已连接，可以关闭此窗口。" : "仍未检测到本机代理。";
+        updateLiveRegion(
+          "localAgentRepairStatus",
+          state.localAgent.online ? "本机代理已连接，可以关闭此窗口。" : "仍未检测到本机代理。",
+        );
       }
     }
 
@@ -1674,7 +1732,8 @@ cm local-agent start</pre>
       $("localAgentRepairStatus").textContent = "正在检测本机代理...";
       try {
         const online = await detectLocalAgent();
-        $("localAgentRepairStatus").textContent = online ? "本机代理已连接，可以关闭此窗口。" : "仍未检测到本机代理，请确认命令已成功执行。";
+        $("localAgentRepairStatus").textContent =
+          online ? "本机代理已连接，可以关闭此窗口。" : "仍未检测到本机代理，请确认命令已成功执行。";
       } finally {
         button.disabled = false;
       }
@@ -2320,14 +2379,33 @@ cm local-agent start</pre>
 
     function applyWorkbenchAction(id, action) {
       const button = $(id);
+      const reasonID = id + "Reason";
+      const reason = $(reasonID);
       button.classList.toggle("hidden", !action.visible);
-      button.disabled = !action.enabled;
+      button.disabled = false;
+      button.setAttribute("aria-disabled", String(!action.enabled));
       button.title = action.reason || "";
+      if (reason) reason.textContent = action.reason || "";
       if (action.visible && !action.enabled && action.reason) {
-        button.setAttribute("aria-describedby", "workbenchActionReason");
+        button.setAttribute("aria-describedby", reasonID);
       } else {
         button.removeAttribute("aria-describedby");
       }
+    }
+
+    function workbenchActionEnabled(id) {
+      return $(id)?.getAttribute("aria-disabled") !== "true";
+    }
+
+    function guardWorkbenchAction(id, handler) {
+      return (event) => {
+        if (!workbenchActionEnabled(id)) {
+          event?.preventDefault();
+          event?.stopImmediatePropagation();
+          return false;
+        }
+        return handler(event);
+      };
     }
 
     function renderWorkbench(p, status, reminder) {
@@ -5362,7 +5440,7 @@ cm local-agent start</pre>
       }
     });
     $("addMemberBtn").addEventListener("click", addMember);
-    $("eventsBtn").addEventListener("click", () => loadEvents(true, !!state.eventCursor));
+    $("eventsBtn").addEventListener("click", guardWorkbenchAction("eventsBtn", () => loadEvents(true, !!state.eventCursor)));
     $("includeSystemEvents").addEventListener("change", () => {
       if (!isAdmin()) {
         $("includeSystemEvents").checked = false;
@@ -5374,9 +5452,9 @@ cm local-agent start</pre>
     $("refreshJobs").addEventListener("click", loadJobs);
     $("search").addEventListener("input", renderProfiles);
     $("statusFilter").addEventListener("change", renderProfiles);
-    $("statusBtn").addEventListener("click", handleWorkbenchStatusAction);
-    $("openMacBtn").addEventListener("click", () => previewAWS("open"));
-    $("releaseMacBtn").addEventListener("click", () => previewAWS("destroy"));
+    $("statusBtn").addEventListener("click", guardWorkbenchAction("statusBtn", handleWorkbenchStatusAction));
+    $("openMacBtn").addEventListener("click", guardWorkbenchAction("openMacBtn", () => previewAWS("open")));
+    $("releaseMacBtn").addEventListener("click", guardWorkbenchAction("releaseMacBtn", () => previewAWS("destroy")));
     $("assignMemberSelect").addEventListener("change", () => {
       const p = selectedProfile();
       if (!p) return;
@@ -5387,7 +5465,7 @@ cm local-agent start</pre>
       }
       renderSelected();
     });
-    $("extendReminderBtn").addEventListener("click", openReleaseReminderEditor);
+    $("extendReminderBtn").addEventListener("click", guardWorkbenchAction("extendReminderBtn", openReleaseReminderEditor));
     $("autoReleaseToggleBtn").addEventListener("click", openAutoReleaseDialog);
     $("autoReleaseConfirmBtn").addEventListener("click", submitAutoRelease);
     $("autoReleaseCancelBtn").addEventListener("click", closeAutoReleaseDialog);
@@ -5395,7 +5473,7 @@ cm local-agent start</pre>
     $("autoReleaseLayer").addEventListener("click", (event) => {
       if (event.target === $("autoReleaseLayer")) closeAutoReleaseDialog();
     });
-    $("cleanupRecordsBtn").addEventListener("click", cleanupLocalRecords);
+    $("cleanupRecordsBtn").addEventListener("click", guardWorkbenchAction("cleanupRecordsBtn", cleanupLocalRecords));
     $("saveReleaseReminderBtn").addEventListener("click", saveReleaseReminder);
     $("cancelReleaseReminderBtn").addEventListener("click", closeReleaseReminderEditor);
     $("releaseReminderCloseBtn").addEventListener("click", closeReleaseReminderEditor);
@@ -5413,7 +5491,7 @@ cm local-agent start</pre>
         closeAWSConfirm();
       }
     });
-    $("syncBtn").addEventListener("click", () => {
+    $("syncBtn").addEventListener("click", guardWorkbenchAction("syncBtn", () => {
       const p = selectedProfile();
       if (!p) return;
       if (!profileReady(p.name)) {
@@ -5426,8 +5504,8 @@ cm local-agent start</pre>
         return;
       }
       openSync(p.name);
-    });
-    $("vncBtn").addEventListener("click", () => startTunnel(state.selected));
+    }));
+    $("vncBtn").addEventListener("click", guardWorkbenchAction("vncBtn", () => startTunnel(state.selected)));
     $("syncBackBtn").addEventListener("click", () => showView("operationsView"));
     $("syncRefreshHistoryBtn").addEventListener("click", () => loadSyncHistory());
     $("syncPushBrowseBtn").addEventListener("click", () => openLocalPicker("syncPushLocalPath"));
@@ -5444,10 +5522,10 @@ cm local-agent start</pre>
     $("localPickerLayer").addEventListener("click", (event) => {
       if (event.target === $("localPickerLayer")) closeLocalPicker();
     });
-    $("terminalBtn").addEventListener("click", () => {
+    $("terminalBtn").addEventListener("click", guardWorkbenchAction("terminalBtn", () => {
       const p = selectedProfile();
       if (p) openTerminal(p.name);
-    });
+    }));
     $("terminalBackBtn").addEventListener("click", () => showView("operationsView"));
     $("terminalReconnectBtn").addEventListener("click", () => {
       const p = selectedProfile();

@@ -4,6 +4,8 @@ import vm from "node:vm";
 
 const workbenchURL = new URL("../web/assets/connectmac-workbench.js", import.meta.url);
 const source = fs.readFileSync(workbenchURL, "utf8");
+const workbenchCSSURL = new URL("../web/assets/connectmac-workbench.css", import.meta.url);
+const workbenchCSS = fs.readFileSync(workbenchCSSURL, "utf8");
 const indexURL = new URL("../web/index.html", import.meta.url);
 const html = fs.readFileSync(indexURL, "utf8");
 const context = { window: {} };
@@ -624,5 +626,137 @@ for (const [effectiveState, mobile, primary] of primaryCases) {
     `${effectiveState}/${mobile ? "mobile" : "desktop"} primary`,
   );
 }
+
+function inlineFunctions(startDeclaration, endDeclaration) {
+  const start = html.indexOf(startDeclaration);
+  const end = html.indexOf(endDeclaration, start);
+  assert.ok(start >= 0 && end > start, `${startDeclaration} source must be available`);
+  return html.slice(start, end);
+}
+
+function fakeElement(initialText = "") {
+  const attributes = new Map();
+  let text = initialText;
+  let writes = 0;
+  return {
+    disabled: false,
+    classList: { toggle() {} },
+    get textContent() { return text; },
+    set textContent(value) { text = value; writes += 1; },
+    get writes() { return writes; },
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.get(name) ?? null; },
+    removeAttribute(name) { attributes.delete(name); },
+  };
+}
+
+const actionElements = {
+  openMacBtn: fakeElement(),
+  openMacBtnReason: fakeElement(),
+};
+const actionContext = {
+  elements: actionElements,
+  document: { getElementById(id) { return actionElements[id] || null; } },
+};
+vm.createContext(actionContext);
+new vm.Script(`
+  const $ = (id) => document.getElementById(id);
+  ${inlineFunctions("function applyWorkbenchAction(", "function renderWorkbench(")}
+  globalThis.applyWorkbenchAction = applyWorkbenchAction;
+  globalThis.guardWorkbenchAction = guardWorkbenchAction;
+`, { filename: "web/index.html:workbench-action-a11y" }).runInContext(actionContext);
+
+actionContext.applyWorkbenchAction("openMacBtn", {
+  visible: true,
+  enabled: false,
+  reason: "当前状态不能打开",
+});
+assert.equal(actionElements.openMacBtn.disabled, false, "aria-disabled actions must remain keyboard focusable");
+assert.equal(actionElements.openMacBtn.getAttribute("aria-disabled"), "true");
+assert.equal(actionElements.openMacBtn.getAttribute("aria-describedby"), "openMacBtnReason");
+assert.equal(actionElements.openMacBtnReason.textContent, "当前状态不能打开");
+let guardedCalls = 0;
+let prevented = 0;
+let stopped = 0;
+const guardedOpen = actionContext.guardWorkbenchAction("openMacBtn", () => { guardedCalls += 1; });
+assert.equal(guardedOpen({
+  preventDefault() { prevented += 1; },
+  stopImmediatePropagation() { stopped += 1; },
+}), false);
+assert.equal(guardedCalls, 0, "aria-disabled action click must be a no-op");
+assert.equal(prevented, 1);
+assert.equal(stopped, 1);
+
+actionContext.applyWorkbenchAction("openMacBtn", { visible: true, enabled: true, reason: "" });
+guardedOpen({});
+assert.equal(guardedCalls, 1, "enabled action must call its handler");
+assert.equal(actionElements.openMacBtn.getAttribute("aria-describedby"), null);
+
+const localStatus = fakeElement("本机代理未启动");
+const repairStatus = fakeElement("等待重新检测。");
+const localElements = {
+  localAgentStatus: localStatus,
+  localAgentRepairBtn: fakeElement(),
+  localAgentRepairLayer: {
+    classList: { contains() { return true; } },
+  },
+  localAgentRepairStatus: repairStatus,
+};
+const localContext = {
+  state: { localAgent: { online: false, errorReason: "本机代理未连接" } },
+  document: {
+    body: { classList: { toggle() {} } },
+    getElementById(id) { return localElements[id] || null; },
+  },
+};
+vm.createContext(localContext);
+new vm.Script(`
+  const state = globalThis.state;
+  const localAgentOfflineMessage = "本机代理未连接";
+  const $ = (id) => document.getElementById(id);
+  ${inlineFunctions("function updateLiveRegion(", "function openLocalAgentRepair(")}
+  globalThis.renderLocalAgentStatus = renderLocalAgentStatus;
+`, { filename: "web/index.html:local-agent-live-region" }).runInContext(localContext);
+
+localContext.renderLocalAgentStatus();
+const firstOfflineWrites = localStatus.writes;
+localContext.renderLocalAgentStatus();
+assert.equal(localStatus.writes, firstOfflineWrites, "unchanged offline checks must not rewrite live text");
+localContext.state.localAgent.online = true;
+localContext.state.localAgent.errorReason = "";
+localContext.renderLocalAgentStatus();
+assert.equal(localStatus.writes, firstOfflineWrites + 1, "online transition must announce once");
+localContext.renderLocalAgentStatus();
+assert.equal(localStatus.writes, firstOfflineWrites + 1, "unchanged online checks must not rewrite live text");
+localContext.state.localAgent.online = false;
+localContext.state.localAgent.errorReason = "证书错误";
+localContext.renderLocalAgentStatus();
+assert.equal(localStatus.writes, firstOfflineWrites + 2, "offline error change must announce once");
+
+function cssRule(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = workbenchCSS.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`));
+  assert.ok(match, `${selector} CSS rule must exist`);
+  return Object.fromEntries(match[1].split(";")
+    .map((declaration) => declaration.trim())
+    .filter(Boolean)
+    .map((declaration) => {
+      const separator = declaration.indexOf(":");
+      return [declaration.slice(0, separator).trim(), declaration.slice(separator + 1).trim()];
+    }));
+}
+
+const actionGroupRule = cssRule(".workbench-actions");
+assert.equal(actionGroupRule["min-width"], "0");
+assert.equal(actionGroupRule["flex-wrap"], "wrap");
+const actionButtonRule = cssRule(".workbench-actions button");
+assert.equal(actionButtonRule["max-width"], "100%");
+assert.equal(actionButtonRule["flex"], "0 0 auto");
+assert.ok(
+  !/(?:^|\\s)width\\s*:\\s*[4-9]\\d{2}px/.test(
+    workbenchCSS.match(/@media \\(max-width: 640px\\)[\\s\\S]*$/)?.[0] || "",
+  ),
+  "mobile workbench rules must not introduce a fixed width wider than a 390px viewport",
+);
 
 console.log("web workbench state model OK");

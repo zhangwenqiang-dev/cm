@@ -1,10 +1,12 @@
 package connectmac
 
 import (
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -275,7 +277,6 @@ func TestWebWorkbenchAccessibility(t *testing.T) {
 
 	for _, want := range []string{
 		`aria-live="polite"`,
-		`aria-describedby="workbenchActionReason"`,
 		`aria-label="Profile 状态筛选"`,
 		`aria-label="搜索 Profile、Apple 邮箱或 Region"`,
 		`id="localAgentStatus" class="local-agent-status" aria-live="polite"`,
@@ -296,9 +297,50 @@ func TestWebWorkbenchAccessibility(t *testing.T) {
 		}
 	}
 
+	labels := make(map[string]string)
+	for _, match := range regexp.MustCompile(`<label\s+for="([^"]+)"[^>]*>([^<]+)</label>`).FindAllStringSubmatch(html, -1) {
+		labels[match[1]] = strings.TrimSpace(match[2])
+	}
+	for id, wantLabel := range map[string]string{
+		"setupName":       "管理员姓名",
+		"setupEmail":      "管理员邮箱 / 用户名",
+		"setupPassword":   "管理员密码",
+		"loginUsername":   "用户名 / 邮箱",
+		"loginPassword":   "密码",
+		"challengeAnswer": "校验题答案",
+	} {
+		if labels[id] != wantLabel {
+			t.Errorf("control %s visible label = %q, want %q", id, labels[id], wantLabel)
+		}
+		controlPattern := `<(?:input|select|textarea)\b[^>]*\bid="` + regexp.QuoteMeta(id) + `"`
+		if !regexp.MustCompile(controlPattern).MatchString(html) {
+			t.Errorf("visible label for %s does not reference an existing form control", id)
+		}
+	}
+
+	for _, id := range []string{
+		"statusBtn",
+		"openMacBtn",
+		"releaseMacBtn",
+		"extendReminderBtn",
+		"cleanupRecordsBtn",
+		"syncBtn",
+		"terminalBtn",
+		"vncBtn",
+		"eventsBtn",
+	} {
+		if !strings.Contains(html, `id="`+id+`Reason" class="visually-hidden"`) {
+			t.Errorf("workbench action %s is missing its private reason node", id)
+		}
+	}
+
 	applyAction := webInlineFunctionSource(t, html, `function applyWorkbenchAction(id, action)`)
 	for _, want := range []string{
-		`button.setAttribute("aria-describedby", "workbenchActionReason");`,
+		`button.disabled = false;`,
+		`button.setAttribute("aria-disabled", String(!action.enabled));`,
+		`const reasonID = id + "Reason";`,
+		`reason.textContent = action.reason || "";`,
+		`button.setAttribute("aria-describedby", reasonID);`,
 		`button.removeAttribute("aria-describedby");`,
 	} {
 		if !strings.Contains(applyAction, want) {
@@ -306,28 +348,53 @@ func TestWebWorkbenchAccessibility(t *testing.T) {
 		}
 	}
 
-	renderWorkbench := webInlineFunctionSource(t, html, `function renderWorkbench(p, status, reminder)`)
+	actionGuard := webInlineFunctionSource(t, html, `function guardWorkbenchAction(id, handler)`)
 	for _, want := range []string{
-		`const disabledReasons = [...new Set(Object.values(model.actions)`,
-		`.filter((action) => action.visible && !action.enabled && action.reason)`,
-		`disabledReasons.join("；")`,
+		`if (!workbenchActionEnabled(id))`,
+		`event?.preventDefault();`,
+		`event?.stopImmediatePropagation();`,
+		`return false;`,
+		`return handler(event);`,
 	} {
-		if !strings.Contains(renderWorkbench, want) {
-			t.Errorf("workbench disabled-reason association is missing %q", want)
+		if !strings.Contains(actionGuard, want) {
+			t.Errorf("workbench action guard is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`$("statusBtn").addEventListener("click", guardWorkbenchAction("statusBtn", handleWorkbenchStatusAction));`,
+		`$("openMacBtn").addEventListener("click", guardWorkbenchAction("openMacBtn", () => previewAWS("open")));`,
+		`$("releaseMacBtn").addEventListener("click", guardWorkbenchAction("releaseMacBtn", () => previewAWS("destroy")));`,
+		`$("extendReminderBtn").addEventListener("click", guardWorkbenchAction("extendReminderBtn", openReleaseReminderEditor));`,
+		`$("cleanupRecordsBtn").addEventListener("click", guardWorkbenchAction("cleanupRecordsBtn", cleanupLocalRecords));`,
+		`$("syncBtn").addEventListener("click", guardWorkbenchAction("syncBtn", () => {`,
+		`$("terminalBtn").addEventListener("click", guardWorkbenchAction("terminalBtn", () => {`,
+		`$("vncBtn").addEventListener("click", guardWorkbenchAction("vncBtn", () => startTunnel(state.selected)));`,
+		`$("eventsBtn").addEventListener("click", guardWorkbenchAction("eventsBtn", () => loadEvents(true, !!state.eventCursor)));`,
+		`id="runAWSConfirmBtn" class="primary" data-dialog-initial-focus disabled`,
+		`id="authSubmitBtn" class="primary" disabled`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("workbench guarded binding or native form disable contract is missing %q", want)
 		}
 	}
 
 	for _, want := range []string{
+		`--workbench-focus-ring:`,
 		`button:focus-visible`,
 		`input:focus-visible`,
 		`select:focus-visible`,
 		`summary:focus-visible`,
 		`[tabindex]:focus-visible`,
-		`outline: 3px solid rgba(36, 107, 254, .35);`,
+		`outline: 3px solid var(--workbench-focus-ring);`,
 		`outline-offset: 2px;`,
 		`flex: 0 0 auto;`,
+		`max-width: 100%;`,
 		`min-height: 38px;`,
 		`white-space: nowrap;`,
+		`.workbench-actions {`,
+		`min-width: 0;`,
+		`flex-wrap: wrap;`,
+		`button[aria-disabled="true"]`,
 		`.profile-card-value`,
 		`overflow-wrap: anywhere;`,
 		`@media (prefers-reduced-motion: reduce)`,
@@ -342,6 +409,10 @@ func TestWebWorkbenchAccessibility(t *testing.T) {
 	}
 
 	combinedCSS := string(cssData) + "\n" + html
+	if strings.Contains(combinedCSS, `input:focus, select:focus`) &&
+		strings.Contains(combinedCSS, `outline: 0;`) {
+		t.Error("generic input focus styling must not reset the focus-visible outline")
+	}
 	if regexp.MustCompile(`(?i)font-size\s*:\s*[^;{}]*(?:vw|dvw|svw)`).MatchString(combinedCSS) {
 		t.Error("responsive typography must not scale font size from viewport width")
 	}
@@ -350,6 +421,47 @@ func TestWebWorkbenchAccessibility(t *testing.T) {
 			t.Errorf("browser compatibility contract rejects %q", unsupported)
 		}
 	}
+
+	match := regexp.MustCompile(`--workbench-focus-ring:\s*(#[0-9a-fA-F]{6})`).FindStringSubmatch(css)
+	if len(match) != 2 {
+		t.Fatal("workbench focus ring must use a solid six-digit hex color")
+	}
+	for _, background := range []string{"#ffffff", "#e8f0ff"} {
+		if ratio := colorContrastRatio(t, match[1], background); ratio < 3 {
+			t.Errorf("focus ring %s contrast against %s is %.2f, want >= 3.0", match[1], background, ratio)
+		}
+	}
+}
+
+func colorContrastRatio(t *testing.T, foreground, background string) float64 {
+	t.Helper()
+	lighter := relativeLuminance(t, foreground)
+	darker := relativeLuminance(t, background)
+	if darker > lighter {
+		lighter, darker = darker, lighter
+	}
+	return (lighter + 0.05) / (darker + 0.05)
+}
+
+func relativeLuminance(t *testing.T, color string) float64 {
+	t.Helper()
+	if len(color) != 7 || color[0] != '#' {
+		t.Fatalf("invalid color %q", color)
+	}
+	channel := func(value string) float64 {
+		raw, err := strconv.ParseUint(value, 16, 8)
+		if err != nil {
+			t.Fatalf("parse color %q: %v", color, err)
+		}
+		normalized := float64(raw) / 255
+		if normalized <= 0.04045 {
+			return normalized / 12.92
+		}
+		return math.Pow((normalized+0.055)/1.055, 2.4)
+	}
+	return 0.2126*channel(color[1:3]) +
+		0.7152*channel(color[3:5]) +
+		0.0722*channel(color[5:7])
 }
 
 func TestWebWorkbenchDialogContract(t *testing.T) {
