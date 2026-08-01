@@ -2189,8 +2189,15 @@ cm local-agent start</pre>
       document.querySelector(".profile-table-scroll").classList.toggle("hidden", !hasProfiles);
       $("profiles").innerHTML = rows.length ? rows.map((p) => {
         const status = state.statuses[p.name];
-        const summary = profileStatusSummary(status, p.name);
-        const summaryClass = autoReleaseActive(state.reminders[p.name], p.name) ? "wait" : (status?.ready ? "ready" : statusClass(status?.decision));
+        const reminder = state.reminders[p.name];
+        const effectiveState = ConnectMacWorkbench.effectiveState({
+          profileName: p.name,
+          status: status,
+          reminder: reminder,
+          jobs: state.jobs.filter((job) => job.profile === p.name),
+        });
+        const summary = effectiveState === "releasing" ? "正在释放" : profileStatusSummary(status, p.name);
+        const summaryClass = effectiveState === "releasing" ? "wait" : (status?.ready ? "ready" : statusClass(status?.decision));
         return "<tr class=\"profile-home-row " + (p.name === state.selected ? "selected" : "") + "\" data-workbench=\"" + escapeAttr(p.name) + "\" tabindex=\"0\" role=\"link\" aria-label=\"进入 " + escapeAttr(p.name) + " 工作台\">" +
           "<td data-label=\"Profile\"><div class=\"name\">" + escapeHTML(p.name) + "</div></td>" +
           "<td data-label=\"Apple\">" + escapeHTML(p.apple_email || "-") + "</td>" +
@@ -2441,7 +2448,7 @@ cm local-agent start</pre>
       $("workbenchStateBadge").className = "badge " + badgeClass;
       $("workbenchStateBadge").textContent = copy.badge;
       $("workbenchRecommendation").textContent = copy.heading;
-      $("workbenchRecommendationDetail").textContent = copy.detail;
+      $("workbenchRecommendationDetail").textContent = status?.error ? String(status.error).split("\n")[0] : copy.detail;
 
       const statusAction = model.primary === "details" ? model.actions.details : model.actions.refresh;
       const detailsLabel = effectiveState === "releasing" ? "查看释放进度" : "查看任务详情";

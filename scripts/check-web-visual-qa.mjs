@@ -24,7 +24,12 @@ function loadPlaywright() {
   }
   for (const candidate of candidates.filter(Boolean)) {
     try {
-      return require(candidate);
+      const module = require(candidate);
+      const metadata = require(path.join(candidate, "package.json"));
+      const source = candidate === "playwright"
+        ? "project dependency"
+        : (candidate === process.env.CONNECTMAC_PLAYWRIGHT_MODULE ? "CONNECTMAC_PLAYWRIGHT_MODULE" : "npm global fallback");
+      return { module, version: metadata.version, source };
     } catch (error) {
       // Try the next portable resolution source.
     }
@@ -32,7 +37,8 @@ function loadPlaywright() {
   throw new Error("Playwright is required. Install playwright or set CONNECTMAC_PLAYWRIGHT_MODULE.");
 }
 
-const { chromium, firefox, webkit } = loadPlaywright();
+const playwrightRuntime = loadPlaywright();
+const { chromium, firefox, webkit } = playwrightRuntime.module;
 
 const desktopViewports = [
   { width: 1280, height: 800 },
@@ -163,6 +169,7 @@ async function installMocks(page, stateName, options = {}) {
   const consoleErrors = [];
   const assetFailures = [];
   const requests = [];
+  const unmappedRequests = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
@@ -188,22 +195,23 @@ async function installMocks(page, stateName, options = {}) {
     const pathname = url.pathname;
     const method = request.method();
     requests.push({ method, pathname, postData: request.postData() || "" });
-    if (pathname === "/api/config") return json(route, { ok: true, data: { config: { user_api: "" } } });
-    if (pathname === "/api/auth/me") return json(route, {
+    if (pathname === "/api/config" && method === "GET") return json(route, { ok: true, data: { config: { user_api: "" } } });
+    if (pathname === "/api/auth/me" && method === "GET") return json(route, {
       ok: true,
       data: options.authenticated === false
         ? { authenticated: false, setup_required: false }
         : { authenticated: true, setup_required: false, member },
     });
-    if (pathname === "/api/profiles") return json(route, { ok: true, data: { profiles: empty ? [] : [profile] } });
-    if (pathname === "/api/members") return json(route, { ok: true, data: { members: [{ ...member, profiles: assignedProfiles }] } });
-    if (pathname === "/api/managed-profiles") return json(route, { ok: true, data: { profiles: empty ? [] : [{ ...profile, enabled: true, members: [{ email: member.email }] }] } });
-    if (pathname === "/api/profile-owners") return json(route, { ok: true, data: { owners: empty ? [] : [{ profile_name: profile.name, owner: profile.owners[0] }] } });
-    if (pathname === "/api/release-reminders") return json(route, { ok: true, data: { reminders: empty ? [] : [{ profile_name: profile.name, status: "active", auto_release_enabled: false }] } });
-    if (pathname === "/api/jobs") return json(route, { ok: true, data: { jobs: jobsFor(stateName, profile) } });
-    if (pathname === "/api/settings") return json(route, { ok: true, data: { settings: { background_confirm: true } } });
-    if (pathname === "/api/events") return json(route, { ok: true, data: { events: [], next_cursor: "" } });
-    if (pathname === "/api/auth/challenge") {
+    if (pathname === "/api/profiles" && method === "GET") return json(route, { ok: true, data: { profiles: empty ? [] : [profile] } });
+    if (pathname === "/api/members" && method === "GET") return json(route, { ok: true, data: { members: [{ ...member, profiles: assignedProfiles }] } });
+    if (pathname === "/api/managed-profiles" && method === "GET") return json(route, { ok: true, data: { profiles: empty ? [] : [{ ...profile, enabled: true, members: [{ email: member.email }] }] } });
+    if (pathname === "/api/profile-owners" && method === "GET") return json(route, { ok: true, data: { owners: empty ? [] : [{ profile_name: profile.name, owner: profile.owners[0] }] } });
+    if (pathname === "/api/release-reminders" && method === "GET") return json(route, { ok: true, data: { reminders: empty ? [] : [{ profile_name: profile.name, status: "active", auto_release_enabled: false }] } });
+    if (pathname === "/api/jobs" && method === "GET") return json(route, { ok: true, data: { jobs: jobsFor(stateName, profile) } });
+    if (pathname === "/api/settings" && method === "GET") return json(route, { ok: true, data: { settings: { background_confirm: true } } });
+    if (pathname === "/api/events" && method === "GET") return json(route, { ok: true, data: { events: [], next_cursor: "" } });
+    if (pathname === "/api/transfer-records" && method === "GET") return json(route, { ok: true, data: { records: [] } });
+    if (pathname === "/api/auth/challenge" && method === "GET") {
       challengeRequests += 1;
       return json(route, { ok: true, data: { token: `qa-token-${challengeRequests}`, question: `QA challenge ${challengeRequests}: 1 + 1 = ?` } });
     }
@@ -212,8 +220,14 @@ async function installMocks(page, stateName, options = {}) {
       assignedProfiles = Array.isArray(payload.profiles) ? payload.profiles : [];
       return json(route, { ok: true, data: {} });
     }
-    if (pathname === "/api/local-intent") return json(route, { ok: true, data: {} });
-    if (pathname === "/api/aws/status") {
+    if (pathname === "/api/member/update" && method === "POST") {
+      const payload = JSON.parse(request.postData() || "{}");
+      assert.equal(payload.original_email, member.email);
+      assert.equal(payload.name, "QA Admin Updated");
+      return json(route, { ok: true, data: {} });
+    }
+    if (pathname === "/api/local-intent" && method === "POST") return json(route, { ok: true, data: {} });
+    if (pathname === "/api/aws/status" && method === "GET") {
       if (stateName === "error") return json(route, { ok: false, error: "Mock status failure", error_code: "mock_status" });
       return json(route, { ok: true, data: statusFor(stateName) });
     }
@@ -229,7 +243,8 @@ async function installMocks(page, stateName, options = {}) {
       ].join("\n");
       return json(route, { ok: true, output, data: { preview: true } });
     }
-    return json(route, { ok: true, data: {} });
+    unmappedRequests.push({ method, pathname });
+    return json(route, { ok: false, error: `Unmapped QA route: ${method} ${pathname}`, error_code: "qa_unmapped_route" }, 501);
   });
   return {
     profile,
@@ -237,6 +252,7 @@ async function installMocks(page, stateName, options = {}) {
     requests,
     consoleErrors,
     assetFailures,
+    unmappedRequests,
     get challengeRequests() { return challengeRequests; },
   };
 }
@@ -252,15 +268,49 @@ async function openWorkbench(page, profileName) {
 }
 
 async function layoutMetrics(page) {
-  return page.evaluate(() => ({
-    viewport: { width: window.innerWidth, height: window.innerHeight },
-    document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
-    horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
-    visibleButtons: [...document.querySelectorAll("button")]
-      .filter((button) => !button.closest(".hidden") && getComputedStyle(button).display !== "none")
-      .map((button) => (button.textContent || button.getAttribute("aria-label") || "").trim())
-      .filter(Boolean),
-  }));
+  return page.evaluate(() => {
+    const visible = (node) => !node.closest(".hidden") && getComputedStyle(node).display !== "none" && node.getClientRects().length > 0;
+    const label = (node) => (node.textContent || node.getAttribute("aria-label") || node.id || node.tagName).replace(/\s+/g, " ").trim();
+    const controls = [...document.querySelectorAll("button, input, select, textarea")].filter(visible);
+    const clippedControls = controls.filter((node) => {
+      const box = node.getBoundingClientRect();
+      const horizontalClip = box.left < -1 || box.right > window.innerWidth + 1;
+      const textClip = node.tagName === "BUTTON" && node.scrollWidth > node.clientWidth + 1;
+      return horizontalClip || textClip;
+    }).map(label);
+    const overlapContainers = [...document.querySelectorAll(".workbench-actions, .toolbar, .row-actions, .picker-actions, .auth-actions, .auto-release-actions")];
+    const overlaps = [];
+    for (const container of overlapContainers) {
+      const buttons = [...container.querySelectorAll(":scope > button")].filter(visible);
+      for (let i = 0; i < buttons.length; i += 1) {
+        for (let j = i + 1; j < buttons.length; j += 1) {
+          const a = buttons[i].getBoundingClientRect();
+          const b = buttons[j].getBoundingClientRect();
+          if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) {
+            overlaps.push(`${label(buttons[i])} <> ${label(buttons[j])}`);
+          }
+        }
+      }
+    }
+    return {
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
+      horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      visibleButtons: [...document.querySelectorAll("button")].filter(visible).map(label).filter(Boolean),
+      clippedControls,
+      overlaps,
+    };
+  });
+}
+
+function assertLayout(metrics, label) {
+  assert.equal(metrics.horizontalOverflow, false, `${label} has horizontal overflow`);
+  assert.deepEqual(metrics.clippedControls, [], `${label} has clipped controls`);
+  assert.deepEqual(metrics.overlaps, [], `${label} has overlapping buttons`);
+}
+
+function assertNoMockLeaks(mock, label) {
+  assert.deepEqual(mock.unmappedRequests, [], `${label} used unmapped API routes`);
 }
 
 async function captureState(browser, engineName, serverURL, viewport, stateName) {
@@ -268,13 +318,16 @@ async function captureState(browser, engineName, serverURL, viewport, stateName)
   const page = await context.newPage();
   const online = stateName === "ready";
   const mock = await installMocks(page, stateName, { localAgentOnline: online });
+  const statusResponse = stateName === "empty" ? null : page.waitForResponse((response) => new URL(response.url()).pathname === "/api/aws/status");
   await page.goto(serverURL, { waitUntil: "networkidle" });
+  if (statusResponse) await statusResponse;
   await waitForApp(page);
   if (stateName !== "empty") {
-    await page.waitForFunction((name) => {
-      const row = document.querySelector(`[data-workbench="${name}"]`);
-      return row && !row.textContent.includes("状态未知") || document.querySelector(".profile-status-summary");
-    }, mock.profile.name);
+    const homeSummary = page.locator(`[data-workbench="${mock.profile.name}"] .profile-status-summary`);
+    await homeSummary.filter({ hasText: stateName === "error" ? "状态更新失败" : {
+      stopped: "已停止", creating: "正在创建", ready: "可使用", releasing: "正在释放",
+      blocked: "需要处理", unknown: "状态未知",
+    }[stateName] }).waitFor();
     await openWorkbench(page, mock.profile.name);
     const expected = {
       stopped: "已停止",
@@ -286,18 +339,26 @@ async function captureState(browser, engineName, serverURL, viewport, stateName)
       error: "状态未知",
     }[stateName];
     await page.locator("#workbenchStateBadge").filter({ hasText: expected }).waitFor();
+    if (stateName === "error") {
+      assert.match(await page.locator("#workbenchRecommendationDetail").innerText(), /Mock status failure/);
+    }
   } else {
     await page.locator("#profileEmptyState:not(.hidden)").waitFor({ state: "visible" });
   }
   const metrics = await layoutMetrics(page);
   assert.equal(metrics.viewport.width, viewport.width);
   assert.equal(metrics.viewport.height, viewport.height);
-  assert.equal(metrics.horizontalOverflow, false, `${engineName} ${stateName} ${viewport.width} has horizontal overflow`);
+  assertLayout(metrics, `${engineName} ${stateName} ${viewport.width}`);
   if (stateName !== "empty") {
     assert.equal(await page.locator("#selectedProfileRegion").innerText(), "Region：us-west-2");
+    assert.equal(await page.locator("#selectedAppleEmail").innerText(), mock.profile.apple_email);
     if (viewport.width <= 640) {
       for (const id of ["terminalBtn", "vncBtn", "syncBtn"]) {
         await expectHidden(page, `#${id}`);
+      }
+    } else {
+      for (const id of ["statusBtn", "openMacBtn", "releaseMacBtn", "extendReminderBtn", "cleanupRecordsBtn", "syncBtn", "terminalBtn", "vncBtn", "eventsBtn"]) {
+        assert.equal(await page.locator(`#${id}`).isVisible(), true, `${engineName} ${stateName} missing ${id}`);
       }
     }
   }
@@ -307,7 +368,7 @@ async function captureState(browser, engineName, serverURL, viewport, stateName)
     engine: engineName,
     cssViewport: viewport,
     state: stateName,
-    screenshot: `qa/screenshots/${filename}`,
+    screenshotGenerated: true,
     horizontalOverflow: metrics.horizontalOverflow,
     consoleErrors: mock.consoleErrors,
     assetFailures: mock.assetFailures,
@@ -315,6 +376,7 @@ async function captureState(browser, engineName, serverURL, viewport, stateName)
   };
   assert.deepEqual(mock.consoleErrors, [], `${engineName} ${stateName} console errors`);
   assert.deepEqual(mock.assetFailures, [], `${engineName} ${stateName} asset failures`);
+  assertNoMockLeaks(mock, `${engineName} ${stateName}`);
   await context.close();
   return result;
 }
@@ -363,10 +425,11 @@ async function captureSurface(browser, engineName, serverURL, viewport, surface)
   const metrics = await layoutMetrics(page);
   assert.equal(metrics.viewport.width, viewport.width);
   assert.equal(metrics.viewport.height, viewport.height);
-  assert.equal(metrics.horizontalOverflow, false, `${engineName} ${surface} ${viewport.width} has horizontal overflow`);
+  assertLayout(metrics, `${engineName} ${surface} ${viewport.width}`);
   assert.deepEqual(mock.consoleErrors, [], `${engineName} ${surface} console errors`);
   assert.deepEqual(mock.assetFailures, [], `${engineName} ${surface} asset failures`);
   assert.equal(mock.requests.some((item) => item.postData.includes('"confirm":true')), false);
+  assertNoMockLeaks(mock, `${engineName} ${surface}`);
   const filename = `${engineName}-${viewport.width}x${viewport.height}-surface-${surface}.png`;
   await page.screenshot({ path: path.join(screenshotRoot, filename), fullPage: true });
   await context.close();
@@ -374,7 +437,7 @@ async function captureSurface(browser, engineName, serverURL, viewport, surface)
     engine: engineName,
     cssViewport: viewport,
     surface,
-    screenshot: `qa/screenshots/${filename}`,
+    screenshotGenerated: true,
     horizontalOverflow: metrics.horizontalOverflow,
     consoleErrors: mock.consoleErrors,
     assetFailures: mock.assetFailures,
@@ -397,6 +460,7 @@ async function verifyLoginChallenge(browser, engineName, serverURL) {
   assert.ok(mock.challengeRequests >= 2);
   assert.deepEqual(mock.consoleErrors, []);
   assert.deepEqual(mock.assetFailures, []);
+  assertNoMockLeaks(mock, `${engineName} login challenge`);
   await context.close();
   return { engine: engineName, passed: true, retries: mock.challengeRequests };
 }
@@ -457,6 +521,7 @@ async function verifyWorkflows(browser, engineName, serverURL) {
   assert.equal(mock.requests.some((item) => item.pathname.startsWith("/api/aws/") && item.postData.includes('"confirm":true')), false);
   assert.deepEqual(mock.consoleErrors, []);
   assert.deepEqual(mock.assetFailures, []);
+  assertNoMockLeaks(mock, `${engineName} workflows`);
   await context.close();
 
   const releaseContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
@@ -474,6 +539,7 @@ async function verifyWorkflows(browser, engineName, serverURL) {
   screenshots.push(`qa/screenshots/${releasePreviewShot}`);
   await releasePage.locator("#cancelAWSConfirmBtn").click();
   assert.equal(readyMock.requests.some((item) => item.postData.includes('"confirm":true')), false);
+  assertNoMockLeaks(readyMock, `${engineName} release workflow`);
   await releaseContext.close();
 
   const taskContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
@@ -490,17 +556,35 @@ async function verifyWorkflows(browser, engineName, serverURL) {
   const restoredTaskShot = `${engineName}-workflow-restored-task.png`;
   await taskPage.screenshot({ path: path.join(screenshotRoot, restoredTaskShot), fullPage: true });
   screenshots.push(`qa/screenshots/${restoredTaskShot}`);
+  assertNoMockLeaks(taskMock, `${engineName} restored task workflow`);
   await taskContext.close();
 
-  return { engine: engineName, passed: true, awsConfirmMutations: 0, screenshots };
+  return { engine: engineName, passed: true, awsConfirmMutations: 0, screenshotsGenerated: screenshots.length };
+}
+
+function assertEngineConsistency(matrix) {
+  const baseline = new Map();
+  for (const item of matrix) {
+    const key = `${item.cssViewport.width}x${item.cssViewport.height}:${item.state}`;
+    const buttons = [...item.visibleButtons].sort();
+    if (item.engine === "chromium") baseline.set(key, buttons);
+    else assert.deepEqual(buttons, baseline.get(key), `${item.engine} button set differs from Chromium for ${key}`);
+  }
 }
 
 async function main() {
   await mkdir(screenshotRoot, { recursive: true });
   const server = await startStaticServer();
   const report = {
-    generatedAt: new Date().toISOString(),
+    schemaVersion: 1,
+    runtime: {
+      node: process.version,
+      playwright: playwrightRuntime.version,
+      playwrightSource: playwrightRuntime.source,
+      browsers: {},
+    },
     server: "isolated ephemeral static server with intercepted APIs",
+    screenshots: "generated locally under qa/screenshots and intentionally not tracked",
     awsMutationsConfirmed: 0,
     matrix: [],
     surfaces: [],
@@ -511,6 +595,7 @@ async function main() {
     for (const engine of engines) {
       const browser = await engine.launcher.launch({ headless: true });
       try {
+        report.runtime.browsers[engine.name] = browser.version();
         for (const viewport of desktopViewports) {
           for (const stateName of states) {
             report.matrix.push(await captureState(browser, engine.name, server.url, viewport, stateName));
@@ -538,6 +623,7 @@ async function main() {
   } finally {
     await server.close();
   }
+  assertEngineConsistency(report.matrix);
   await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
   console.log(`ConnectMac visual QA OK: ${report.matrix.length} state/viewports, ${report.surfaces.length} surfaces, ${report.workflows.length} workflow engines`);
 }
