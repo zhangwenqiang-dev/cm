@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,9 +13,26 @@ const webRoot = path.join(root, "web");
 const screenshotRoot = path.join(root, "qa", "screenshots");
 const reportPath = path.join(root, "qa", "task10-browser-matrix.json");
 const require = createRequire(import.meta.url);
-const { chromium, firefox, webkit } = require(
-  "/Users/wenqiang/.nvm/versions/node/v22.21.0/lib/node_modules/@playwright/cli/node_modules/playwright",
-);
+
+function loadPlaywright() {
+  const candidates = [process.env.CONNECTMAC_PLAYWRIGHT_MODULE, "playwright"];
+  try {
+    const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+    candidates.push(path.join(globalRoot, "@playwright", "cli", "node_modules", "playwright"));
+  } catch (error) {
+    // The explicit module path or a project dependency can still satisfy the run.
+  }
+  for (const candidate of candidates.filter(Boolean)) {
+    try {
+      return require(candidate);
+    } catch (error) {
+      // Try the next portable resolution source.
+    }
+  }
+  throw new Error("Playwright is required. Install playwright or set CONNECTMAC_PLAYWRIGHT_MODULE.");
+}
+
+const { chromium, firefox, webkit } = loadPlaywright();
 
 const desktopViewports = [
   { width: 1280, height: 800 },
@@ -141,6 +159,7 @@ async function installMocks(page, stateName, options = {}) {
     profiles: empty ? [] : [profile.name],
   };
   let assignedProfiles = member.profiles.slice();
+  let challengeRequests = 0;
   const consoleErrors = [];
   const assetFailures = [];
   const requests = [];
@@ -170,7 +189,12 @@ async function installMocks(page, stateName, options = {}) {
     const method = request.method();
     requests.push({ method, pathname, postData: request.postData() || "" });
     if (pathname === "/api/config") return json(route, { ok: true, data: { config: { user_api: "" } } });
-    if (pathname === "/api/auth/me") return json(route, { ok: true, data: { authenticated: true, setup_required: false, member } });
+    if (pathname === "/api/auth/me") return json(route, {
+      ok: true,
+      data: options.authenticated === false
+        ? { authenticated: false, setup_required: false }
+        : { authenticated: true, setup_required: false, member },
+    });
     if (pathname === "/api/profiles") return json(route, { ok: true, data: { profiles: empty ? [] : [profile] } });
     if (pathname === "/api/members") return json(route, { ok: true, data: { members: [{ ...member, profiles: assignedProfiles }] } });
     if (pathname === "/api/managed-profiles") return json(route, { ok: true, data: { profiles: empty ? [] : [{ ...profile, enabled: true, members: [{ email: member.email }] }] } });
@@ -179,7 +203,10 @@ async function installMocks(page, stateName, options = {}) {
     if (pathname === "/api/jobs") return json(route, { ok: true, data: { jobs: jobsFor(stateName, profile) } });
     if (pathname === "/api/settings") return json(route, { ok: true, data: { settings: { background_confirm: true } } });
     if (pathname === "/api/events") return json(route, { ok: true, data: { events: [], next_cursor: "" } });
-    if (pathname === "/api/auth/challenge") return json(route, { ok: true, data: { token: "qa-token", question: "1 + 1 = ?" } });
+    if (pathname === "/api/auth/challenge") {
+      challengeRequests += 1;
+      return json(route, { ok: true, data: { token: `qa-token-${challengeRequests}`, question: `QA challenge ${challengeRequests}: 1 + 1 = ?` } });
+    }
     if (pathname === "/api/member/profiles" && method === "POST") {
       const payload = JSON.parse(request.postData() || "{}");
       assignedProfiles = Array.isArray(payload.profiles) ? payload.profiles : [];
@@ -204,7 +231,14 @@ async function installMocks(page, stateName, options = {}) {
     }
     return json(route, { ok: true, data: {} });
   });
-  return { profile, member, requests, consoleErrors, assetFailures };
+  return {
+    profile,
+    member,
+    requests,
+    consoleErrors,
+    assetFailures,
+    get challengeRequests() { return challengeRequests; },
+  };
 }
 
 async function waitForApp(page) {
@@ -291,6 +325,82 @@ async function expectHidden(page, selector) {
   assert.equal(await locator.evaluate((node) => getComputedStyle(node).display === "none"), true, `${selector} must be hidden`);
 }
 
+async function captureSurface(browser, engineName, serverURL, viewport, surface) {
+  const stateName = surface.includes("release") ? "ready" : "stopped";
+  const context = await browser.newContext({ viewport, ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  const mock = await installMocks(page, stateName, { localAgentOnline: stateName === "ready" });
+  await page.goto(serverURL, { waitUntil: "networkidle" });
+  await waitForApp(page);
+
+  if (surface === "profiles-admin") {
+    await page.locator('[data-view="profilesAdminView"]').click();
+    await page.locator("#profilesAdminView:not(.hidden)").waitFor({ state: "visible" });
+  } else if (surface === "members") {
+    await page.locator('[data-view="userManagementView"]').click();
+    await page.locator("#userManagementView:not(.hidden)").waitFor({ state: "visible" });
+  } else if (surface === "mobile-open-confirm" || surface === "mobile-release-confirm") {
+    await openWorkbench(page, mock.profile.name);
+    if (surface === "mobile-open-confirm") {
+      await page.locator("#technicalDetails").evaluate((node) => { node.open = true; });
+      await page.locator("#assignMemberSelect").selectOption(mock.member.email);
+      await page.locator("#openMacBtn").click();
+    } else {
+      await page.locator("#releaseMacBtn").click();
+    }
+    await page.locator("#awsConfirmLayer:not(.hidden)").waitFor({ state: "visible" });
+    const dialog = page.locator("#awsConfirmLayer .picker-card");
+    const box = await dialog.boundingBox();
+    assert.ok(box && box.x >= 0 && box.x + box.width <= viewport.width + 1, `${engineName} mobile dialog width`);
+    assert.equal(await page.evaluate(() => !!document.activeElement?.closest("#awsConfirmLayer")), true, "dialog focus must stay inside modal");
+    if (surface === "mobile-release-confirm") {
+      assert.equal(await page.locator("#awsConfirmEIPNotice").isVisible(), true);
+    }
+  } else {
+    await page.locator("#profilesView:not(.hidden)").waitFor({ state: "visible" });
+  }
+
+  const metrics = await layoutMetrics(page);
+  assert.equal(metrics.viewport.width, viewport.width);
+  assert.equal(metrics.viewport.height, viewport.height);
+  assert.equal(metrics.horizontalOverflow, false, `${engineName} ${surface} ${viewport.width} has horizontal overflow`);
+  assert.deepEqual(mock.consoleErrors, [], `${engineName} ${surface} console errors`);
+  assert.deepEqual(mock.assetFailures, [], `${engineName} ${surface} asset failures`);
+  assert.equal(mock.requests.some((item) => item.postData.includes('"confirm":true')), false);
+  const filename = `${engineName}-${viewport.width}x${viewport.height}-surface-${surface}.png`;
+  await page.screenshot({ path: path.join(screenshotRoot, filename), fullPage: true });
+  await context.close();
+  return {
+    engine: engineName,
+    cssViewport: viewport,
+    surface,
+    screenshot: `qa/screenshots/${filename}`,
+    horizontalOverflow: metrics.horizontalOverflow,
+    consoleErrors: mock.consoleErrors,
+    assetFailures: mock.assetFailures,
+  };
+}
+
+async function verifyLoginChallenge(browser, engineName, serverURL) {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  const mock = await installMocks(page, "stopped", { authenticated: false, localAgentOnline: false });
+  await page.goto(serverURL, { waitUntil: "networkidle" });
+  await page.locator("#authScreen:not(.hidden)").waitFor({ state: "visible" });
+  await page.locator("#challengeQuestion").filter({ hasText: "QA challenge 1" }).waitFor();
+  await page.locator("#loginUsername").fill("qa-user@example.test");
+  await page.locator("#loginPassword").fill("not-a-real-password");
+  await page.locator("#refreshChallengeBtn").click();
+  await page.locator("#challengeQuestion").filter({ hasText: "QA challenge 2" }).waitFor();
+  assert.equal(await page.locator("#loginUsername").inputValue(), "qa-user@example.test");
+  assert.equal(await page.locator("#loginPassword").inputValue(), "not-a-real-password");
+  assert.ok(mock.challengeRequests >= 2);
+  assert.deepEqual(mock.consoleErrors, []);
+  assert.deepEqual(mock.assetFailures, []);
+  await context.close();
+  return { engine: engineName, passed: true, retries: mock.challengeRequests };
+}
+
 async function verifyWorkflows(browser, engineName, serverURL) {
   const screenshots = [];
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
@@ -298,6 +408,13 @@ async function verifyWorkflows(browser, engineName, serverURL) {
   const mock = await installMocks(page, "stopped", { localAgentOnline: false });
   await page.goto(serverURL, { waitUntil: "networkidle" });
   await waitForApp(page);
+  await page.locator("#search").fill("does-not-exist");
+  await page.locator("#profiles").filter({ hasText: "没有匹配的 Profile" }).waitFor();
+  await page.locator("#search").fill(mock.profile.name);
+  await page.locator(`[data-workbench-entry="${mock.profile.name}"]`).waitFor({ state: "visible" });
+  const statusRequestsBefore = mock.requests.filter((item) => item.pathname === "/api/aws/status").length;
+  await page.evaluate(() => refreshVisibleStatuses({ background: false }));
+  assert.ok(mock.requests.filter((item) => item.pathname === "/api/aws/status").length > statusRequestsBefore);
   await openWorkbench(page, mock.profile.name);
 
   await page.locator("#technicalDetails").evaluate((node) => { node.open = true; });
@@ -322,6 +439,12 @@ async function verifyWorkflows(browser, engineName, serverURL) {
   await page.locator("#memberProfileLayer:not(.hidden)").waitFor({ state: "visible" });
   await page.locator("#saveMemberProfilesBtn").click();
   await page.locator("#memberProfileLayer.hidden").waitFor({ state: "hidden" });
+  await page.locator(`[data-member-edit="${mock.member.email}"]`).click();
+  await page.locator("#memberFormLayer:not(.hidden)").waitFor({ state: "visible" });
+  await page.locator("#memberName").fill("QA Admin Updated");
+  await page.locator("#addMemberBtn").click();
+  await page.locator("#memberFormLayer.hidden").waitFor({ state: "hidden" });
+  assert.ok(mock.requests.some((item) => item.pathname === "/api/member/update" && item.method === "POST"));
 
   await page.locator("#localAgentRepairBtn").click();
   await page.locator("#localAgentRepairLayer:not(.hidden)").waitFor({ state: "visible" });
@@ -380,6 +503,8 @@ async function main() {
     server: "isolated ephemeral static server with intercepted APIs",
     awsMutationsConfirmed: 0,
     matrix: [],
+    surfaces: [],
+    loginChallenges: [],
     workflows: [],
   };
   try {
@@ -391,13 +516,20 @@ async function main() {
             report.matrix.push(await captureState(browser, engine.name, server.url, viewport, stateName));
           }
           report.matrix.push(await captureState(browser, engine.name, server.url, viewport, "empty"));
+          for (const surface of ["home", "profiles-admin", "members"]) {
+            report.surfaces.push(await captureSurface(browser, engine.name, server.url, viewport, surface));
+          }
         }
         if (engine.name !== "firefox") {
           for (const stateName of states) {
             report.matrix.push(await captureState(browser, engine.name, server.url, mobileViewport, stateName));
           }
           report.matrix.push(await captureState(browser, engine.name, server.url, mobileViewport, "empty"));
+          for (const surface of ["home", "mobile-open-confirm", "mobile-release-confirm"]) {
+            report.surfaces.push(await captureSurface(browser, engine.name, server.url, mobileViewport, surface));
+          }
         }
+        report.loginChallenges.push(await verifyLoginChallenge(browser, engine.name, server.url));
         report.workflows.push(await verifyWorkflows(browser, engine.name, server.url));
       } finally {
         await browser.close();
@@ -407,7 +539,7 @@ async function main() {
     await server.close();
   }
   await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n");
-  console.log(`ConnectMac visual QA OK: ${report.matrix.length} state/viewports, ${report.workflows.length} workflow engines`);
+  console.log(`ConnectMac visual QA OK: ${report.matrix.length} state/viewports, ${report.surfaces.length} surfaces, ${report.workflows.length} workflow engines`);
 }
 
 await main();

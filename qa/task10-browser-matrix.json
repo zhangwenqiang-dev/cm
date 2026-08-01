@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-01T02:02:03.792Z",
+  "generatedAt": "2026-08-01T02:16:27.387Z",
   "server": "isolated ephemeral static server with intercepted APIs",
   "awsMutationsConfirmed": 0,
   "matrix": [
@@ -2754,6 +2754,421 @@
         "Profiles",
         "用户管理"
       ]
+    }
+  ],
+  "surfaces": [
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/chromium-1280x800-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/chromium-1280x800-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/chromium-1280x800-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/chromium-1440x900-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/chromium-1440x900-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/chromium-1440x900-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/chromium-1920x1080-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/chromium-1920x1080-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/chromium-1920x1080-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/chromium-390x844-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "surface": "mobile-open-confirm",
+      "screenshot": "qa/screenshots/chromium-390x844-surface-mobile-open-confirm.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "chromium",
+      "cssViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "surface": "mobile-release-confirm",
+      "screenshot": "qa/screenshots/chromium-390x844-surface-mobile-release-confirm.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/firefox-1280x800-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/firefox-1280x800-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/firefox-1280x800-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/firefox-1440x900-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/firefox-1440x900-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/firefox-1440x900-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/firefox-1920x1080-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/firefox-1920x1080-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "firefox",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/firefox-1920x1080-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/webkit-1280x800-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/webkit-1280x800-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1280,
+        "height": 800
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/webkit-1280x800-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/webkit-1440x900-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/webkit-1440x900-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/webkit-1440x900-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/webkit-1920x1080-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "profiles-admin",
+      "screenshot": "qa/screenshots/webkit-1920x1080-surface-profiles-admin.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 1920,
+        "height": 1080
+      },
+      "surface": "members",
+      "screenshot": "qa/screenshots/webkit-1920x1080-surface-members.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "surface": "home",
+      "screenshot": "qa/screenshots/webkit-390x844-surface-home.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "surface": "mobile-open-confirm",
+      "screenshot": "qa/screenshots/webkit-390x844-surface-mobile-open-confirm.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    },
+    {
+      "engine": "webkit",
+      "cssViewport": {
+        "width": 390,
+        "height": 844
+      },
+      "surface": "mobile-release-confirm",
+      "screenshot": "qa/screenshots/webkit-390x844-surface-mobile-release-confirm.png",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "assetFailures": []
+    }
+  ],
+  "loginChallenges": [
+    {
+      "engine": "chromium",
+      "passed": true,
+      "retries": 2
+    },
+    {
+      "engine": "firefox",
+      "passed": true,
+      "retries": 2
+    },
+    {
+      "engine": "webkit",
+      "passed": true,
+      "retries": 2
     }
   ],
   "workflows": [
