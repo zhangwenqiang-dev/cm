@@ -11,3 +11,5 @@ scripts/*
 !scripts/check-web-js.mjs
 !scripts/build-deb.sh
 !scripts/deploy-staging.sh
+!scripts/check-web-visual-qa.mjs
+qa/screenshots/
