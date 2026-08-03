@@ -1389,6 +1389,20 @@ func TestLocalAgentInstallLaunchctlFailuresAreAuthoritative(t *testing.T) {
 			want:         "start launch agent",
 		},
 		{
+			name:         "bootout io error with missing printed service permits bootstrap",
+			bootout:      []byte("Boot-out failed: 5: Input/output error"),
+			bootErr:      errors.New("exit status 5"),
+			bootstrap:    []byte("operation not permitted"),
+			bootstrapErr: errors.New("exit status 1"),
+			want:         "bootstrap launch agent",
+		},
+		{
+			name:    "bootout io error with authoritative print failure is not ignored",
+			bootout: []byte("Boot-out failed: 5: Input/output error"),
+			bootErr: errors.New("exit status 5"),
+			want:    "stop launch agent",
+		},
+		{
 			name:    "bootout permission failure is not ignored",
 			bootout: []byte("Boot-out failed: Operation not permitted"),
 			bootErr: errors.New("exit status 1"),
@@ -1407,6 +1421,11 @@ func TestLocalAgentInstallLaunchctlFailuresAreAuthoritative(t *testing.T) {
 				switch args[0] {
 				case "bootout":
 					return tt.bootout, tt.bootErr
+				case "print":
+					if tt.name == "bootout io error with missing printed service permits bootstrap" {
+						return []byte(`Could not find service "com.connectmac.local-agent" in domain for user gui: 501`), errors.New("exit status 113")
+					}
+					return []byte("Could not find service configuration: Operation not permitted"), errors.New("exit status 1")
 				case "bootstrap":
 					return tt.bootstrap, tt.bootstrapErr
 				case "kickstart":
@@ -1424,6 +1443,9 @@ func TestLocalAgentInstallLaunchctlFailuresAreAuthoritative(t *testing.T) {
 				t.Fatalf("install error = %q", errOut.String())
 			}
 			if tt.name == "bootout permission failure is not ignored" && len(commands) != 1 {
+				t.Fatalf("launchctl commands = %#v", commands)
+			}
+			if tt.name == "bootout io error with authoritative print failure is not ignored" && len(commands) != 2 {
 				t.Fatalf("launchctl commands = %#v", commands)
 			}
 		})
