@@ -36,6 +36,11 @@ var (
 	rsyncToCheckPattern      = regexp.MustCompile(`to-(?:chk|check)=(\d+)/(\d+)`)
 )
 
+const (
+	LocalTransferProgressEstimated = "estimated"
+	LocalTransferProgressTotal     = "total"
+)
+
 type LocalTransferJob struct {
 	ID                string     `json:"id"`
 	TransferID        string     `json:"transfer_id,omitempty"`
@@ -44,6 +49,7 @@ type LocalTransferJob struct {
 	Status            string     `json:"status"`
 	Phase             string     `json:"phase"`
 	Percent           int        `json:"percent"`
+	ProgressMode      string     `json:"progress_mode,omitempty"`
 	Output            string     `json:"output"`
 	Error             string     `json:"error"`
 	CallbackWarning   string     `json:"callback_warning,omitempty"`
@@ -59,15 +65,16 @@ func (j LocalTransferJob) Active() bool {
 }
 
 type LocalTransferEvent struct {
-	TransferID string
-	LocalJobID string
-	Profile    string
-	Direction  string
-	Status     string
-	Phase      string
-	Percent    int
-	Elapsed    time.Duration
-	Error      string
+	TransferID   string
+	LocalJobID   string
+	Profile      string
+	Direction    string
+	Status       string
+	Phase        string
+	Percent      int
+	ProgressMode string
+	Elapsed      time.Duration
+	Error        string
 }
 
 type localTransferCallbackDispatch struct {
@@ -100,6 +107,10 @@ func (m *LocalTransferJobManager) Start(profile, direction string, run func(func
 }
 
 func (m *LocalTransferJobManager) StartWithEvents(transferID, profile, direction string, onEvent func(LocalTransferEvent), run func(func(string)) error) (LocalTransferJob, error) {
+	return m.StartWithOptions(transferID, profile, direction, LocalTransferProgressEstimated, onEvent, run)
+}
+
+func (m *LocalTransferJobManager) StartWithOptions(transferID, profile, direction, progressMode string, onEvent func(LocalTransferEvent), run func(func(string)) error) (LocalTransferJob, error) {
 	m.mu.Lock()
 	m.cleanupLocked()
 	if m.draining {
@@ -126,6 +137,7 @@ func (m *LocalTransferJobManager) StartWithEvents(transferID, profile, direction
 		Direction:         direction,
 		Status:            LocalTransferQueued,
 		Phase:             TransferPhasePreparing,
+		ProgressMode:      normalizeLocalTransferProgressMode(progressMode),
 		CreatedAt:         created,
 		emittedMilestones: make(map[string]bool),
 	}
@@ -239,7 +251,7 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 	switch {
 	case err == nil:
 		terminal.Status = LocalTransferSucceeded
-		terminal.Phase, terminal.Percent = mapRsyncProgress(100, true)
+		terminal.Phase, terminal.Percent = mapRsyncProgress(100, true, terminal.ProgressMode)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		terminal.Status = LocalTransferInterrupted
 		terminal.Phase = TransferPhaseInterrupted
@@ -297,7 +309,7 @@ func (m *LocalTransferJobManager) appendOutput(id, output string) {
 		job.Output = job.Output[len(job.Output)-localTransferOutputLimit:]
 	}
 	if raw, ok := parseRsyncProgress(job.Output); ok {
-		phase, progress := mapRsyncProgress(raw, false)
+		phase, progress := mapRsyncProgress(raw, false, job.ProgressMode)
 		if progress > job.Percent || phase == TransferPhaseFinalizing && job.Phase != TransferPhaseFinalizing {
 			job.Phase = phase
 			job.Percent = progress
@@ -346,16 +358,24 @@ func localTransferEvent(job LocalTransferJob, now time.Time) LocalTransferEvent 
 		}
 	}
 	return LocalTransferEvent{
-		TransferID: job.TransferID,
-		LocalJobID: job.ID,
-		Profile:    job.Profile,
-		Direction:  job.Direction,
-		Status:     job.Status,
-		Phase:      job.Phase,
-		Percent:    job.Percent,
-		Elapsed:    elapsed,
-		Error:      job.Error,
+		TransferID:   job.TransferID,
+		LocalJobID:   job.ID,
+		Profile:      job.Profile,
+		Direction:    job.Direction,
+		Status:       job.Status,
+		Phase:        job.Phase,
+		Percent:      job.Percent,
+		ProgressMode: job.ProgressMode,
+		Elapsed:      elapsed,
+		Error:        job.Error,
 	}
+}
+
+func normalizeLocalTransferProgressMode(mode string) string {
+	if mode == LocalTransferProgressTotal {
+		return LocalTransferProgressTotal
+	}
+	return LocalTransferProgressEstimated
 }
 
 func (m *LocalTransferJobManager) runCallbackDispatcher(id string, callback func(LocalTransferEvent), events <-chan localTransferCallbackDispatch) {
@@ -473,10 +493,20 @@ func clampRsyncProgress(progress int) int {
 	return progress
 }
 
-func mapRsyncProgress(raw int, processDone bool) (phase string, displayed int) {
+func mapRsyncProgress(raw int, processDone bool, mode ...string) (phase string, displayed int) {
 	raw = clampRsyncProgress(raw)
 	if processDone {
 		return TransferPhaseSucceeded, 100
+	}
+	if len(mode) > 0 && mode[0] == LocalTransferProgressTotal {
+		switch {
+		case raw == 0:
+			return TransferPhasePreparing, 0
+		case raw >= 99:
+			return TransferPhaseFinalizing, 99
+		default:
+			return TransferPhaseTransferring, raw
+		}
 	}
 	switch {
 	case raw == 0:

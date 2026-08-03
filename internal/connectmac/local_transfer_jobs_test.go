@@ -328,6 +328,59 @@ func TestMapRsyncProgress(t *testing.T) {
 	}
 }
 
+func TestMapRsyncProgressTotalMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         int
+		processDone bool
+		wantPhase   string
+		wantPercent int
+	}{
+		{name: "preparing", raw: 0, wantPhase: TransferPhasePreparing, wantPercent: 0},
+		{name: "exact middle", raw: 73, wantPhase: TransferPhaseTransferring, wantPercent: 73},
+		{name: "exact late", raw: 98, wantPhase: TransferPhaseTransferring, wantPercent: 98},
+		{name: "active finalizing", raw: 100, wantPhase: TransferPhaseFinalizing, wantPercent: 99},
+		{name: "process complete", raw: 100, processDone: true, wantPhase: TransferPhaseSucceeded, wantPercent: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			phase, percent := mapRsyncProgress(tt.raw, tt.processDone, LocalTransferProgressTotal)
+			if phase != tt.wantPhase || percent != tt.wantPercent {
+				t.Fatalf("mapRsyncProgress(%d, %v, total) = (%q, %d), want (%q, %d)",
+					tt.raw, tt.processDone, phase, percent, tt.wantPhase, tt.wantPercent)
+			}
+		})
+	}
+}
+
+func TestLocalTransferJobManagerUsesTotalProgressMode(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	release := make(chan struct{})
+	outputWritten := make(chan struct{})
+	job, err := manager.StartWithOptions("member-transfer-1", "mac-one", "push", LocalTransferProgressTotal, nil, func(onOutput func(string)) error {
+		onOutput("     7,654,321  73%   44.35MB/s    0:00:01 (xfr#12, ir-chk=8/20)\n")
+		close(outputWritten)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-outputWritten
+	active, ok := manager.Get(job.ID)
+	if !ok {
+		t.Fatalf("job %q not found", job.ID)
+	}
+	if active.ProgressMode != LocalTransferProgressTotal || active.Phase != TransferPhaseTransferring || active.Percent != 73 {
+		t.Fatalf("active job = %+v", active)
+	}
+	close(release)
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.Phase != TransferPhaseSucceeded || finished.Percent != 100 {
+		t.Fatalf("finished job = %+v", finished)
+	}
+}
+
 func TestLocalTransferJobManagerParsesProgressAcrossOutputChunks(t *testing.T) {
 	manager := NewLocalTransferJobManager()
 	job, err := manager.Start("mac-one", "push", func(onOutput func(string)) error {

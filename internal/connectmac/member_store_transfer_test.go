@@ -222,6 +222,7 @@ func TestMemberStoreTransferValidatesStatusPhasePercentCombinations(t *testing.T
 		{name: "running preparing zero", status: TransferStatusRunning, phase: TransferPhasePreparing, percent: 0, valid: true},
 		{name: "running transferring one", status: TransferStatusRunning, phase: TransferPhaseTransferring, percent: 1, valid: true},
 		{name: "running transferring ninety five", status: TransferStatusRunning, phase: TransferPhaseTransferring, percent: 95, valid: true},
+		{name: "running transferring ninety eight", status: TransferStatusRunning, phase: TransferPhaseTransferring, percent: 98, valid: true},
 		{name: "running finalizing ninety nine", status: TransferStatusRunning, phase: TransferPhaseFinalizing, percent: 99, valid: true},
 		{name: "succeeded exact", status: TransferStatusSucceeded, phase: TransferPhaseSucceeded, percent: 100, valid: true},
 		{name: "failed preserves progress", status: TransferStatusFailed, phase: TransferPhaseFailed, percent: 48, valid: true},

@@ -1631,6 +1631,7 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction, requestID
 		}
 	}
 
+	rsyncOptions := DetectRsyncOptions(context.Background(), a.Runner)
 	var rsyncArgs []string
 	switch direction {
 	case "push":
@@ -1645,7 +1646,7 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction, requestID
 		if remotePath == "" {
 			remotePath = "~/Downloads/"
 		}
-		rsyncArgs, err = RsyncPushArgs(profile, localPath, remotePath, mergeSyncFilters(profile.Sync.Push, SyncFilters{}))
+		rsyncArgs, err = RsyncPushArgsWithOptions(profile, localPath, remotePath, mergeSyncFilters(profile.Sync.Push, SyncFilters{}), rsyncOptions)
 	case "pull":
 		remotePath := strings.TrimSpace(req.RemotePath)
 		if remotePath == "" {
@@ -1661,7 +1662,7 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction, requestID
 			}
 		}
 		if err == nil {
-			rsyncArgs, err = RsyncPullArgs(profile, remotePath, localPath, mergeSyncFilters(profile.Sync.Pull, SyncFilters{}))
+			rsyncArgs, err = RsyncPullArgsWithOptions(profile, remotePath, localPath, mergeSyncFilters(profile.Sync.Pull, SyncFilters{}), rsyncOptions)
 		}
 	default:
 		return LocalTransferJob{}, fmt.Errorf("unsupported transfer direction %q", direction)
@@ -1670,10 +1671,14 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction, requestID
 		return LocalTransferJob{}, err
 	}
 
-	job, err := a.LocalTransfers.StartWithEvents(strings.TrimSpace(req.TransferID), profileName, direction, func(event LocalTransferEvent) {
+	progressMode := LocalTransferProgressEstimated
+	if rsyncOptions.Progress2 {
+		progressMode = LocalTransferProgressTotal
+	}
+	job, err := a.LocalTransfers.StartWithOptions(strings.TrimSpace(req.TransferID), profileName, direction, progressMode, func(event LocalTransferEvent) {
 		a.writeLocalTransferEventWithRequest(event, requestID)
 	}, func(onOutput func(string)) error {
-		return a.Runner.RunRsyncProgress(context.Background(), rsyncArgs, onOutput)
+		return a.Runner.RunRsyncCommandProgress(context.Background(), rsyncOptions.Path, rsyncArgs, onOutput)
 	})
 	return job, err
 }

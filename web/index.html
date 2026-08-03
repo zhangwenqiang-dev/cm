@@ -3482,11 +3482,20 @@ cm local-agent start</pre>
       return [100, 99, 90, 75, 50, 25, 10, 0].find((value) => Number(percent || 0) >= value) ?? 0;
     }
 
+    function transferProgressMode(job) {
+      return String(job?.progress_mode || job?.progressMode || "estimated");
+    }
+
+    function transferPersistedPercent(job, exactPercent, terminal) {
+      if (terminal || transferProgressMode(job) === "total") return exactPercent;
+      return transferMilestone(exactPercent);
+    }
+
     async function updateTransferRecord(transferID, job, bind = false, options = {}) {
       if (!transferID || !job) return null;
       const terminal = transferTerminal(job.status);
       const exactPercent = Math.max(0, Math.min(100, Math.round(Number(job.percent) || 0)));
-      const persistedPercent = terminal ? exactPercent : transferMilestone(exactPercent);
+      const persistedPercent = transferPersistedPercent(job, exactPercent, terminal);
       const phase = String(job.phase || (terminal ? job.status : (persistedPercent > 0 ? "transferring" : "preparing")));
       const milestoneKey = phase + ":" + persistedPercent;
       const last = state.transferMilestones[transferID];
@@ -3882,12 +3891,13 @@ cm local-agent start</pre>
 
     function syncJobStatusLabel(job) {
       const label = syncDirectionLabel(job?.direction);
+      const estimated = job && transferProgressMode(job) !== "total" ? "（估算）" : "";
       if (!job) return label + "准备中";
       if (state.syncPollUnavailable[syncJobKey(job.profile, job.direction)]) return "状态暂时不可用";
       if (terminalSyncFailed(job)) return "传输结果保存失败";
       if (terminalSyncPending(job)) return "正在保存传输结果";
       if (job.phase === "preparing") return label + "准备中";
-      if (job.phase === "transferring") return label + "中";
+      if (job.phase === "transferring") return label + "中" + estimated;
       if (job.phase === "finalizing") return "正在完成校验";
       if (job.phase === "succeeded") return label + "完成";
       if (job.phase === "failed") return label + "失败";

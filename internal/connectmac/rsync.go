@@ -1,12 +1,21 @@
 package connectmac
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"unicode"
 )
+
+const connectMacRsyncEnv = "CONNECTMAC_RSYNC"
+
+type RsyncOptions struct {
+	Path      string
+	Progress2 bool
+}
 
 func RemoteTarget(profile Profile, path string) string {
 	return fmt.Sprintf("%s@%s:%s", profile.User, profile.Host, path)
@@ -42,32 +51,51 @@ type SyncFilters struct {
 }
 
 func RsyncPullArgs(profile Profile, remotePath, localDir string, filters SyncFilters) ([]string, error) {
+	return RsyncPullArgsWithOptions(profile, remotePath, localDir, filters, RsyncOptions{})
+}
+
+func RsyncPullArgsWithOptions(profile Profile, remotePath, localDir string, filters SyncFilters, options RsyncOptions) ([]string, error) {
 	keyPath, err := ExpandPath(profile.IdentityFile)
 	if err != nil {
 		return nil, err
 	}
-	args := []string{
-		"-avzP",
-		"-e", "ssh -i " + keyPath,
-	}
+	args := rsyncBaseArgs(options)
+	args = append(args, "-e", "ssh -i "+keyPath)
 	args = appendRsyncFilters(args, filters)
 	args = append(args, RemoteTarget(profile, EscapeRemotePath(remotePath)), localDir)
 	return args, nil
 }
 
 func RsyncPushArgs(profile Profile, localPath, remoteDir string, filters SyncFilters) ([]string, error) {
+	return RsyncPushArgsWithOptions(profile, localPath, remoteDir, filters, RsyncOptions{})
+}
+
+func RsyncPushArgsWithOptions(profile Profile, localPath, remoteDir string, filters SyncFilters, options RsyncOptions) ([]string, error) {
 	keyPath, err := ExpandPath(profile.IdentityFile)
 	if err != nil {
 		return nil, err
 	}
 	remoteDir = NormalizeRemotePath(remoteDir)
-	args := []string{
-		"-avzP",
-		"-e", "ssh -i " + keyPath,
-	}
+	args := rsyncBaseArgs(options)
+	args = append(args, "-e", "ssh -i "+keyPath)
 	args = appendRsyncFilters(args, filters)
 	args = append(args, localPath, RemoteTarget(profile, EscapeRemotePath(remoteDir)))
 	return args, nil
+}
+
+func rsyncBaseArgs(options RsyncOptions) []string {
+	if options.Progress2 {
+		return []string{"-avz", "--partial", "--info=progress2"}
+	}
+	return []string{"-avzP"}
+}
+
+func defaultRsyncCommandPath() string {
+	candidates := rsyncPathCandidates()
+	if len(candidates) == 0 {
+		return "rsync"
+	}
+	return candidates[0]
 }
 
 func EscapeRemotePath(path string) string {
@@ -99,4 +127,55 @@ func appendRsyncFilters(args []string, filters SyncFilters) []string {
 		args = append(args, "--exclude", "*")
 	}
 	return args
+}
+
+func DetectRsyncOptions(ctx context.Context, runner Runner) RsyncOptions {
+	candidates := rsyncPathCandidates()
+	if len(candidates) == 0 {
+		return RsyncOptions{}
+	}
+	for _, path := range candidates {
+		if rsyncSupportsProgress2(ctx, runner, path) {
+			return RsyncOptions{Path: path, Progress2: true}
+		}
+	}
+	return RsyncOptions{Path: candidates[0]}
+}
+
+func rsyncPathCandidates() []string {
+	var candidates []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == path {
+				return
+			}
+		}
+		candidates = append(candidates, path)
+	}
+	if configured := os.Getenv(connectMacRsyncEnv); configured != "" {
+		add(configured)
+		return candidates
+	}
+	if path, err := exec.LookPath("rsync"); err == nil {
+		add(path)
+	}
+	for _, path := range []string{"/usr/local/bin/rsync", "/opt/homebrew/bin/rsync"} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			add(path)
+		}
+	}
+	add("rsync")
+	return candidates
+}
+
+func rsyncSupportsProgress2(ctx context.Context, runner Runner, path string) bool {
+	if runner == nil {
+		return false
+	}
+	_, err := runner.RsyncCommandOutput(ctx, path, []string{"--info=progress2", "--version"})
+	return err == nil
 }

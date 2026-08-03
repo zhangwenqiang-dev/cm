@@ -31,9 +31,11 @@ type fakeRunner struct {
 	background    []string
 	startErr      error
 	rsync         []string
+	rsyncPath     string
 	rsyncOutput   []string
 	rsyncErr      error
 	rsyncWait     <-chan struct{}
+	rsyncProbe    map[string]error
 	forgotHost    string
 	knownHost     string
 	scannedKey    string
@@ -102,6 +104,11 @@ func (r *fakeRunner) RunRsync(ctx context.Context, args []string) error {
 }
 
 func (r *fakeRunner) RunRsyncProgress(ctx context.Context, args []string, onOutput func(string)) error {
+	return r.RunRsyncCommandProgress(ctx, "rsync", args, onOutput)
+}
+
+func (r *fakeRunner) RunRsyncCommandProgress(ctx context.Context, path string, args []string, onOutput func(string)) error {
+	r.rsyncPath = path
 	r.rsync = args
 	for _, output := range r.rsyncOutput {
 		onOutput(output)
@@ -114,6 +121,15 @@ func (r *fakeRunner) RunRsyncProgress(ctx context.Context, args []string, onOutp
 		}
 	}
 	return r.rsyncErr
+}
+
+func (r *fakeRunner) RsyncCommandOutput(ctx context.Context, path string, args []string) ([]byte, error) {
+	if r.rsyncProbe != nil {
+		if err, ok := r.rsyncProbe[path]; ok {
+			return nil, err
+		}
+	}
+	return []byte("rsync: unrecognized option --info=progress2"), errors.New("exit status 1")
 }
 
 func (r *fakeRunner) KnownHostKey(ctx context.Context, host string) (string, error) {
@@ -2645,6 +2661,55 @@ profiles:
 	}
 	if !strings.Contains(runner.rsync[len(runner.rsync)-2], "ec2-user@mac-host.example.com:~/Downloads/") {
 		t.Fatalf("pull remote path args = %#v", runner.rsync)
+	}
+}
+
+func TestLocalAgentTransferUsesProgress2WhenSupported(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(connectMacRsyncEnv, "/usr/local/bin/rsync")
+	key := filepath.Join(home, ".ssh", "private.pem")
+	writeFile(t, key, "private key")
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localPath := filepath.Join(home, "payload.txt")
+	writeFile(t, localPath, "payload")
+
+	release := make(chan struct{})
+	runner := &fakeRunner{
+		rsyncProbe:  map[string]error{"/usr/local/bin/rsync": nil},
+		rsyncOutput: []string{"     7,654,321  73%   44.35MB/s    0:00:01 (xfr#12, ir-chk=8/20)\n"},
+		rsyncWait:   release,
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	handler := app.newLocalAgentHandler()
+	profileYAML := "profiles:\n  remote-usw2:\n    user: ec2-user\n    host: mac-host.example.com\n    identity_file: " + key + "\n"
+	body := fmt.Sprintf(`{"profile":"remote-usw2","local_path":%q,"profile_yaml":%q}`, localPath, profileYAML)
+	job := postLocalTransferForTest(t, handler, "/sync/push", body)
+
+	deadline := time.Now().Add(time.Second)
+	var active LocalTransferJob
+	for time.Now().Before(deadline) {
+		var ok bool
+		active, ok = app.LocalTransfers.Get(job.ID)
+		if ok && active.Percent == 73 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if active.ProgressMode != LocalTransferProgressTotal || active.Percent != 73 {
+		t.Fatalf("active job = %+v", active)
+	}
+	if runner.rsyncPath != "/usr/local/bin/rsync" || !containsString(runner.rsync, "--info=progress2") || containsString(runner.rsync, "-avzP") {
+		t.Fatalf("rsync path=%q args=%#v", runner.rsyncPath, runner.rsync)
+	}
+	close(release)
+	finished := waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
+	if finished.Status != LocalTransferSucceeded || finished.Percent != 100 {
+		t.Fatalf("finished job = %+v", finished)
 	}
 }
 

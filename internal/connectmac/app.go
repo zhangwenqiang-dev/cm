@@ -17,6 +17,8 @@ type Runner interface {
 	Stop(pid int) error
 	RunRsync(ctx context.Context, args []string) error
 	RunRsyncProgress(ctx context.Context, args []string, onOutput func(string)) error
+	RunRsyncCommandProgress(ctx context.Context, path string, args []string, onOutput func(string)) error
+	RsyncCommandOutput(ctx context.Context, path string, args []string) ([]byte, error)
 	KnownHostKey(ctx context.Context, host string) (string, error)
 	ScanHostKey(ctx context.Context, host string) (string, error)
 	ForgetHost(ctx context.Context, host string) error

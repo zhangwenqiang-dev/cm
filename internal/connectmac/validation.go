@@ -211,6 +211,16 @@ func CheckSSHAvailable() error {
 }
 
 func CheckRsyncAvailable() error {
+	if configured := strings.TrimSpace(os.Getenv(connectMacRsyncEnv)); configured != "" {
+		info, err := os.Stat(configured)
+		if err != nil {
+			return fmt.Errorf("rsync executable %s not found: %w", configured, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("rsync executable %s is a directory", configured)
+		}
+		return nil
+	}
 	if _, err := exec.LookPath("rsync"); err != nil {
 		return errors.New("rsync executable not found on PATH")
 	}

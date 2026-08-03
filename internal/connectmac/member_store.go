@@ -1651,7 +1651,7 @@ func validateTransferRecord(record TransferRecord) error {
 	case TransferStatusRunning:
 		validCombination =
 			phase == TransferPhasePreparing && record.Percent == 0 ||
-				phase == TransferPhaseTransferring && record.Percent >= 1 && record.Percent <= 95 ||
+				phase == TransferPhaseTransferring && record.Percent >= 1 && record.Percent <= 98 ||
 				phase == TransferPhaseFinalizing && record.Percent == 99
 	case TransferStatusSucceeded:
 		validCombination = phase == TransferPhaseSucceeded && record.Percent == 100

@@ -183,9 +183,10 @@ func TestWebTransferPhaseLabelsAndTerminalPersistenceOrdering(t *testing.T) {
 	html := string(data)
 	for _, want := range []string{
 		`if (phase === "preparing") return label + "准备中"`,
-		`if (phase === "transferring") return label + "中"`,
+		`if (job.phase === "transferring") return label + "中" + estimated`,
 		`if (phase === "finalizing") return "正在完成校验"`,
 		`if (phase === "succeeded") return label + "完成"`,
+		`function transferPersistedPercent(job, exactPercent, terminal)`,
 		`const value = terminalSyncPending(job) || job.phase === "finalizing"`,
 		`? Math.min(99, Math.max(0, Math.round(percent)))`,
 		`phase,`,

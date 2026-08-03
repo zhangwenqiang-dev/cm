@@ -48,7 +48,7 @@ func (ExecRunner) Stop(pid int) error {
 	return process.Kill()
 }
 func (ExecRunner) RunRsync(ctx context.Context, args []string) error {
-	cmd := exec.CommandContext(ctx, "rsync", args...)
+	cmd := exec.CommandContext(ctx, defaultRsyncCommandPath(), args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -56,11 +56,25 @@ func (ExecRunner) RunRsync(ctx context.Context, args []string) error {
 }
 
 func (ExecRunner) RunRsyncProgress(ctx context.Context, args []string, onOutput func(string)) error {
-	cmd := exec.CommandContext(ctx, "rsync", args...)
+	return ExecRunner{}.RunRsyncCommandProgress(ctx, defaultRsyncCommandPath(), args, onOutput)
+}
+
+func (ExecRunner) RunRsyncCommandProgress(ctx context.Context, path string, args []string, onOutput func(string)) error {
+	if path == "" {
+		path = "rsync"
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = io.MultiWriter(os.Stdout, outputCallbackWriter{onOutput: onOutput})
 	cmd.Stderr = io.MultiWriter(os.Stderr, outputCallbackWriter{onOutput: onOutput})
 	return cmd.Run()
+}
+
+func (ExecRunner) RsyncCommandOutput(ctx context.Context, path string, args []string) ([]byte, error) {
+	if path == "" {
+		path = "rsync"
+	}
+	return exec.CommandContext(ctx, path, args...).CombinedOutput()
 }
 
 type outputCallbackWriter struct {
