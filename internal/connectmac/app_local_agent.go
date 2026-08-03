@@ -1074,7 +1074,7 @@ func (a App) stopLocalAgentLaunchAgent(ctx context.Context, opts localAgentOptio
 		if drained {
 			a.resumeLocalAgentActivity(opts)
 		}
-		if ignoreMissing && localAgentLaunchServiceNotLoaded(output) {
+		if ignoreMissing && a.localAgentLaunchServiceMissingAfterBootout(ctx, output) {
 			return 0
 		}
 		fmt.Fprintf(a.Err, "stop launch agent: %s\n", localAgentServiceCommandError(err, output))
@@ -1342,6 +1342,22 @@ func localAgentLaunchServiceNotLoaded(output []byte) bool {
 	default:
 		return false
 	}
+}
+
+func localAgentLaunchBootoutNeedsPrintCheck(output []byte) bool {
+	text := strings.ToLower(strings.TrimSpace(string(output)))
+	return strings.TrimSuffix(text, ".") == "boot-out failed: 5: input/output error"
+}
+
+func (a App) localAgentLaunchServiceMissingAfterBootout(ctx context.Context, bootoutOutput []byte) bool {
+	if localAgentLaunchServiceNotLoaded(bootoutOutput) {
+		return true
+	}
+	if !localAgentLaunchBootoutNeedsPrintCheck(bootoutOutput) {
+		return false
+	}
+	output, err := a.runLocalAgentServiceCommand(ctx, "print", localAgentLaunchDomain()+"/"+localAgentLaunchLabel)
+	return err != nil && localAgentLaunchServiceNotLoaded(output)
 }
 
 func localAgentServiceCommandError(err error, output []byte) string {
