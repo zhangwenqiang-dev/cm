@@ -8,7 +8,7 @@ import (
 
 func (a App) runCompletion(ctx context.Context, configPath string, args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|job-commands|profile-commands|member-commands|logs-commands|host-key-commands|local-agent-commands>")
+		fmt.Fprintln(a.Err, "usage: cm completion <zsh|bash|fish|commands|profiles|apple-emails|aws-commands|mcp-commands|job-commands|profile-commands|member-commands|logs-commands|host-key-commands|local-agent-commands|skill-commands>")
 		return 2
 	}
 	switch args[0] {
@@ -47,6 +47,9 @@ func (a App) runCompletion(ctx context.Context, configPath string, args []string
 		return 0
 	case "local-agent-commands":
 		printLines(a.Out, completionLocalAgentCommands())
+		return 0
+	case "skill-commands":
+		printLines(a.Out, completionSkillCommands())
 		return 0
 	case "profiles":
 		cfg, code := a.loadCompletionConfig(ctx, configPath)
@@ -87,7 +90,7 @@ func (a App) loadCompletionConfig(ctx context.Context, configPath string) (Confi
 func completionCommands() []string {
 	return []string{
 		"init",
-		"init-rules",
+		"skill",
 		"guide",
 		"version",
 		"completion",
@@ -158,6 +161,9 @@ func completionMCPCommands() []string {
 func completionLocalAgentCommands() []string {
 	return []string{"install", "start", "stop", "restart", "status", "uninstall"}
 }
+func completionSkillCommands() []string {
+	return []string{"setup", "install", "status", "update", "validate", "path", "print", "uninstall"}
+}
 func zshCompletionScript() string {
 	return `#compdef cm
 
@@ -190,7 +196,7 @@ _cm_profile_or_apple() {
 }
 
 _cm() {
-  local -a commands aws_commands mcp_commands job_commands profile_commands member_commands logs_commands host_key_commands local_agent_commands
+  local -a commands aws_commands mcp_commands job_commands profile_commands member_commands logs_commands host_key_commands local_agent_commands skill_commands
   commands=("${(@f)$(command cm completion commands 2>/dev/null)}")
   aws_commands=("${(@f)$(command cm completion aws-commands 2>/dev/null)}")
   mcp_commands=("${(@f)$(command cm completion mcp-commands 2>/dev/null)}")
@@ -200,6 +206,7 @@ _cm() {
   logs_commands=("${(@f)$(command cm completion logs-commands 2>/dev/null)}")
   host_key_commands=("${(@f)$(command cm completion host-key-commands 2>/dev/null)}")
   local_agent_commands=("${(@f)$(command cm completion local-agent-commands 2>/dev/null)}")
+  skill_commands=("${(@f)$(command cm completion skill-commands 2>/dev/null)}")
 
   if [[ "${words[$((CURRENT - 1))]}" == "--config" ]]; then
     _files
@@ -212,6 +219,13 @@ _cm() {
   fi
 
   case "${words[2]}" in
+    skill)
+      if (( CURRENT == 3 )); then
+        compadd -- "${skill_commands[@]}"
+      else
+        _values 'skill option' --agent --project --skills-dir --dry-run --force --rules
+      fi
+      ;;
     check|connect|ssh|start|forget-host|open-vnc|setup-vnc|stop)
       (( CURRENT == 3 )) && _cm_profiles
       ;;
@@ -362,6 +376,13 @@ func bashCompletionScript() string {
   fi
 
   case "$cmd" in
+    skill)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(cm completion skill-commands 2>/dev/null)" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -W "--agent --project --skills-dir --dry-run --force --rules" -- "$cur") )
+      fi
+      ;;
     check|connect|ssh|start|forget-host|open-vnc|setup-vnc|stop|exec)
       [[ $COMP_CWORD -eq 2 ]] && COMPREPLY=( $(compgen -W "$(cm completion profiles "${config_args[@]}" 2>/dev/null)" -- "$cur") )
       ;;
@@ -476,6 +497,8 @@ complete -F _cm_completion cm
 func fishCompletionScript() string {
 	return `complete -c cm -f
 complete -c cm -n "not __fish_seen_subcommand_from (cm completion commands)" -a "(cm completion commands)"
+complete -c cm -n "__fish_seen_subcommand_from skill; and not __fish_seen_subcommand_from (cm completion skill-commands)" -a "(cm completion skill-commands)"
+complete -c cm -n "__fish_seen_subcommand_from skill" -a "--agent --project --skills-dir --dry-run --force --rules"
 complete -c cm -n "__fish_seen_subcommand_from check connect ssh start forget-host open-vnc setup-vnc stop exec" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from open close next" -a "(cm completion profiles)"
 complete -c cm -n "__fish_seen_subcommand_from open close next" -a "(cm completion apple-emails)"

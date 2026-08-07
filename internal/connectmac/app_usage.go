@@ -7,8 +7,8 @@ func (a App) printUsage() {
   cm version
   cm init [--config <path>]
   cm init wizard [--config <path>]
-  cm init-rules [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
-  cm init-rules --print-rules
+  cm skill setup [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
+  cm skill <install|status|update|validate|path|print|uninstall> [options]
   cm guide [first-use|profile|open|close|sync|vnc|mcp]
   cm completion <zsh|bash|fish>
   cm list [--config <path>]

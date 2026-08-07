@@ -33,7 +33,7 @@ func (a App) runInit(configPath string, args []string) int {
 	}
 	fmt.Fprintf(a.Out, "created config: %s\n", path)
 	if strings.EqualFold(a.promptLine("Initialize AI rules now? [y/N]: "), "y") {
-		return a.runInitRules(nil)
+		return a.runSkillSetup(nil)
 	}
 	return 0
 }
@@ -63,54 +63,11 @@ func (a App) runInitWizard(configPath string) int {
 	}
 	fmt.Fprintf(a.Out, "created config: %s\n", path)
 	if strings.EqualFold(a.promptLine("Initialize AI rules now? [y/N]: "), "y") {
-		if code := a.runInitRules(nil); code != 0 {
+		if code := a.runSkillSetup(nil); code != 0 {
 			return code
 		}
 	}
 	fmt.Fprintln(a.Out, "Next: run cm profile add or edit ~/.connectmac/profiles/<name>.yaml")
-	return 0
-}
-func (a App) runInitRules(args []string) int {
-	options, err := parseInitRulesOptions(args)
-	if err != nil {
-		fmt.Fprintln(a.Err, err)
-		return 2
-	}
-	if options.PrintRules {
-		fmt.Fprint(a.Out, DefaultRulesTemplate())
-		return 0
-	}
-	agent := options.Agent
-	if agent == "" {
-		agent = strings.ToLower(a.promptLine("Agent for AI rules (Codex/Claude/Trae/Cursor): "))
-	}
-	options.Agent = agent
-	install, err := BuildRulesInstallWithOptions(options)
-	if err != nil {
-		fmt.Fprintln(a.Err, err)
-		return 1
-	}
-	if options.DryRun {
-		fmt.Fprintln(a.Out, "AI rules install dry run")
-		fmt.Fprintf(a.Out, "Rules source: %s\n", install.SourcePath)
-		fmt.Fprintf(a.Out, "%s rules: %s\n", install.Agent, install.AgentPath)
-		fmt.Fprintf(a.Out, "connectmac skill: %s\n", install.SkillPath)
-		fmt.Fprintln(a.Out, "No files were written.")
-		return 0
-	}
-	result, err := InstallRules(install)
-	if err != nil {
-		fmt.Fprintf(a.Err, "init rules failed: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(a.Out, "created rules source: %s\n", result.SourcePath)
-	fmt.Fprintf(a.Out, "installed %s rules: %s\n", result.Agent, result.AgentPath)
-	fmt.Fprintf(a.Out, "installed connectmac skill: %s\n", result.SkillPath)
-	if result.Validated {
-		fmt.Fprintln(a.Out, "validation passed")
-	}
-	fmt.Fprintln(a.Out, "Rule content source: ~/.connectmac/rules.md")
-	fmt.Fprintln(a.Out, "Ask your AI agent to remember the rule content exactly and keep it as long-term memory.")
 	return 0
 }
 func DefaultConfigTemplate() string {

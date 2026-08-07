@@ -108,8 +108,8 @@ func (a App) Run(ctx context.Context, args []string) int {
 	switch command {
 	case "init":
 		return a.runInit(configPath, args[1:])
-	case "init-rules":
-		return a.runInitRules(args[1:])
+	case "skill":
+		return a.runSkill(args[1:])
 	case "guide":
 		return a.runGuide(args[1:])
 	case "version":

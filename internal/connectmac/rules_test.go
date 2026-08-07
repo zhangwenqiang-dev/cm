@@ -124,15 +124,15 @@ func TestInstallRulesReplacesLegacyAWSMarkerBlock(t *testing.T) {
 	}
 }
 
-func TestAppInitRules(t *testing.T) {
+func TestAppSkillSetup(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
 	t.Setenv("HOME", home)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
 	skillsDir := filepath.Join(t.TempDir(), "skills")
-	if code := app.Run(context.Background(), []string{"init-rules", "--agent", "cursor", "--project", project, "--skills-dir", skillsDir}); code != 0 {
-		t.Fatalf("init-rules code = %d, err = %s", code, errOut.String())
+	if code := app.Run(context.Background(), []string{"skill", "setup", "--agent", "cursor", "--project", project, "--skills-dir", skillsDir}); code != 0 {
+		t.Fatalf("skill setup code = %d, err = %s", code, errOut.String())
 	}
 	cursorRules := filepath.Join(project, ".cursor", "rules", "connectmac.mdc")
 	if _, err := os.Stat(cursorRules); err != nil {
@@ -149,17 +149,17 @@ func TestAppInitRules(t *testing.T) {
 	}
 }
 
-func TestAppInitRulesDryRunDoesNotWrite(t *testing.T) {
+func TestAppSkillSetupDryRunDoesNotWrite(t *testing.T) {
 	home := t.TempDir()
 	project := t.TempDir()
 	skillsDir := filepath.Join(t.TempDir(), "skills")
 	t.Setenv("HOME", home)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
-	if code := app.Run(context.Background(), []string{"init-rules", "--agent", "codex", "--project", project, "--skills-dir", skillsDir, "--dry-run"}); code != 0 {
-		t.Fatalf("init-rules dry-run code = %d, err = %s", code, errOut.String())
+	if code := app.Run(context.Background(), []string{"skill", "setup", "--agent", "codex", "--project", project, "--skills-dir", skillsDir, "--dry-run"}); code != 0 {
+		t.Fatalf("skill setup dry-run code = %d, err = %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "AI rules install dry run") || !strings.Contains(out.String(), "No files were written.") {
+	if !strings.Contains(out.String(), "ConnectMac skill setup dry run") || !strings.Contains(out.String(), "No files were written.") {
 		t.Fatalf("out = %q", out.String())
 	}
 	for _, path := range []string{
@@ -173,15 +173,15 @@ func TestAppInitRulesDryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
-func TestAppInitRulesPrintRulesDoesNotRequireAgent(t *testing.T) {
+func TestAppSkillPrintDoesNotRequireAgent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, t.TempDir())
-	if code := app.Run(context.Background(), []string{"init-rules", "--print-rules"}); code != 0 {
-		t.Fatalf("print-rules code = %d, err = %s", code, errOut.String())
+	if code := app.Run(context.Background(), []string{"skill", "print"}); code != 0 {
+		t.Fatalf("skill print code = %d, err = %s", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "ConnectMac AI Rules") {
+	if !strings.Contains(out.String(), "name: connectmac") {
 		t.Fatalf("out = %q", out.String())
 	}
 	for _, want := range []string{

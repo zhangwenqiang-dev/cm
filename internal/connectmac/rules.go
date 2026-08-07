@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -16,12 +17,11 @@ const (
 	oldRulesEnd      = "<!-- END CONNECTMAC AWS RULES -->"
 )
 
-type InitRulesOptions struct {
+type SkillSetupOptions struct {
 	Agent      string
 	ProjectDir string
 	SkillsDir  string
 	DryRun     bool
-	PrintRules bool
 }
 
 type RulesInstall struct {
@@ -40,44 +40,11 @@ type RulesInstallResult struct {
 	Validated  bool
 }
 
-func parseInitRulesOptions(args []string) (InitRulesOptions, error) {
-	var options InitRulesOptions
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--agent":
-			i++
-			if i >= len(args) || args[i] == "" {
-				return options, fmt.Errorf("--agent requires a value")
-			}
-			options.Agent = args[i]
-		case "--project":
-			i++
-			if i >= len(args) || args[i] == "" {
-				return options, fmt.Errorf("--project requires a value")
-			}
-			options.ProjectDir = args[i]
-		case "--skills-dir":
-			i++
-			if i >= len(args) || args[i] == "" {
-				return options, fmt.Errorf("--skills-dir requires a value")
-			}
-			options.SkillsDir = args[i]
-		case "--dry-run":
-			options.DryRun = true
-		case "--print-rules":
-			options.PrintRules = true
-		default:
-			return options, fmt.Errorf("unknown init-rules option %q", args[i])
-		}
-	}
-	return options, nil
-}
-
 func BuildRulesInstall(agent, projectDir string) (RulesInstall, error) {
-	return BuildRulesInstallWithOptions(InitRulesOptions{Agent: agent, ProjectDir: projectDir})
+	return BuildRulesInstallWithOptions(SkillSetupOptions{Agent: agent, ProjectDir: projectDir})
 }
 
-func BuildRulesInstallWithOptions(options InitRulesOptions) (RulesInstall, error) {
+func BuildRulesInstallWithOptions(options SkillSetupOptions) (RulesInstall, error) {
 	agent := normalizeAgentName(options.Agent)
 	if agent == "" {
 		return RulesInstall{}, fmt.Errorf("agent is required; choose Codex, Claude, Trae, or Cursor")
@@ -116,6 +83,22 @@ func BuildRulesInstallWithOptions(options InitRulesOptions) (RulesInstall, error
 }
 
 func InstallRules(install RulesInstall) (RulesInstallResult, error) {
+	return InstallRulesWithVersion(install, "dev")
+}
+
+func InstallRulesWithVersion(install RulesInstall, version string) (RulesInstallResult, error) {
+	manager, err := skillManagerForPath(install.SkillPath, version)
+	if err != nil {
+		return RulesInstallResult{}, err
+	}
+	status := manager.Status()
+	if status.Name == SkillStatusOutdated {
+		if _, err := manager.Update(false, false); err != nil {
+			return RulesInstallResult{}, err
+		}
+	} else if _, err := manager.Install(false); err != nil {
+		return RulesInstallResult{}, err
+	}
 	rules := DefaultRulesTemplate()
 	if err := os.MkdirAll(filepath.Dir(install.SourcePath), 0o700); err != nil {
 		return RulesInstallResult{}, err
@@ -136,9 +119,6 @@ func InstallRules(install RulesInstall) (RulesInstallResult, error) {
 	content = upsertMarkedBlock(content, block)
 	if err := os.WriteFile(install.AgentPath, []byte(content), 0o644); err != nil {
 		return RulesInstallResult{}, fmt.Errorf("write agent rules: %w", err)
-	}
-	if err := InstallSkill(install.SkillPath); err != nil {
-		return RulesInstallResult{}, err
 	}
 	result := RulesInstallResult{Agent: install.Agent, SourcePath: install.SourcePath, AgentPath: install.AgentPath, SkillPath: install.SkillPath}
 	if err := ValidateRulesInstall(result); err != nil {
@@ -202,16 +182,20 @@ func connectMacSkillPath(skillsDir string) (string, error) {
 }
 
 func InstallSkill(skillPath string) error {
-	if err := os.MkdirAll(filepath.Join(skillPath, "agents"), 0o755); err != nil {
+	manager, err := skillManagerForPath(skillPath, "dev")
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte(DefaultSkillTemplate()), 0o644); err != nil {
-		return fmt.Errorf("write skill: %w", err)
+	_, err = manager.Install(false)
+	return err
+}
+
+func skillManagerForPath(skillPath, version string) (SkillManager, error) {
+	statePath, err := ExpandPath(defaultSkillStatePath)
+	if err != nil {
+		return SkillManager{}, err
 	}
-	if err := os.WriteFile(filepath.Join(skillPath, "agents", "openai.yaml"), []byte(DefaultSkillOpenAIYAML()), 0o644); err != nil {
-		return fmt.Errorf("write skill metadata: %w", err)
-	}
-	return nil
+	return SkillManager{SkillPath: skillPath, StatePath: statePath, Version: version, Now: time.Now}, nil
 }
 
 func agentRulesPath(agent, projectDir string) (string, error) {
@@ -264,6 +248,71 @@ func upsertMarkedBlock(content, block string) string {
 		return block
 	}
 	return content + "\n\n" + block
+}
+
+func removeMarkedRulesBlock(content string) (string, bool) {
+	start := strings.Index(content, rulesStart)
+	endMarker := rulesEnd
+	if start < 0 {
+		start = strings.Index(content, oldRulesStart)
+		endMarker = oldRulesEnd
+	}
+	if start < 0 {
+		return content, false
+	}
+	endRelative := strings.Index(content[start:], endMarker)
+	if endRelative < 0 {
+		return content, false
+	}
+	end := start + endRelative + len(endMarker)
+	prefix := strings.TrimRight(content[:start], "\n")
+	suffix := strings.TrimLeft(content[end:], "\n")
+	switch {
+	case prefix != "" && suffix != "":
+		return prefix + "\n\n" + suffix, true
+	case prefix != "":
+		return prefix + "\n", true
+	case suffix != "":
+		return suffix, true
+	default:
+		return "", true
+	}
+}
+
+func UninstallRulesBlock(agent, projectDir string, dryRun bool) (string, bool, error) {
+	agent = normalizeAgentName(agent)
+	if agent == "" {
+		return "", false, fmt.Errorf("agent is required; choose Codex, Claude, Trae, or Cursor")
+	}
+	projectDir, err := ExpandPath(projectDir)
+	if err != nil {
+		return "", false, err
+	}
+	path, err := agentRulesPath(agent, projectDir)
+	if err != nil {
+		return "", false, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return path, false, nil
+	}
+	if err != nil {
+		return path, false, err
+	}
+	updated, changed := removeMarkedRulesBlock(string(data))
+	if !changed || dryRun {
+		return path, changed, nil
+	}
+	if agent == "cursor" && strings.TrimSpace(updated) == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return path, false, err
+		}
+		return path, true, nil
+	}
+	if err := atomicWriteFile(path, []byte(updated), 0o644); err != nil {
+		return path, false, err
+	}
+	return path, true, nil
 }
 
 func DefaultRulesTemplate() string {

@@ -57,7 +57,7 @@ Tip: AWS mutations always preview first. Add --confirm only after reviewing the 
    cm init
 
 2. Install AI rules and skill:
-   cm init-rules --agent codex --project .
+   cm skill setup --agent codex --project .
 
 3. Create or import a profile:
    cm profile wizard
