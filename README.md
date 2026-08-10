@@ -359,10 +359,11 @@ Homebrew and APT upgrades do not overwrite user-installed skills. Check and appl
 
 ```bash
 cm skill status
+cm skill diff
 cm skill update
 ```
 
-If `status` reports `modified`, ordinary updates refuse to overwrite local edits. `cm skill update --force` first backs up the current skill under `~/.connectmac/backups/skills/` and then installs the built-in version. `cm skill uninstall` removes only the skill; add `--rules --agent <agent> --project <path>` to remove the managed ConnectMac rule block while preserving unrelated project instructions.
+`cm skill diff` is read-only: it compares the installed skill with the current binary's built-in skill. Differences still return exit code 0; operational errors return nonzero. The recommended workflow is `cm skill status`, then `cm skill diff`, then `cm skill update` or `cm skill update --force`. If `status` reports `modified`, ordinary updates refuse to overwrite local edits. `cm skill update --force` first backs up the current skill under `~/.connectmac/backups/skills/` and then installs the built-in version. `cm skill uninstall` removes only the skill; add `--rules --agent <agent> --project <path>` to remove the managed ConnectMac rule block while preserving unrelated project instructions.
 
 Start the MCP server for AI clients:
 

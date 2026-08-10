@@ -79,6 +79,25 @@ func (a App) runSkill(args []string) int {
 			return 1
 		}
 		return 0
+	case "diff":
+		options, err := parseSkillPathOptions(args[1:], false)
+		if err != nil {
+			return a.skillUsageError(err)
+		}
+		manager, code := a.skillManager(options.SkillsDir)
+		if code != 0 {
+			return code
+		}
+		result, err := manager.Diff()
+		if err != nil {
+			return a.skillOperationError(err)
+		}
+		if result.Changed {
+			fmt.Fprint(a.Out, result.Text)
+		} else {
+			fmt.Fprintln(a.Out, "connectmac skill matches the built-in version")
+		}
+		return 0
 	case "update":
 		options, err := parseSkillUpdateOptions(args[1:])
 		if err != nil {
@@ -268,6 +287,7 @@ func printSkillUsage(out io.Writer) {
   cm skill setup [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
   cm skill install [--skills-dir <path>] [--dry-run]
   cm skill status [--skills-dir <path>]
+  cm skill diff [--skills-dir <path>]
   cm skill update [--skills-dir <path>] [--force] [--dry-run]
   cm skill validate [--skills-dir <path>] [--agent <agent> --project <path>]
   cm skill path [--skills-dir <path>]

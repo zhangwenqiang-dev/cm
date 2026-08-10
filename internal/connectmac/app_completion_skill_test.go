@@ -11,8 +11,9 @@ func TestUsageListsSkillWithoutInitRules(t *testing.T) {
 	var out bytes.Buffer
 	app := App{Out: &out}
 	app.printUsage()
-	if !strings.Contains(out.String(), "cm skill setup") {
-		t.Fatalf("usage missing cm skill: %q", out.String())
+	wantSkillSummary := "cm skill <install|status|diff|update|validate|path|print|uninstall> [options]"
+	if !strings.Contains(out.String(), wantSkillSummary) {
+		t.Fatalf("usage missing skill summary %q: %q", wantSkillSummary, out.String())
 	}
 	if strings.Contains(out.String(), "cm init-rules") {
 		t.Fatalf("usage contains removed command: %q", out.String())
@@ -30,8 +31,9 @@ func TestCompletionCommandsUseSkillWithoutInitRules(t *testing.T) {
 }
 
 func TestCompletionSkillCommands(t *testing.T) {
-	want := []string{"setup", "install", "status", "update", "validate", "path", "print", "uninstall"}
-	if got := completionSkillCommands(); !reflect.DeepEqual(got, want) {
+	want := []string{"setup", "install", "status", "diff", "update", "validate", "path", "print", "uninstall"}
+	got := completionSkillCommands()
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("skill commands = %#v, want %#v", got, want)
 	}
 }

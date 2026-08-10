@@ -162,7 +162,7 @@ func completionLocalAgentCommands() []string {
 	return []string{"install", "start", "stop", "restart", "status", "uninstall"}
 }
 func completionSkillCommands() []string {
-	return []string{"setup", "install", "status", "update", "validate", "path", "print", "uninstall"}
+	return []string{"setup", "install", "status", "diff", "update", "validate", "path", "print", "uninstall"}
 }
 func zshCompletionScript() string {
 	return `#compdef cm
