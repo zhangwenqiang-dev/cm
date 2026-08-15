@@ -26,14 +26,24 @@ func TestUsageDescribesGuidedRerunnableInit(t *testing.T) {
 	app.printUsage()
 	usage := out.String()
 
-	for _, want := range []string{
-		"cm init [--config <path>]",
-		"cm init wizard [--config <path>]",
-		"cm init is a guided, rerunnable setup",
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "init command", want: "cm init [--config <path>]"},
+		{name: "init wizard command", want: "cm init wizard [--config <path>]"},
+		{name: "guided", want: "guided"},
+		{name: "rerunnable", want: "rerunnable"},
+		{name: "server", want: "server"},
+		{name: "local PEM", want: "local PEM"},
+		{name: "member token", want: "member token"},
+		{name: "AI Skill", want: "AI Skill"},
 	} {
-		if !strings.Contains(usage, want) {
-			t.Fatalf("usage missing %q: %q", want, usage)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			if !strings.Contains(usage, test.want) {
+				t.Fatalf("usage missing %q: %q", test.want, usage)
+			}
+		})
 	}
 }
 
