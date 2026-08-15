@@ -1,13 +1,123 @@
 package connectmac
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
 )
+
+func TestDiscoverInitPEMFiles(t *testing.T) {
+	sshDir := t.TempDir()
+	for _, name := range []string{"z-last.PEM", "a-first.pem", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(sshDir, name), []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(sshDir, "ignored.pem"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(sshDir, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "nested.pem"), []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := discoverInitPEMFiles(sshDir)
+	if err != nil {
+		t.Fatalf("discoverInitPEMFiles returned error: %v", err)
+	}
+	want := []string{"~/.ssh/a-first.pem", "~/.ssh/z-last.PEM"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("discoverInitPEMFiles = %v, want %v", got, want)
+	}
+}
+
+func TestDiscoverInitPEMFilesMissingDirectory(t *testing.T) {
+	got, err := discoverInitPEMFiles(filepath.Join(t.TempDir(), "missing"))
+	if err != nil {
+		t.Fatalf("discoverInitPEMFiles returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("discoverInitPEMFiles = %v, want empty list", got)
+	}
+}
+
+func TestReadInitSecretNonTTY(t *testing.T) {
+	var out bytes.Buffer
+	got, err := readInitSecret("Token: ", strings.NewReader("  cm_api_secret  \n"), &out)
+	if err != nil {
+		t.Fatalf("readInitSecret returned error: %v", err)
+	}
+	if got != "cm_api_secret" {
+		t.Fatalf("readInitSecret = %q, want trimmed secret", got)
+	}
+	if text := out.String(); !strings.Contains(text, "Token: ") || !strings.Contains(text, "cannot be disabled") {
+		t.Fatalf("readInitSecret output = %q, want prompt and non-TTY warning", text)
+	}
+}
+
+func TestReadInitSecretNilInput(t *testing.T) {
+	if _, err := readInitSecret("Token: ", nil, io.Discard); err == nil {
+		t.Fatal("readInitSecret returned nil error for nil input")
+	}
+}
+
+func TestNewAppProvidesReadSecret(t *testing.T) {
+	app := NewApp(io.Discard, io.Discard)
+	if app.ReadSecret == nil {
+		t.Fatal("NewApp ReadSecret = nil")
+	}
+}
+
+func TestValidateInitToken(t *testing.T) {
+	const token = "cm_api_do_not_leak"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/api/managed-profiles" || r.URL.Query().Get("include_yaml") != "1" {
+			t.Errorf("request target = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Errorf("Authorization = %q, want bearer token", got)
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{}}})
+	}))
+	defer server.Close()
+
+	app := NewApp(io.Discard, io.Discard)
+	if err := app.validateInitToken(context.Background(), server.URL, token); err != nil {
+		t.Fatalf("validateInitToken returned error: %v", err)
+	}
+}
+
+func TestValidateInitTokenRejectsUnauthorizedWithoutLeakingToken(t *testing.T) {
+	const token = "cm_api_do_not_leak"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeWebError(w, http.StatusUnauthorized, "login required for "+token)
+	}))
+	defer server.Close()
+
+	app := NewApp(io.Discard, io.Discard)
+	err := app.validateInitToken(context.Background(), server.URL, token)
+	if err == nil {
+		t.Fatal("validateInitToken returned nil error for unauthorized response")
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("validateInitToken error leaked token: %v", err)
+	}
+}
 
 func TestInitConfigDocumentMinimalFirstRun(t *testing.T) {
 	doc, err := newInitConfigDocument(nil)

@@ -24,20 +24,22 @@ func (a App) runList(ctx context.Context, configPath string, cfg Config) int {
 }
 
 func (a App) loadRemoteListConfig(ctx context.Context, configPath string, cfg Config) (Config, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.Server.UserAPI, "/")+"/api/managed-profiles?include_yaml=1", nil)
-	if err != nil {
-		return Config{}, err
-	}
+	var records []webManagedProfile
+	var err error
 	if token := strings.TrimSpace(cfg.Server.Token); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		records, err = a.fetchRemoteProfilesWithToken(ctx, cfg.Server.UserAPI, token)
 	} else {
+		req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.Server.UserAPI, "/")+"/api/managed-profiles?include_yaml=1", nil)
+		if requestErr != nil {
+			return Config{}, requestErr
+		}
 		session, err := cliWebSession(configPath)
 		if err != nil {
 			return Config{}, err
 		}
 		req.Header.Set("Cookie", webSessionCookie+"="+session)
+		records, err = a.fetchRemoteManagedProfiles(req, cfg.Server.UserAPI)
 	}
-	records, err := a.fetchRemoteManagedProfiles(req, cfg.Server.UserAPI)
 	if err != nil {
 		return Config{}, fmt.Errorf("fetch remote profiles from %s: %w", strings.TrimRight(cfg.Server.UserAPI, "/"), err)
 	}
@@ -46,6 +48,33 @@ func (a App) loadRemoteListConfig(ctx context.Context, configPath string, cfg Co
 		managed = append(managed, ManagedProfile{Name: record.Name, ProfileYAML: record.ProfileYAML})
 	}
 	return a.mergeManagedProfileRecords(cfg, managed)
+}
+
+func (a App) fetchRemoteProfilesWithToken(ctx context.Context, userAPI, token string) ([]webManagedProfile, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(userAPI, "/")+"/api/managed-profiles?include_yaml=1", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	records, err := a.fetchRemoteManagedProfiles(req, userAPI)
+	if err != nil {
+		return nil, redactInitTokenError(err, token)
+	}
+	return records, nil
+}
+
+func (a App) validateInitToken(ctx context.Context, userAPI, token string) error {
+	if _, err := a.fetchRemoteProfilesWithToken(ctx, userAPI, token); err != nil {
+		return fmt.Errorf("validate token with %s: %w", strings.TrimRight(userAPI, "/"), err)
+	}
+	return nil
+}
+
+func redactInitTokenError(err error, token string) error {
+	if err == nil || token == "" || !strings.Contains(err.Error(), token) {
+		return err
+	}
+	return fmt.Errorf("%s", strings.ReplaceAll(err.Error(), token, "[REDACTED]"))
 }
 
 func cliWebSession(configPath string) (string, error) {

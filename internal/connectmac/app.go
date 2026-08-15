@@ -55,6 +55,7 @@ type App struct {
 	WebWorkerShutdownTimeout  time.Duration
 	LocalAgentSecurityCommand func(context.Context, ...string) ([]byte, error)
 	LocalAgentServiceCommand  func(context.Context, ...string) ([]byte, error)
+	ReadSecret                func(prompt string, in io.Reader, out io.Writer) (string, error)
 	TerminalSessions          *terminalSessionRegistry
 	LocalAgentBrowserOrigins  map[string]struct{}
 }
@@ -74,6 +75,7 @@ func NewApp(out, err io.Writer) App {
 		LogManager:               NewLogManager(DefaultLogDir),
 		SyncHistory:              NewSyncHistoryStore(DefaultSyncHistoryPath),
 		LocalTransfers:           NewLocalTransferJobManager(),
+		ReadSecret:               readInitSecret,
 		TerminalSessions:         newTerminalSessionRegistry(256, 30*time.Second),
 		KnownHosts:               "~/.ssh/known_hosts",
 		LoginConfigCleanup:       true,
