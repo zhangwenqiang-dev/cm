@@ -365,7 +365,7 @@ cm skill setup --agent cursor --project . --dry-run
 cm skill print
 ```
 
-`cm skill setup` writes the source rule file to `~/.connectmac/rules.md`, syncs the same rule block into the selected agent location, installs the `connectmac` skill, and validates the installation. Codex/Trae rules go to `AGENTS.md`, Claude rules go to `CLAUDE.md`, and Cursor rules go to `.cursor/rules/connectmac.mdc`. The skill is installed to `~/.agents/skills/connectmac` by default so supported AI tools can share it; pass `--skills-dir` to choose another skills directory. Use `--dry-run` to preview file paths without writing. When `cm init` creates a new config, it also asks whether to run skill setup. After installation, tell your AI agent to remember the content of `~/.connectmac/rules.md` exactly as long-term memory.
+`cm skill setup` writes the source rule file to `~/.connectmac/rules.md`, syncs the same rule block into the selected agent location, installs the `connectmac` skill, and validates the installation. Codex/Trae rules go to `AGENTS.md`, Claude rules go to `CLAUDE.md`, and Cursor rules go to `.cursor/rules/connectmac.mdc`. The skill is installed to `~/.agents/skills/connectmac` by default so supported AI tools can share it; pass `--skills-dir` to choose another skills directory. Use `--dry-run` to preview file paths without writing. Every successful `cm init`, including reruns, optionally offers to run skill setup. After installation, tell your AI agent to remember the content of `~/.connectmac/rules.md` exactly as long-term memory.
 
 Homebrew and APT upgrades do not overwrite user-installed skills. Check and apply an embedded skill update explicitly:
 

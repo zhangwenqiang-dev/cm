@@ -53,20 +53,25 @@ Tip: AWS mutations always preview first. Add --confirm only after reviewing the 
 	case "first-use", "first", "init":
 		return `ConnectMac first-use guide
 
-1. Initialize local config:
+1. Run the guided, rerunnable setup:
    cm init
+   Obtain a member token from the ConnectMac server if needed and configure it when prompted.
+   If you skip the token or PEM, rerun cm init to complete setup later.
 
-2. Install AI rules and skill:
-   cm skill setup --agent codex --project .
+2. List shared server Profiles:
+   cm list
+   Shared Profiles come from the ConnectMac server.
 
-3. Create or import a profile:
-   cm profile wizard
-   cm profile import <profile-file.yaml>
+3. Configure local access:
+   Use local config only for member PEM overrides.
+   Rerun cm init to select a PEM under ~/.ssh/.
 
-4. Check local setup:
+4. Optionally set up the ConnectMac AI Skill when cm init offers it.
+
+5. Check local setup:
    cm doctor --fix
 
-5. Ask cm what to do next:
+6. Ask cm what to do next:
    cm next <profile-or-apple-email>
 `, true
 	case "profile", "add-profile", "wizard":
