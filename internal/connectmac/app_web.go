@@ -786,8 +786,15 @@ func (a App) fetchRemoteManagedProfiles(r *http.Request, userAPI string) ([]webM
 			Profiles []webManagedProfile `json:"profiles"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, err
+	decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if decodeErr == nil && strings.TrimSpace(body.Error) != "" {
+			return nil, fmt.Errorf("remote profile request failed: %s: %s", resp.Status, body.Error)
+		}
+		return nil, fmt.Errorf("remote profile request failed: %s", resp.Status)
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
 	}
 	if !body.OK {
 		if body.Error == "" {

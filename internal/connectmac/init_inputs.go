@@ -31,11 +31,31 @@ func readInitSecret(prompt string, in io.Reader, out io.Writer) (string, error) 
 	if out != nil {
 		fmt.Fprintln(out, "warning: input is not a terminal; echo cannot be disabled")
 	}
-	secret, err := readInputLine(in)
+	secret, err := readInitInputLine(in)
 	if err != nil && len(secret) == 0 {
 		return "", fmt.Errorf("read secret: %w", err)
 	}
 	return strings.TrimSpace(secret), nil
+}
+
+func readInitInputLine(in io.Reader) (string, error) {
+	var line strings.Builder
+	var next [1]byte
+	for {
+		n, err := in.Read(next[:])
+		if n > 0 {
+			line.WriteByte(next[0])
+			if next[0] == '\n' {
+				return line.String(), nil
+			}
+		}
+		if err != nil {
+			return line.String(), err
+		}
+		if n == 0 {
+			return line.String(), io.ErrNoProgress
+		}
+	}
 }
 
 func discoverInitPEMFiles(sshDir string) ([]string, error) {

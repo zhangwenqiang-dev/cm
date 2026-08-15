@@ -67,6 +67,36 @@ func TestReadInitSecretNonTTY(t *testing.T) {
 	}
 }
 
+func TestReadInitSecretNonTTYDoesNotConsumeNextPipeLine(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if _, err := writer.WriteString("cm_api_secret\nnext response\n"); err != nil {
+		writer.Close()
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readInitSecret("Token: ", reader, io.Discard)
+	if err != nil {
+		t.Fatalf("readInitSecret returned error: %v", err)
+	}
+	if got != "cm_api_secret" {
+		t.Fatalf("readInitSecret = %q, want %q", got, "cm_api_secret")
+	}
+	next, err := readInputLine(reader)
+	if err != nil && len(next) == 0 {
+		t.Fatalf("next prompt read returned error: %v", err)
+	}
+	if got := strings.TrimSpace(next); got != "next response" {
+		t.Fatalf("next prompt read = %q, want %q", got, "next response")
+	}
+}
+
 func TestReadInitSecretNilInput(t *testing.T) {
 	if _, err := readInitSecret("Token: ", nil, io.Discard); err == nil {
 		t.Fatal("readInitSecret returned nil error for nil input")
@@ -116,6 +146,42 @@ func TestValidateInitTokenRejectsUnauthorizedWithoutLeakingToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), token) {
 		t.Fatalf("validateInitToken error leaked token: %v", err)
+	}
+}
+
+func TestValidateInitTokenRejectsHTTPErrorResponses(t *testing.T) {
+	const token = "cm_api_do_not_leak"
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+	}{
+		{name: "unauthorized success JSON", status: http.StatusUnauthorized, contentType: "application/json", body: `{"ok":true,"data":{"profiles":[]}}`},
+		{name: "server error success JSON", status: http.StatusInternalServerError, contentType: "application/json", body: `{"ok":true,"data":{"profiles":[]}}`},
+		{name: "non JSON error", status: http.StatusBadGateway, contentType: "text/plain", body: "upstream unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tt.contentType)
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			app := NewApp(io.Discard, io.Discard)
+			err := app.validateInitToken(context.Background(), server.URL, token)
+			if err == nil {
+				t.Fatalf("validateInitToken returned nil error for HTTP %d", tt.status)
+			}
+			if !strings.Contains(err.Error(), http.StatusText(tt.status)) {
+				t.Fatalf("validateInitToken error = %q, want HTTP status", err)
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Fatalf("validateInitToken error leaked token: %v", err)
+			}
+		})
 	}
 }
 
