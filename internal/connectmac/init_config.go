@@ -36,6 +36,11 @@ func newInitConfigDocument(data []byte) (*initConfigDocument, error) {
 	if doc.root.Kind != yaml.DocumentNode || len(doc.root.Content) != 1 || doc.root.Content[0].Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("parse config: top level must be a mapping")
 	}
+	for _, section := range []string{"server", "defaults"} {
+		if node := mappingEntry(doc.root.Content[0], section); node != nil && node.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("parse config: %s must be a mapping", section)
+		}
+	}
 	return doc, nil
 }
 
@@ -163,9 +168,6 @@ func writePrivateFileAtomic(path string, data []byte) error {
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return fmt.Errorf("create parent directory: %w", err)
-	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		return fmt.Errorf("secure parent directory: %w", err)
 	}
 
 	temp, err := os.CreateTemp(parent, "."+filepath.Base(path)+".tmp-*")

@@ -147,6 +147,28 @@ func TestInitConfigDocumentSerializationFailureReturnsNoBytes(t *testing.T) {
 	}
 }
 
+func TestInitConfigDocumentRejectsNonMappingKnownSections(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		section string
+	}{
+		{name: "server scalar", data: "server: https://example.com\n", section: "server"},
+		{name: "defaults sequence", data: "defaults:\n  - ec2-user\n", section: "defaults"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newInitConfigDocument([]byte(tt.data))
+			if err == nil {
+				t.Fatal("newInitConfigDocument returned nil error, want section type error")
+			}
+			if !strings.Contains(err.Error(), tt.section) || !strings.Contains(err.Error(), "mapping") {
+				t.Fatalf("error = %q, want section name and mapping requirement", err)
+			}
+		})
+	}
+}
+
 func TestWritePrivateFileAtomicCreatesPrivateParentAndFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private", "config.yaml")
 	if err := writePrivateFileAtomic(path, []byte("secret\n")); err != nil {
@@ -173,6 +195,28 @@ func TestWritePrivateFileAtomicCreatesPrivateParentAndFile(t *testing.T) {
 	}
 	if string(got) != "secret\n" {
 		t.Fatalf("file contents = %q, want %q", got, "secret\\n")
+	}
+}
+
+func TestWritePrivateFileAtomicPreservesExistingParentMode(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(parent, "config.yaml")
+	if err := writePrivateFileAtomic(path, []byte("secret\n")); err != nil {
+		t.Fatalf("writePrivateFileAtomic returned error: %v", err)
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("existing parent mode = %04o, want unchanged 0750", got)
 	}
 }
 
