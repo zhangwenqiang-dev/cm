@@ -20,6 +20,23 @@ func TestUsageListsSkillWithoutInitRules(t *testing.T) {
 	}
 }
 
+func TestUsageDescribesGuidedRerunnableInit(t *testing.T) {
+	var out bytes.Buffer
+	app := App{Out: &out}
+	app.printUsage()
+	usage := out.String()
+
+	for _, want := range []string{
+		"cm init [--config <path>]",
+		"cm init wizard [--config <path>]",
+		"cm init is a guided, rerunnable setup",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Fatalf("usage missing %q: %q", want, usage)
+		}
+	}
+}
+
 func TestCompletionCommandsUseSkillWithoutInitRules(t *testing.T) {
 	commands := completionCommands()
 	if !containsCompletion(commands, "skill") {

@@ -62,13 +62,21 @@ cm --version
 
 ## Quick Start
 
-Create the default config:
+Run the guided setup:
 
 ```bash
 cm init
 ```
 
-Then edit the config manually and point `identity_file` at a PEM file inside your own `~/.ssh/` directory.
+`cm init` is safe to rerun. It configures the shared ConnectMac server at
+`https://cm.hsgitlab.xyz`, discovers local PEM files only under `~/.ssh/`, and
+can save a member token. The member token and PEM selection may both be skipped
+and completed later by rerunning `cm init`. Setup can also optionally install
+the ConnectMac AI Skill for supported AI agents.
+
+Shared Profiles come from the ConnectMac server. The local config stores
+member-local defaults and any per-Profile PEM overrides; members do not need to
+copy and manually fill in the placeholder `xcode-vnc` or AWS sample below.
 
 The default config path is:
 
@@ -76,7 +84,10 @@ The default config path is:
 ~/.connectmac/config.yaml
 ```
 
-For many profiles, keep shared or important entries in `config.yaml` and put additional files under:
+## Advanced Config Reference
+
+For local-only or advanced setups, keep shared or important entries in
+`config.yaml` and put additional files under:
 
 ```text
 ~/.connectmac/profiles/*.yaml
@@ -111,6 +122,7 @@ profiles:
   xcode-vnc:
     description: Apple account: user@example.com
     host: mac-host.example.com
+    identity_file: ~/.ssh/xcode-vnc.pem
     sync:
       push:
         includes: []

@@ -7,6 +7,7 @@ func (a App) printUsage() {
   cm version
   cm init [--config <path>]
   cm init wizard [--config <path>]
+    cm init is a guided, rerunnable setup for server, local PEM, member token, and AI Skill.
   cm skill setup [--agent <codex|claude|trae|cursor>] [--project <path>] [--skills-dir <path>] [--dry-run]
   cm skill <install|status|diff|update|validate|path|print|uninstall> [options]
   cm guide [first-use|profile|open|close|sync|vnc|mcp]
