@@ -15,6 +15,323 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+func TestAppInitFirstRunCreatesMinimalConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "available.pem"), []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, ".connectmac", "config.yaml")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("0\nn\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return "", nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "server:\n  user_api: https://cm.hsgitlab.xyz\ndefaults:\n  user: ec2-user\n"
+	if string(data) != want {
+		t.Fatalf("config = %q, want %q", data, want)
+	}
+	for _, unwanted := range []string{"xcode-vnc", "example.pem", "amis_by_region", "elastic_ip", "security_group"} {
+		if strings.Contains(string(data), unwanted) {
+			t.Errorf("minimal config contains placeholder %q:\n%s", unwanted, data)
+		}
+	}
+	if got := out.String(); !strings.Contains(got, "created") || !strings.Contains(got, "Token: skipped") || !strings.Contains(got, "PEM: skipped") || !strings.Contains(got, "cm init") {
+		t.Fatalf("summary = %q, want created/skipped status and retry action", got)
+	}
+}
+
+func TestAppInitSummaryReportsMissingPEM(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return "", nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "PEM: missing") {
+		t.Fatalf("summary = %q, want missing PEM status", out.String())
+	}
+}
+
+func TestAppInitSelectsDiscoveredPEM(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "selected.pem"), []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("1\nn\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return "", nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "identity_file: ~/.ssh/selected.pem") {
+		t.Fatalf("config missing selected PEM:\n%s", data)
+	}
+	if !strings.Contains(out.String(), "PEM: configured (~/.ssh/selected.pem, readable)") {
+		t.Fatalf("summary = %q, want readable configured PEM", out.String())
+	}
+}
+
+func TestAppInitStoresOnlyValidatedToken(t *testing.T) {
+	const token = "cm_api_valid_secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("Authorization = %q", got)
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{}}})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, "server:\n  user_api: "+server.URL+"\ndefaults:\n  user: admin\n  identity_file: ~/.ssh/existing.pem\n")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return token, nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "token: "+token) {
+		t.Fatalf("validated token was not stored:\n%s", data)
+	}
+	if strings.Contains(out.String()+errOut.String(), token) {
+		t.Fatal("full token was printed")
+	}
+}
+
+func TestAppInitRejectedTokenCanBeSkippedWithoutWritingIt(t *testing.T) {
+	const token = "cm_api_rejected_secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeWebError(w, http.StatusUnauthorized, "rejected "+token)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, "server:\n  user_api: "+server.URL+"\ndefaults:\n  user: admin\n  identity_file: ~/.ssh/existing.pem\n")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\nn\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return token, nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), token) || strings.Contains(out.String()+errOut.String(), token) {
+		t.Fatal("rejected token was stored or printed")
+	}
+	if !strings.Contains(errOut.String(), "Token validation failed") || !strings.Contains(out.String(), "Token: skipped") {
+		t.Fatalf("out = %q, err = %q", out.String(), errOut.String())
+	}
+}
+
+func TestAppInitPreservesExistingServerAndTokenWithoutReadingSecret(t *testing.T) {
+	const original = "# exact formatting\nserver: {user_api: 'https://custom.example/v1', token: 'cm_api_existing_secret'}\ndefaults: {user: deploy, identity_file: '~/.ssh/deploy.pem'}\n"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, original)
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	secretCalls := 0
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
+		secretCalls++
+		return "", nil
+	}
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Fatalf("rerun changed config bytes:\ngot  %q\nwant %q", data, original)
+	}
+	if secretCalls != 0 {
+		t.Fatalf("ReadSecret calls = %d, want 0", secretCalls)
+	}
+	if strings.Contains(out.String()+errOut.String(), "cm_api_existing_secret") {
+		t.Fatal("existing token was printed")
+	}
+	if !strings.Contains(out.String(), "unchanged") || !strings.Contains(out.String(), "Token: configured") || !strings.Contains(out.String(), "cm list") {
+		t.Fatalf("summary = %q", out.String())
+	}
+}
+
+func TestAppInitAddsMissingServerAndPreservesDocumentContent(t *testing.T) {
+	const original = "# keep this comment\ncustom_top_level: retained\ndefaults:\n  user: custom-user\n  identity_file: ~/.ssh/default.pem\nserver:\n  token: existing-token\nprofiles:\n  operations:\n    identity_file: ~/.ssh/profile.pem\n"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, original)
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { t.Fatal("ReadSecret called"); return "", nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"# keep this comment", "custom_top_level: retained", "user_api: " + DefaultConnectMacServer, "user: custom-user", "operations:", "identity_file: ~/.ssh/profile.pem"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("updated config missing %q:\n%s", want, data)
+		}
+	}
+}
+
+func TestAppInitMalformedYAMLLeavesFileUntouchedAndDoesNotPrompt(t *testing.T) {
+	const original = "server: [unterminated\n"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, original)
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = nil
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { t.Fatal("ReadSecret called"); return "", nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 1 {
+		t.Fatalf("init code = %d, want 1", code)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Fatalf("malformed config changed: %q", data)
+	}
+	if !strings.Contains(errOut.String(), "parse config") {
+		t.Fatalf("error = %q, want parse config", errOut.String())
+	}
+}
+
+func TestAppInitAndWizardUseSameGuidedFlow(t *testing.T) {
+	for _, args := range [][]string{{"init"}, {"init", "wizard"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configPath := filepath.Join(home, "config.yaml")
+			var out, errOut bytes.Buffer
+			app := NewApp(&out, &errOut)
+			app.In = strings.NewReader("n\n")
+			app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return "", nil }
+			command := append(append([]string(nil), args...), "--config", configPath)
+			if code := app.Run(context.Background(), command); code != 0 {
+				t.Fatalf("init code = %d, err = %s", code, errOut.String())
+			}
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != DefaultConfigTemplate() {
+				t.Fatalf("config = %q, want minimal template", data)
+			}
+		})
+	}
+}
+
+func TestAppInitRejectsUnknownOptions(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	if code := app.Run(context.Background(), []string{"init", "--unknown"}); code != 2 {
+		t.Fatalf("init code = %d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), "unknown init option") {
+		t.Fatalf("error = %q", errOut.String())
+	}
+}
+
+func TestAppInitAtomicUpdateLeavesModePrivate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, "defaults:\n  user: admin\n  identity_file: ~/.ssh/admin.pem\nserver:\n  token: existing\n")
+	if err := os.Chmod(configPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode = %04o, want 0600", got)
+	}
+}
+
+func TestAppInitSkillFailureKeepsValidConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("y\nunsupported-agent\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return "", nil }
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code == 0 {
+		t.Fatal("init code = 0, want skill setup failure")
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("valid config was rolled back: %v", err)
+	}
+	if string(data) != DefaultConfigTemplate() {
+		t.Fatalf("config after skill failure = %q", data)
+	}
+}
+
 func TestDiscoverInitPEMFiles(t *testing.T) {
 	sshDir := t.TempDir()
 	for _, name := range []string{"z-last.PEM", "a-first.pem", "notes.txt"} {

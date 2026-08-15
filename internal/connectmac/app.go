@@ -109,7 +109,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	command := args[0]
 	switch command {
 	case "init":
-		return a.runInit(configPath, args[1:])
+		return a.runInit(ctx, configPath, args[1:])
 	case "skill":
 		return a.runSkill(args[1:])
 	case "guide":

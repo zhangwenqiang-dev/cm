@@ -536,27 +536,23 @@ func readTestLogsRaw(t *testing.T, manager LogManager) string {
 	return string(data)
 }
 
-func TestAppInitAndList(t *testing.T) {
+func TestAppInitCreatesConfigWithoutExampleProfile(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	config := filepath.Join(dir, "config.yaml")
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
+	app.In = strings.NewReader("n\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) { return "", nil }
 	if code := app.Run(context.Background(), []string{"init", "--config", config}); code != 0 {
 		t.Fatalf("init code = %d, err = %s", code, errOut.String())
 	}
-	if _, err := os.Stat(config); err != nil {
-		t.Fatalf("expected config to be created: %v", err)
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatalf("read created config: %v", err)
 	}
-	out.Reset()
-	errOut.Reset()
-	if code := app.Run(context.Background(), []string{"list", "--config", config}); code != 0 {
-		t.Fatalf("list code = %d, err = %s", code, errOut.String())
-	}
-	if !strings.Contains(out.String(), "xcode-vnc") {
-		t.Fatalf("list output = %q", out.String())
-	}
-	if !strings.Contains(out.String(), "PROFILE") || !strings.Contains(out.String(), "DESCRIPTION") {
-		t.Fatalf("list output missing table header = %q", out.String())
+	if strings.Contains(string(data), "profiles:") || strings.Contains(string(data), "xcode-vnc") {
+		t.Fatalf("init created example profile:\n%s", data)
 	}
 }
 
