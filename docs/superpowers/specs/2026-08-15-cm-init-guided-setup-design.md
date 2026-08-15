@@ -66,7 +66,7 @@ It will:
 5. Offer to fill missing token, default PEM, and AI Skill setup.
 6. Allow every optional step to be skipped again.
 
-If the user makes no changes, the existing config file remains byte-for-byte unchanged.
+If no required default is missing and the user makes no changes, the existing config file remains byte-for-byte unchanged. Adding the standard server URL to a config where it is missing is an intentional initializer change.
 
 For safe targeted updates, the initializer will use a small YAML-aware configuration update boundary rather than rebuilding an existing file from the parsed `Config` model. This prevents comments, unknown fields, and Profile-specific settings from being dropped.
 
