@@ -60,11 +60,11 @@ Tip: AWS mutations always preview first. Add --confirm only after reviewing the 
 
 2. List shared server Profiles:
    cm list
-   Shared Profiles come from the ConnectMac server.
+   The ConnectMac server provides shared Profile connection and AWS data.
 
 3. Configure local access:
-   Use local config only for member PEM overrides.
-   Rerun cm init to select a PEM under ~/.ssh/.
+   cm init configures the member's default PEM in defaults.identity_file.
+   Advanced local config may include per-Profile overrides such as a different identity_file, plus other member-local overrides.
 
 4. Optionally set up the ConnectMac AI Skill when cm init offers it.
 

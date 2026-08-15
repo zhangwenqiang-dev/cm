@@ -15,14 +15,20 @@ func TestFirstUseGuideUsesGuidedInitAndSharedProfiles(t *testing.T) {
 		"member token",
 		"rerun cm init",
 		"cm list",
-		"Shared Profiles come from the ConnectMac server.",
-		"Use local config only for member PEM overrides.",
+		"The ConnectMac server provides shared Profile connection and AWS data.",
+		"cm init configures the member's default PEM in defaults.identity_file.",
+		"Advanced local config may include per-Profile overrides such as a different identity_file, plus other member-local overrides.",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("first-use guide missing %q: %q", want, text)
 		}
 	}
-	for _, unwanted := range []string{"cm init-rules", "cm profile wizard", "cm profile import"} {
+	for _, unwanted := range []string{
+		"cm init-rules",
+		"cm profile wizard",
+		"cm profile import",
+		"Use local config only for member PEM overrides.",
+	} {
 		if strings.Contains(text, unwanted) {
 			t.Fatalf("first-use guide contains obsolete command %q: %q", unwanted, text)
 		}
