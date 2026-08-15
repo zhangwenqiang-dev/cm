@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,6 +48,9 @@ func readInitSecret(prompt string, in io.Reader, out io.Writer) (string, error) 
 	}
 	secret, err := readInitInputLine(in)
 	if err != nil && len(secret) == 0 {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
 		return "", fmt.Errorf("read secret: %w", err)
 	}
 	return strings.TrimSpace(secret), nil

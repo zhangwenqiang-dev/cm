@@ -126,9 +126,14 @@ func (a App) chooseInitPEM(ctx context.Context) (string, string, error) {
 	if err != nil {
 		return "", "missing", fmt.Errorf("find home directory: %w", err)
 	}
-	files, err := discoverInitPEMFiles(filepath.Join(home, ".ssh"))
+	discover := a.DiscoverInitPEMFiles
+	if discover == nil {
+		discover = discoverInitPEMFiles
+	}
+	files, err := discover(filepath.Join(home, ".ssh"))
 	if err != nil {
-		return "", "missing", err
+		fmt.Fprintf(a.Err, "warning: PEM discovery failed: %v\n", err)
+		return "", "missing", nil
 	}
 	if len(files) == 0 {
 		fmt.Fprintln(a.Out, "No PEM files found directly under ~/.ssh.")
@@ -159,6 +164,10 @@ func (a App) promptInitToken(ctx context.Context, serverURL string) (string, err
 	if a.ReadSecret == nil {
 		return "", fmt.Errorf("read token: secret reader is not configured")
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(a.Out, "Token validation server: %s\n", serverURL)
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -204,7 +213,9 @@ func (a App) printInitSummary(path, result string, doc *initConfigDocument, pemS
 	} else {
 		fmt.Fprintf(a.Out, "PEM: configured (%s, readable)\n", identity)
 	}
-	if strings.TrimSpace(doc.ServerToken()) == "" || identity == "" {
+	if strings.TrimSpace(doc.ServerToken()) == "" {
+		fmt.Fprintf(a.Out, "Next: generate a token in the management page at %s, then rerun cm init.\n", doc.ServerUserAPI())
+	} else if identity == "" {
 		fmt.Fprintln(a.Out, "Next: rerun cm init to configure skipped items.")
 	} else {
 		fmt.Fprintln(a.Out, "Next: run cm list.")

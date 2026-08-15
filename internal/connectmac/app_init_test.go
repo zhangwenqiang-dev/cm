@@ -17,6 +17,135 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+type initErrorReader struct {
+	err error
+}
+
+func (r initErrorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestAppInitPrintsCustomServerBeforeReadingMissingToken(t *testing.T) {
+	serverURL := "https://custom.example/managed"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, "server:\n  user_api: "+serverURL+"\ndefaults:\n  user: deploy\n  identity_file: ~/.ssh/deploy.pem\n")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
+		if !strings.Contains(out.String(), "Token validation server: "+serverURL) {
+			t.Errorf("output before ReadSecret = %q, want custom validation server", out.String())
+		}
+		return "", nil
+	}
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+}
+
+func TestAppInitPEMDiscoveryWarningDoesNotAbort(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	app.DiscoverInitPEMFiles = func(string) ([]string, error) {
+		return nil, errors.New("injected scan failure")
+	}
+	tokenPrompted := false
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
+		tokenPrompted = true
+		return "", nil
+	}
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	if !tokenPrompted {
+		t.Fatal("token step was skipped after PEM discovery error")
+	}
+	if !strings.Contains(errOut.String(), "warning:") || !strings.Contains(errOut.String(), "injected scan failure") {
+		t.Fatalf("error output = %q, want PEM scan warning", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "Initialize AI Skill now?") {
+		t.Fatalf("Skill confirmation was not reached: %q", errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("minimal config was not created: %v", err)
+	}
+	if string(data) != DefaultConfigTemplate() {
+		t.Fatalf("config = %q, want minimal config", data)
+	}
+}
+
+func TestReadInitSecretImmediateEOFSkips(t *testing.T) {
+	var out bytes.Buffer
+	got, err := readInitSecret("Token: ", strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("readInitSecret returned error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("readInitSecret = %q, want skipped", got)
+	}
+}
+
+func TestReadInitSecretPreservesNonEOFReadErrors(t *testing.T) {
+	readErr := errors.New("input failed")
+	_, err := readInitSecret("Token: ", initErrorReader{err: readErr}, io.Discard)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("readInitSecret error = %v, want %v", err, readErr)
+	}
+}
+
+func TestAppInitDevNullCreatesMinimalConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = devNull
+
+	result := make(chan int, 1)
+	go func() {
+		result <- app.Run(context.Background(), []string{"init", "--config", configPath})
+	}()
+	select {
+	case code := <-result:
+		if code != 0 {
+			t.Fatalf("init code = %d, err = %s", code, errOut.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("init with /dev/null hung")
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != DefaultConfigTemplate() {
+		t.Fatalf("config = %q, want minimal config", data)
+	}
+	for _, want := range []string{
+		"Token: skipped",
+		"generate a token in the management page",
+		DefaultConnectMacServer,
+		"rerun cm init",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("summary missing %q: %q", want, out.String())
+		}
+	}
+}
+
 func TestAppInitPipedInputUsesOnePersistentReader(t *testing.T) {
 	const token = "cm_api_piped_secret"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
