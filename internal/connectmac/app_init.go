@@ -122,9 +122,14 @@ func (a App) runGuidedInit(ctx context.Context, configPath string) int {
 }
 
 func (a App) chooseInitPEM(ctx context.Context) (string, string, error) {
-	home, err := os.UserHomeDir()
+	userHomeDir := a.UserHomeDir
+	if userHomeDir == nil {
+		userHomeDir = os.UserHomeDir
+	}
+	home, err := userHomeDir()
 	if err != nil {
-		return "", "missing", fmt.Errorf("find home directory: %w", err)
+		fmt.Fprintf(a.Err, "warning: PEM discovery failed: find home directory: %v\n", err)
+		return "", "missing", nil
 	}
 	discover := a.DiscoverInitPEMFiles
 	if discover == nil {
@@ -167,7 +172,7 @@ func (a App) promptInitToken(ctx context.Context, serverURL string) (string, err
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(a.Out, "Token validation server: %s\n", serverURL)
+	fmt.Fprintf(a.Err, "Token validation server: %s\n", serverURL)
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err

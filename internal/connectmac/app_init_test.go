@@ -34,15 +34,52 @@ func TestAppInitPrintsCustomServerBeforeReadingMissingToken(t *testing.T) {
 	var out, errOut bytes.Buffer
 	app := NewApp(&out, &errOut)
 	app.In = strings.NewReader("n\n")
-	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
-		if !strings.Contains(out.String(), "Token validation server: "+serverURL) {
-			t.Errorf("output before ReadSecret = %q, want custom validation server", out.String())
+	app.ReadSecret = func(_ string, _ io.Reader, promptOut io.Writer) (string, error) {
+		if promptOut != &errOut {
+			t.Errorf("ReadSecret output = %T, want App.Err", promptOut)
+		}
+		if !strings.Contains(errOut.String(), "Token validation server: "+serverURL) {
+			t.Errorf("prompt output before ReadSecret = %q, want custom validation server", errOut.String())
 		}
 		return "", nil
 	}
 
 	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
 		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+}
+
+func TestAppInitHomeDirectoryWarningDoesNotAbort(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "absolute-config.yaml")
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("n\n")
+	app.UserHomeDir = func() (string, error) {
+		return "", errors.New("injected home failure")
+	}
+	tokenPrompted := false
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
+		tokenPrompted = true
+		return "", nil
+	}
+
+	if code := app.Run(context.Background(), []string{"init", "--config", configPath}); code != 0 {
+		t.Fatalf("init code = %d, err = %s", code, errOut.String())
+	}
+	if !tokenPrompted {
+		t.Fatal("token step was skipped after home directory error")
+	}
+	for _, want := range []string{"warning:", "injected home failure", "Initialize AI Skill now?"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("error output missing %q: %q", want, errOut.String())
+		}
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("minimal config was not created: %v", err)
+	}
+	if string(data) != DefaultConfigTemplate() {
+		t.Fatalf("config = %q, want minimal config", data)
 	}
 }
 

@@ -57,6 +57,7 @@ type App struct {
 	LocalAgentServiceCommand  func(context.Context, ...string) ([]byte, error)
 	ReadSecret                func(prompt string, in io.Reader, out io.Writer) (string, error)
 	DiscoverInitPEMFiles      func(string) ([]string, error)
+	UserHomeDir               func() (string, error)
 	TerminalSessions          *terminalSessionRegistry
 	LocalAgentBrowserOrigins  map[string]struct{}
 }
@@ -78,6 +79,7 @@ func NewApp(out, err io.Writer) App {
 		LocalTransfers:           NewLocalTransferJobManager(),
 		ReadSecret:               readInitSecret,
 		DiscoverInitPEMFiles:     discoverInitPEMFiles,
+		UserHomeDir:              os.UserHomeDir,
 		TerminalSessions:         newTerminalSessionRegistry(256, 30*time.Second),
 		KnownHosts:               "~/.ssh/known_hosts",
 		LoginConfigCleanup:       true,
