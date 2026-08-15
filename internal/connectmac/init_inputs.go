@@ -1,6 +1,7 @@
 package connectmac
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,19 @@ import (
 
 	"golang.org/x/term"
 )
+
+func persistentInitInput(in io.Reader) io.Reader {
+	if in == nil {
+		return nil
+	}
+	if inputFile, ok := in.(*os.File); ok && term.IsTerminal(int(inputFile.Fd())) {
+		return inputFile
+	}
+	if _, ok := in.(interface{ ReadByte() (byte, error) }); ok {
+		return in
+	}
+	return bufio.NewReader(in)
+}
 
 func readInitSecret(prompt string, in io.Reader, out io.Writer) (string, error) {
 	if in == nil {

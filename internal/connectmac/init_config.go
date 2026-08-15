@@ -94,7 +94,15 @@ func (d *initConfigDocument) Bytes() ([]byte, bool, error) {
 
 func (d *initConfigDocument) value(path ...string) string {
 	node := d.mappingValue(path...)
-	if node == nil || node.Kind != yaml.ScalarNode {
+	seen := make(map[*yaml.Node]struct{})
+	for node != nil && node.Kind == yaml.AliasNode {
+		if _, exists := seen[node]; exists {
+			return ""
+		}
+		seen[node] = struct{}{}
+		node = node.Alias
+	}
+	if node == nil || node.Kind != yaml.ScalarNode || node.Tag == "!!null" {
 		return ""
 	}
 	return node.Value

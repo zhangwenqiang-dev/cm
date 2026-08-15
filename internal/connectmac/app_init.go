@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ func (a App) runInit(ctx context.Context, configPath string, args []string) int 
 }
 
 func (a App) runGuidedInit(ctx context.Context, configPath string) int {
+	a.In = persistentInitInput(a.In)
 	path, err := ExpandPath(configPath)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -49,10 +51,14 @@ func (a App) runGuidedInit(ctx context.Context, configPath string) int {
 	if strings.TrimSpace(doc.DefaultUser()) == "" {
 		doc.SetDefaultUser(DefaultAWSUser)
 	}
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 
 	pemState := "configured"
 	if strings.TrimSpace(doc.DefaultIdentityFile()) == "" {
-		selected, state, err := a.chooseInitPEM()
+		selected, state, err := a.chooseInitPEM(ctx)
 		if err != nil {
 			fmt.Fprintln(a.Err, err)
 			return 1
@@ -64,6 +70,10 @@ func (a App) runGuidedInit(ctx context.Context, configPath string) int {
 	}
 
 	if strings.TrimSpace(doc.ServerToken()) == "" {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
 		token, err := a.promptInitToken(ctx, doc.ServerUserAPI())
 		if err != nil {
 			fmt.Fprintln(a.Err, err)
@@ -74,6 +84,10 @@ func (a App) runGuidedInit(ctx context.Context, configPath string) int {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	data, changed, err := doc.Bytes()
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -81,6 +95,10 @@ func (a App) runGuidedInit(ctx context.Context, configPath string) int {
 	}
 	result := "unchanged"
 	if changed {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 1
+		}
 		if err := writePrivateFileAtomic(path, data); err != nil {
 			fmt.Fprintf(a.Err, "write config: %v\n", err)
 			return 1
@@ -93,13 +111,17 @@ func (a App) runGuidedInit(ctx context.Context, configPath string) int {
 	}
 
 	a.printInitSummary(path, result, doc, pemState)
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	if strings.EqualFold(a.promptLine("Initialize AI Skill now? [y/N]: "), "y") {
 		return a.runSkillSetup(nil)
 	}
 	return 0
 }
 
-func (a App) chooseInitPEM() (string, string, error) {
+func (a App) chooseInitPEM(ctx context.Context) (string, string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", "missing", fmt.Errorf("find home directory: %w", err)
@@ -118,6 +140,9 @@ func (a App) chooseInitPEM() (string, string, error) {
 		fmt.Fprintf(a.Out, "  %d. %s\n", i+1, file)
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", "skipped", err
+		}
 		choice := a.promptLine("Select default PEM (0 to skip): ")
 		if choice == "" || choice == "0" {
 			return "", "skipped", nil
@@ -135,6 +160,9 @@ func (a App) promptInitToken(ctx context.Context, serverURL string) (string, err
 		return "", fmt.Errorf("read token: secret reader is not configured")
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		token, err := a.ReadSecret("ConnectMac API token (empty to skip): ", a.In, a.Err)
 		if err != nil {
 			return "", err
@@ -145,7 +173,13 @@ func (a App) promptInitToken(ctx context.Context, serverURL string) (string, err
 		if err := a.validateInitToken(ctx, serverURL, token); err == nil {
 			return token, nil
 		} else {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return "", err
+			}
 			fmt.Fprintf(a.Err, "Token validation failed: %v\n", redactInitTokenError(err, token))
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 		if !strings.EqualFold(a.promptLine("Retry token entry? [y/N]: "), "y") {
 			return "", nil

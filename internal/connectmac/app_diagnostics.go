@@ -8,7 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+const initTokenValidationTimeout = 15 * time.Second
 
 func (a App) runList(ctx context.Context, configPath string, cfg Config) int {
 	if strings.TrimSpace(cfg.Server.UserAPI) != "" {
@@ -64,7 +67,9 @@ func (a App) fetchRemoteProfilesWithToken(ctx context.Context, userAPI, token st
 }
 
 func (a App) validateInitToken(ctx context.Context, userAPI, token string) error {
-	if _, err := a.fetchRemoteProfilesWithToken(ctx, userAPI, token); err != nil {
+	validationCtx, cancel := context.WithTimeout(ctx, initTokenValidationTimeout)
+	defer cancel()
+	if _, err := a.fetchRemoteProfilesWithToken(validationCtx, userAPI, token); err != nil {
 		return fmt.Errorf("validate token with %s: %w", strings.TrimRight(userAPI, "/"), err)
 	}
 	return nil

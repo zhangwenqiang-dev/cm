@@ -3,6 +3,7 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +12,178 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
+
+func TestAppInitPipedInputUsesOnePersistentReader(t *testing.T) {
+	const token = "cm_api_piped_secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Errorf("Authorization = %q", got)
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{"profiles": []webManagedProfile{}}})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "pipe.pem"), []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+	writeFile(t, configPath, "server:\n  user_api: "+server.URL+"\n")
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	if _, err := writer.WriteString("1\n" + token + "\nn\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = reader
+	result := make(chan int, 1)
+	go func() {
+		result <- app.Run(context.Background(), []string{"init", "--config", configPath})
+	}()
+
+	select {
+	case code := <-result:
+		if code != 0 {
+			t.Fatalf("init code = %d, err = %s", code, errOut.String())
+		}
+	case <-time.After(time.Second):
+		_ = writer.Close()
+		t.Fatal("init hung while piped writer remained open")
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"identity_file: ~/.ssh/pipe.pem", "token: " + token} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("config missing %q:\n%s", want, data)
+		}
+	}
+}
+
+func TestValidateInitTokenHonorsParentDeadlineAndCancelsRequest(t *testing.T) {
+	if initTokenValidationTimeout != 15*time.Second {
+		t.Fatalf("initTokenValidationTimeout = %s, want 15s", initTokenValidationTimeout)
+	}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	app := NewApp(io.Discard, io.Discard)
+	err := app.validateInitToken(ctx, server.URL, "cm_api_timeout")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("validateInitToken error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("validation request did not reach handler")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("validation request context was not canceled")
+	}
+}
+
+func TestAppInitCancellationDuringTokenValidationDoesNotRetryOrWrite(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	original := []byte("server:\n  user_api: " + server.URL + "\ndefaults:\n  identity_file: ~/.ssh/existing.pem\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("y\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
+		return "cm_api_cancel", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	if code := app.Run(ctx, []string{"init", "--config", configPath}); code != 1 {
+		t.Fatalf("init code = %d, want 1", code)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("validation request did not reach handler")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("validation request context was not canceled")
+	}
+	if strings.Contains(errOut.String(), "Retry token entry?") {
+		t.Fatalf("canceled init offered retry: %q", errOut.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, original) {
+		t.Fatalf("canceled init changed config:\ngot  %q\nwant %q", data, original)
+	}
+}
+
+func TestAppInitAlreadyCanceledDoesNotPromptOrWrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.yaml")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out, errOut bytes.Buffer
+	app := NewApp(&out, &errOut)
+	app.In = strings.NewReader("1\ntoken\ny\n")
+	app.ReadSecret = func(string, io.Reader, io.Writer) (string, error) {
+		t.Fatal("ReadSecret called")
+		return "", nil
+	}
+
+	if code := app.Run(ctx, []string{"init", "--config", configPath}); code != 1 {
+		t.Fatalf("init code = %d, want 1", code)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("canceled init created config: %v", err)
+	}
+	if strings.Contains(errOut.String(), "Select default PEM") || strings.Contains(errOut.String(), "Initialize AI Skill") {
+		t.Fatalf("canceled init prompted: %q", errOut.String())
+	}
+}
 
 func TestAppInitFirstRunCreatesMinimalConfig(t *testing.T) {
 	home := t.TempDir()
@@ -617,6 +787,70 @@ defaults:
 	}
 	if string(got) != string(original) {
 		t.Fatalf("Bytes = %q, want original %q", got, original)
+	}
+}
+
+func TestInitConfigDocumentTreatsNullScalarsAsAbsent(t *testing.T) {
+	doc, err := newInitConfigDocument([]byte(`server:
+  user_api: null
+  token: ~
+defaults:
+  user: !!null null
+  identity_file:
+`))
+	if err != nil {
+		t.Fatalf("newInitConfigDocument returned error: %v", err)
+	}
+	for name, value := range map[string]string{
+		"server.user_api":        doc.ServerUserAPI(),
+		"server.token":           doc.ServerToken(),
+		"defaults.user":          doc.DefaultUser(),
+		"defaults.identity_file": doc.DefaultIdentityFile(),
+	} {
+		if value != "" {
+			t.Errorf("%s = %q, want absent", name, value)
+		}
+	}
+}
+
+func TestInitConfigDocumentResolvesAliasedScalarValues(t *testing.T) {
+	doc, err := newInitConfigDocument([]byte(`shared:
+  server: &server https://custom.example
+  token: &token cm_api_aliased
+  user: &user deploy
+  identity: &identity ~/.ssh/aliased.pem
+server:
+  user_api: *server
+  token: *token
+defaults:
+  user: *user
+  identity_file: *identity
+`))
+	if err != nil {
+		t.Fatalf("newInitConfigDocument returned error: %v", err)
+	}
+	got := []string{doc.ServerUserAPI(), doc.ServerToken(), doc.DefaultUser(), doc.DefaultIdentityFile()}
+	want := []string{"https://custom.example", "cm_api_aliased", "deploy", "~/.ssh/aliased.pem"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("aliased values = %#v, want %#v", got, want)
+	}
+}
+
+func TestInitConfigDocumentAliasCycleIsAbsent(t *testing.T) {
+	doc, err := newInitConfigDocument(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &yaml.Node{Kind: yaml.AliasNode}
+	second := &yaml.Node{Kind: yaml.AliasNode}
+	first.Alias = second
+	second.Alias = first
+	server := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	appendMappingEntry(server, "token", first)
+	appendMappingEntry(doc.root.Content[0], "server", server)
+
+	if got := doc.ServerToken(); got != "" {
+		t.Fatalf("ServerToken = %q, want absent for alias cycle", got)
 	}
 }
 
