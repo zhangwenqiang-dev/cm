@@ -1247,12 +1247,12 @@ func TestMySQLMemberStoreQueryEventsUsesDescendingKeysetPagination(t *testing.T)
 	query := `SELECT ` + mysqlOperationEventSelectColumns + ` FROM cm_events WHERE (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT ?`
 	rows := sqlmock.NewRows([]string{
 		"id", "action", "profile", "apple_email", "member_id", "member_email", "member_name",
-		"request_id", "job_id", "session_id_hash", "source", "phase", "target_member_email", "error_code",
+		"request_id", "job_id", "cycle_id", "session_id_hash", "source", "phase", "target_member_email", "error_code",
 		"duration_ms", "confirmed", "status", "message", "created_at",
 	}).
-		AddRow("event-049", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "sha256:session", "web", "ready", "", "", int64(123), true, "success", "", "2026-07-30T09:59:00Z").
-		AddRow("event-048", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "sha256:session", "web", "ready", "", "", int64(124), true, "success", "", "2026-07-30T09:58:00Z").
-		AddRow("event-047", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "sha256:session", "web", "ready", "", "", int64(125), true, "success", "", "2026-07-30T09:57:00Z")
+		AddRow("event-049", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "arc-1", "sha256:session", "web", "ready", "", "", int64(123), true, "success", "", "2026-07-30T09:59:00Z").
+		AddRow("event-048", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "arc-1", "sha256:session", "web", "ready", "", "", int64(124), true, "success", "", "2026-07-30T09:58:00Z").
+		AddRow("event-047", "aws.open", "iossupport-usw2", "apple@example.com", "member-1", "actor@example.com", "Actor", "request-1", "job-1", "arc-1", "sha256:session", "web", "ready", "", "", int64(125), true, "success", "", "2026-07-30T09:57:00Z")
 	mock.ExpectQuery(regexp.QuoteMeta(query)).
 		WithArgs("2026-07-30T10:00:00.000000000Z", "2026-07-30T10:00:00.000000000Z", "event-050", 3).
 		WillReturnRows(rows)
@@ -1261,7 +1261,7 @@ func TestMySQLMemberStoreQueryEventsUsesDescendingKeysetPagination(t *testing.T)
 	if err != nil {
 		t.Fatalf("query events: %v", err)
 	}
-	if len(page.Events) != 2 || page.Events[0].ID != "event-049" || page.NextCursor == "" {
+	if len(page.Events) != 2 || page.Events[0].ID != "event-049" || page.Events[0].CycleID != "arc-1" || page.NextCursor == "" {
 		t.Fatalf("event page = %+v", page)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -1281,7 +1281,7 @@ func TestMySQLMemberStoreEventFiltersDoNotWrapCollatedColumns(t *testing.T) {
 		WithArgs("apple@example.com", "actor@example.com", 11).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "action", "profile", "apple_email", "member_id", "member_email", "member_name",
-			"request_id", "job_id", "session_id_hash", "source", "phase", "target_member_email", "error_code",
+			"request_id", "job_id", "cycle_id", "session_id_hash", "source", "phase", "target_member_email", "error_code",
 			"duration_ms", "confirmed", "status", "message", "created_at",
 		}))
 	if _, err := store.QueryEvents(EventQuery{
@@ -1337,7 +1337,7 @@ func TestMySQLMemberStoreRecordEventAppendsDirectly(t *testing.T) {
 		ID: "event-direct", Action: "aws.open.ready", Profile: "iossupport-usw2",
 		AppleEmail: " Apple@Example.com ", MemberID: "member-1",
 		MemberEmail: " Actor@Example.com ", MemberName: " Actor ",
-		RequestID: " request-1 ", JobID: " job-1 ", Source: " web ", Phase: " ready ",
+		RequestID: " request-1 ", JobID: " job-1 ", CycleID: " arc-cycle-1 ", Source: " web ", Phase: " ready ",
 		SessionIDHash:     " sha256:session-1 ",
 		TargetMemberEmail: " Target@Example.com ", ErrorCode: " none ", DurationMS: 1234,
 		Confirmed: true, Status: "success", Message: "ready",
@@ -1345,7 +1345,7 @@ func TestMySQLMemberStoreRecordEventAppendsDirectly(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
 		WithArgs(
 			event.ID, event.Action, event.Profile, "apple@example.com", event.MemberID,
-			"actor@example.com", "Actor", "request-1", "job-1", "sha256:session-1", "web", "ready",
+			"actor@example.com", "Actor", "request-1", "job-1", "arc-cycle-1", "sha256:session-1", "web", "ready",
 			"target@example.com", "none", event.DurationMS, event.Confirmed, event.Status,
 			event.Message, "2026-07-30T12:00:00.000000000Z",
 		).
@@ -1372,7 +1372,7 @@ func TestMySQLMemberStoreRecordEventDuplicateExplicitIDIsIdempotent(t *testing.T
 	}
 	mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
 		WithArgs(
-			event.ID, event.Action, event.Profile, "", "", "", "", "", "", "", "", "", "", "",
+			event.ID, event.Action, event.Profile, "", "", "", "", "", "", "", "", "", "", "", "",
 			int64(0), false, event.Status, "", "2026-07-30T12:00:00.000000000Z",
 		).
 		WillReturnError(&mysqlDriver.MySQLError{Number: 1062, Message: "Duplicate entry"})
@@ -1614,7 +1614,7 @@ func TestMySQLMemberStoreDirectAppendsGenerateDistinctIDs(t *testing.T) {
 		store := mysqlTransferTestStore(db, now)
 		mock.ExpectExec(regexp.QuoteMeta(mysqlOperationEventInsertQuery)).
 			WithArgs(
-				idArgument, "test", "iossupport-usw2", "", "", "", "", "", "", "", "", "", "", "",
+				idArgument, "test", "iossupport-usw2", "", "", "", "", "", "", "", "", "", "", "", "",
 				int64(0), false, "success", "", "2026-07-30T12:00:00.000000000Z",
 			).
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -1970,7 +1970,7 @@ func TestMySQLSetProfileOwnerAndRecordEventTransaction(t *testing.T) {
 				WithArgs(
 					sqlmock.AnyArg(), event.Action, "apple-usw2", "apple@example.com",
 					event.MemberID, event.MemberEmail, event.MemberName,
-					"", "", "", "", "", "", "", int64(0),
+					"", "", "", "", "", "", "", "", int64(0),
 					event.Confirmed, event.Status, event.Message, "2026-07-29T08:00:00.000000000Z",
 				)
 			if test.eventErr != nil {

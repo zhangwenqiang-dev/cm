@@ -48,16 +48,18 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 func TestAppAutoReleaseCleanupRetryEventLogsError(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	coordinator := app.newAutoReleaseCoordinator("")
+	reminder := ReleaseReminder{
+		ProfileName:           "xcode-vnc",
+		AppleEmail:            "user@example.com",
+		OwnerEmail:            "admin@example.com",
+		AutoReleaseAt:         "2026-07-13T08:00:00Z",
+		AutoReleaseStartedAt:  "2026-07-13T08:01:00Z",
+		AutoReleaseState:      ReleaseReminderAutoReleaseStateNotifying,
+		AutoReleaseNotifiedAt: "2026-07-13T09:00:00Z",
+	}
+	cycleID := autoReleaseCycleID(reminder)
 	coordinator.Emit(AutoReleaseEvent{
-		Action: "cleanup-retrying",
-		Reminder: ReleaseReminder{
-			ProfileName:           "xcode-vnc",
-			AppleEmail:            "user@example.com",
-			OwnerEmail:            "admin@example.com",
-			AutoReleaseState:      ReleaseReminderAutoReleaseStateNotifying,
-			AutoReleaseNotifiedAt: "2026-07-13T09:00:00Z",
-		},
-		Attempt: 2,
+		Action: "cleanup-retrying", Reminder: reminder, Attempt: 2, CycleID: cycleID,
 		Message: "cleanup released profile records: database unavailable",
 	})
 
@@ -65,8 +67,15 @@ func TestAppAutoReleaseCleanupRetryEventLogsError(t *testing.T) {
 		if entry.Action != "auto-release.cleanup-retrying" {
 			continue
 		}
-		if entry.Level != "error" || entry.Operation != "auto-release" || entry.Source != "background-worker" || entry.Phase != "cleanup-retrying" {
+		if entry.Level != "error" || entry.Operation != "auto-release" || entry.Source != "background-worker" || entry.Phase != "cleanup-retrying" || entry.Profile != reminder.ProfileName || entry.AppleEmail != reminder.AppleEmail || entry.CycleID != cycleID || entry.Attempt != 2 || entry.ErrorCode != "storage_error" {
 			t.Fatalf("cleanup retry log = %+v", entry)
+		}
+		events, err := app.MemberStore.QueryEvents(EventQuery{Profile: reminder.ProfileName, IncludeSystem: true, Limit: 10})
+		if err != nil {
+			t.Fatalf("query cleanup retry event: %v", err)
+		}
+		if len(events.Events) != 1 || events.Events[0].Action != entry.Action || events.Events[0].CycleID != cycleID || events.Events[0].ErrorCode != entry.ErrorCode {
+			t.Fatalf("cleanup retry events = %+v", events.Events)
 		}
 		return
 	}
@@ -172,7 +181,7 @@ func TestAppAutoReleaseCompletionObservabilityChain(t *testing.T) {
 		}
 	}
 	for _, entry := range chain[2:4] {
-		if entry.RequestID == "" || entry.Attempt != 1 {
+		if entry.RequestID == "" || entry.Attempt != reminder.AutoReleaseAttempts {
 			t.Fatalf("wechat log missing request correlation: %+v", entry)
 		}
 	}
@@ -207,65 +216,147 @@ func TestAppAutoReleaseCompletionObservabilityChain(t *testing.T) {
 	}
 }
 
-func TestAppAutoReleaseRetryObservabilityRedactsSecrets(t *testing.T) {
-	app := newWebAutoReleaseTestApp(t)
-	reminder := ReleaseReminder{
-		ProfileName:          "xcode-vnc",
-		AppleEmail:           "user@example.com",
-		AutoReleaseAt:        "2026-08-20T08:30:00Z",
-		AutoReleaseStartedAt: "2026-08-20T08:30:01Z",
-		AutoReleaseAttempts:  3,
-		AutoReleaseState:     ReleaseReminderAutoReleaseStateNotifying,
-	}
+func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	secrets := []string{
 		"task5-fake-webhook-key",
 		"task5-fake-bearer-token",
 		"task5-fake-session-token",
 		"/Users/test/.ssh/task5-private.pem",
+		"AKIAIOSFODNN7EXAMPLE",
 		"task5-fake-aws-secret",
 	}
-	injected := strings.Join([]string{
-		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + secrets[0],
+	var injected string
+	var webhookCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if webhookCalls.Add(1) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"errcode": 93000, "errmsg": injected})
+			return
+		}
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+	webhookURL := server.URL + "/cgi-bin/webhook/send?key=" + secrets[0]
+	sensitiveValues := append(append([]string(nil), secrets...), server.URL)
+	injected = strings.Join([]string{
+		webhookURL,
 		"Authorization: Bearer " + secrets[1],
 		"session_token=" + secrets[2],
 		"pem_path=" + secrets[3],
-		"AWS_SECRET_ACCESS_KEY=" + secrets[4],
+		"AWS_ACCESS_KEY_ID=" + secrets[4],
+		"AWS_SECRET_ACCESS_KEY=" + secrets[5],
 	}, "\n")
+	t.Setenv(envWechatWebhookURL, webhookURL)
 
+	app := newWebAutoReleaseTestApp(t)
+	reminder := ReleaseReminder{
+		ProfileName:              "xcode-vnc",
+		AppleEmail:               "user@example.com",
+		HostID:                   "h-observed",
+		OwnerEmail:               "admin@example.com",
+		OwnerName:                "Test Admin",
+		ReleaseDueAt:             now.Add(-20 * time.Minute).Format(time.RFC3339),
+		Status:                   ReleaseReminderStatusDueNotified,
+		AutoReleaseEnabled:       true,
+		AutoReleaseAt:            now.Add(-10 * time.Minute).Format(time.RFC3339),
+		AutoReleaseStartedAt:     now.Add(-6 * time.Minute).Format(time.RFC3339),
+		AutoReleaseLastAttemptAt: now.Add(-5 * time.Minute).Format(time.RFC3339),
+		AutoReleaseAttempts:      1,
+		AutoReleaseState:         ReleaseReminderAutoReleaseStateRunning,
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("seed reminder: %v", err)
+	}
+	apiRequest := httptest.NewRequest(http.MethodGet, "/api/release-reminders", nil)
+	addWebAuth(t, &app, apiRequest, "admin")
+	if _, err := app.MemberStore.SetProfileOwner(reminder.ProfileName, reminder.OwnerEmail); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	job := Job{
+		ID: "job-auto-release-retry", Type: "aws-destroy",
+		Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail,
+		RequestID: "req-auto-release-retry", Source: "background-worker",
+		Status: JobStatusSuccess, StartedAt: now.Add(-4 * time.Minute), FinishedAt: now.Add(-time.Minute),
+	}
+	if _, err := app.JobManager.Create(job); err != nil {
+		t.Fatalf("seed destroy job: %v", err)
+	}
+
+	scanNow := now
 	coordinator := app.newAutoReleaseCoordinator("")
-	coordinator.Emit(AutoReleaseEvent{
-		Action:   "cleanup-retrying",
-		Reminder: reminder,
-		Attempt:  reminder.AutoReleaseAttempts,
-		Message:  "cleanup storage unavailable\n" + injected,
-	})
-	wechatContext := wechatDeliveryContext{
-		RequestID:  "req-auto-release-retry",
-		JobID:      "job-auto-release-retry",
-		Profile:    reminder.ProfileName,
-		AppleEmail: reminder.AppleEmail,
-		Source:     "background-worker",
-		Event:      "auto-release-success",
-		Attempt:    4,
+	coordinator.Now = func() time.Time { return scanNow }
+	coordinator.ResolveProfile = func(context.Context, ReleaseReminder) (Profile, error) {
+		return Profile{Name: reminder.ProfileName, AWS: AWSConfig{AccountEmail: reminder.AppleEmail}}, nil
 	}
-	if err := app.recordWechatDeliveryState(wechatContext, "retrying", WechatNotifyResult{HTTPStatus: http.StatusBadGateway}, errors.New("wechat webhook delivery failed\n"+injected)); err != nil {
-		t.Fatalf("record wechat retry: %v", err)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-retained"}}, nil
+	}
+	coordinator.StartDestroy = func(context.Context, Profile) (Job, error) {
+		return Job{}, errors.New("unexpected destroy start")
 	}
 
-	var cleanupRetry, wechatRetry LogEntry
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	first := mustReleaseReminder(t, app, reminder.ProfileName)
+	if first.Status == ReleaseReminderStatusReleased || first.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || first.AutoReleaseAttempts != 1 || first.AutoReleaseLastError == "" {
+		t.Fatalf("first reminder = %+v", first)
+	}
+	assertTask5SecretsAbsent(t, "persisted reminder error", first.AutoReleaseLastError, sensitiveValues)
+
+	apiResponse := httptest.NewRecorder()
+	app.newWebHandler("").ServeHTTP(apiResponse, apiRequest)
+	if apiResponse.Code != http.StatusOK || !strings.Contains(apiResponse.Body.String(), "auto_release_last_error") {
+		t.Fatalf("reminder API status=%d body=%s", apiResponse.Code, apiResponse.Body.String())
+	}
+	assertTask5SecretsAbsent(t, "reminder API response", apiResponse.Body.String(), sensitiveValues)
+
+	scanNow = now.Add(AutoReleaseRetryInterval)
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry scan: %v", err)
+	}
+	completed := mustReleaseReminder(t, app, reminder.ProfileName)
+	if completed.Status != ReleaseReminderStatusReleased || completed.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || completed.AutoReleaseAttempts != 2 || completed.AutoReleaseStartedAt != reminder.AutoReleaseStartedAt || completed.AutoReleaseLastError != "" {
+		t.Fatalf("completed reminder = %+v", completed)
+	}
+	if webhookCalls.Load() != 2 {
+		t.Fatalf("webhook calls = %d, want 2", webhookCalls.Load())
+	}
+
+	cycleID := autoReleaseCycleID(reminder)
+	logCounts := map[string]int{}
+	var pending, failed, retrying, sent LogEntry
 	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		if entry.Profile != reminder.ProfileName {
+			continue
+		}
+		logCounts[entry.Action]++
+		if strings.HasPrefix(entry.Action, "auto-release.") || strings.HasPrefix(entry.Action, "wechat.") {
+			if entry.CycleID != cycleID {
+				t.Fatalf("log cycle ID = %q, want %q: %+v", entry.CycleID, cycleID, entry)
+			}
+		}
 		switch entry.Action {
-		case "auto-release.cleanup-retrying":
-			cleanupRetry = entry
+		case "wechat.pending":
+			pending = entry
+		case "wechat.failed":
+			failed = entry
 		case "wechat.retrying":
-			wechatRetry = entry
+			retrying = entry
+		case "wechat.sent":
+			sent = entry
 		}
 	}
-	if cleanupRetry.Profile != reminder.ProfileName || cleanupRetry.AppleEmail != reminder.AppleEmail || cleanupRetry.Attempt != reminder.AutoReleaseAttempts || cleanupRetry.Phase != "cleanup-retrying" || cleanupRetry.ErrorCode != "storage_error" {
-		t.Fatalf("cleanup retry log = %+v", cleanupRetry)
+	for _, action := range []string{"wechat.pending", "wechat.failed", "wechat.retrying", "wechat.sent", "auto-release.notification-retrying", "auto-release.released"} {
+		if logCounts[action] != 1 {
+			t.Fatalf("runtime log count %s = %d, want 1", action, logCounts[action])
+		}
 	}
-	if wechatRetry.Profile != reminder.ProfileName || wechatRetry.AppleEmail != reminder.AppleEmail || wechatRetry.RequestID != wechatContext.RequestID || wechatRetry.JobID != wechatContext.JobID || wechatRetry.Attempt != wechatContext.Attempt || wechatRetry.Phase != "retrying" || wechatRetry.ErrorCode != "notification_error" {
-		t.Fatalf("wechat retry log = %+v", wechatRetry)
+	if pending.Attempt != 1 || failed.Attempt != 1 || pending.RequestID == "" || pending.RequestID != failed.RequestID || pending.Phase != "pending" || failed.Phase != "failed" || failed.ErrorCode != "notification_error" {
+		t.Fatalf("first delivery logs pending=%+v failed=%+v", pending, failed)
+	}
+	if retrying.Attempt != 2 || sent.Attempt != 2 || retrying.RequestID == "" || retrying.RequestID != sent.RequestID || retrying.Phase != "retrying" || retrying.ErrorCode != "notification_error" || sent.Phase != "sent" {
+		t.Fatalf("retry delivery logs retrying=%+v sent=%+v", retrying, sent)
 	}
 
 	rawLogs, err := os.ReadFile(filepath.Join(app.LogManager.Dir, "cm-2026-07-01.log"))
@@ -280,29 +371,62 @@ func TestAppAutoReleaseRetryObservabilityRedactsSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal operation events: %v", err)
 	}
-	for _, secret := range secrets {
-		if bytes.Contains(rawLogs, []byte(secret)) {
-			t.Fatalf("runtime logs leaked %q: %s", secret, rawLogs)
-		}
-		if bytes.Contains(rawEvents, []byte(secret)) {
-			t.Fatalf("operation events leaked %q: %s", secret, rawEvents)
-		}
-	}
+	assertTask5SecretsAbsent(t, "runtime logs", string(rawLogs), sensitiveValues)
+	assertTask5SecretsAbsent(t, "operation events", string(rawEvents), sensitiveValues)
 
-	var cleanupEvent, wechatEvent OperationEvent
+	eventCounts := map[string]int{}
 	for _, event := range events.Events {
-		switch event.Action {
-		case "auto-release.cleanup-retrying":
-			cleanupEvent = event
-		case "wechat.retrying":
-			wechatEvent = event
+		if event.Profile != reminder.ProfileName {
+			continue
+		}
+		eventCounts[event.Action]++
+		if strings.HasPrefix(event.Action, "auto-release.") || strings.HasPrefix(event.Action, "wechat.") {
+			if event.CycleID != cycleID {
+				t.Fatalf("event cycle ID = %q, want %q: %+v", event.CycleID, cycleID, event)
+			}
+		}
+		if event.Action == "wechat.retrying" && event.ErrorCode != "notification_error" {
+			t.Fatalf("wechat retry event missing error code: %+v", event)
 		}
 	}
-	if cleanupEvent.Profile != reminder.ProfileName || cleanupEvent.AppleEmail != reminder.AppleEmail || cleanupEvent.Phase != "cleanup-retrying" || cleanupEvent.ErrorCode != "storage_error" {
-		t.Fatalf("cleanup retry event = %+v", cleanupEvent)
+	for _, action := range []string{"wechat.pending", "wechat.failed", "wechat.retrying", "wechat.sent", "auto-release.notification-retrying", "auto-release.released"} {
+		if eventCounts[action] != 1 {
+			t.Fatalf("operation event count %s = %d, want 1: %+v", action, eventCounts[action], events.Events)
+		}
 	}
-	if wechatEvent.Profile != reminder.ProfileName || wechatEvent.AppleEmail != reminder.AppleEmail || wechatEvent.RequestID != wechatContext.RequestID || wechatEvent.JobID != wechatContext.JobID || wechatEvent.Phase != "retrying" || wechatEvent.ErrorCode != "notification_error" {
-		t.Fatalf("wechat retry event = %+v", wechatEvent)
+}
+
+func TestDeliverWechatNotificationReturnsComprehensivelySanitizedError(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	secrets := []string{"return-webhook-key", "return-bearer", "return-session", "/Users/test/.ssh/return.pem", "return-aws-secret"}
+	raw := strings.Join([]string{
+		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + secrets[0],
+		"Authorization: Bearer " + secrets[1],
+		"session_token=" + secrets[2],
+		"pem_path=" + secrets[3],
+		"AWS_SECRET_ACCESS_KEY=" + secrets[4],
+	}, "\n")
+	err := app.deliverWechatNotification(wechatDeliveryContext{
+		RequestID: "req-return", Profile: "xcode-vnc", AppleEmail: "user@example.com",
+		Event: "auto-release-success", Attempt: 1, CycleID: "arc-test",
+	}, func() (WechatNotifyResult, error) {
+		return WechatNotifyResult{HTTPStatus: http.StatusBadGateway}, errors.New(raw)
+	})
+	if err == nil {
+		t.Fatal("deliverWechatNotification error = nil")
+	}
+	assertTask5SecretsAbsent(t, "delivery error", err.Error(), secrets)
+	if strings.Contains(err.Error(), "qyapi.weixin.qq.com") {
+		t.Fatalf("delivery error retained full webhook URL: %v", err)
+	}
+}
+
+func assertTask5SecretsAbsent(t *testing.T, label, value string, secrets []string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if strings.Contains(value, secret) {
+			t.Fatalf("%s leaked %q: %s", label, secret, value)
+		}
 	}
 }
 

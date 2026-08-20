@@ -263,6 +263,7 @@ type OperationEvent struct {
 	MemberName        string `json:"member_name,omitempty"`
 	RequestID         string `json:"request_id,omitempty"`
 	JobID             string `json:"job_id,omitempty"`
+	CycleID           string `json:"cycle_id,omitempty"`
 	SessionIDHash     string `json:"session_id_hash,omitempty"`
 	Source            string `json:"source,omitempty"`
 	Phase             string `json:"phase,omitempty"`
@@ -1337,6 +1338,7 @@ func appendOperationEvent(db *MemberData, event OperationEvent, now string) erro
 	event.MemberName = strings.TrimSpace(event.MemberName)
 	event.RequestID = strings.TrimSpace(event.RequestID)
 	event.JobID = strings.TrimSpace(event.JobID)
+	event.CycleID = strings.TrimSpace(event.CycleID)
 	event.SessionIDHash = strings.TrimSpace(event.SessionIDHash)
 	event.Source = strings.TrimSpace(event.Source)
 	event.Phase = strings.TrimSpace(event.Phase)

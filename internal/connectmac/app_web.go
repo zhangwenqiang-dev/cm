@@ -529,7 +529,12 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 			case AutoReleaseNotificationSuccess:
 				event, description = "auto-release-success", "Mac 自动释放成功，Elastic IP 分配已保留"
 			}
-			return a.notifyReleaseReminder(event, notification.Reminder, "", description)
+			return a.notifyReleaseReminderWithDelivery(event, notification.Reminder, "", description, wechatDeliveryContext{
+				Attempt:    notification.Attempt,
+				Retrying:   notification.Retrying,
+				RetryError: notification.Error,
+				CycleID:    notification.CycleID,
+			})
 		},
 		Emit: func(event AutoReleaseEvent) {
 			level := "info"
@@ -544,14 +549,14 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 				Level: level, Action: action, Operation: "auto-release",
 				Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail,
 				Source: "background-worker", Phase: event.Action, Status: event.Action,
-				RequestID: event.RequestID, JobID: event.JobID, ErrorCode: errorCode,
+				RequestID: event.RequestID, JobID: event.JobID, CycleID: event.CycleID, ErrorCode: errorCode,
 				Attempt: event.Attempt, Message: message,
 			})
 			_ = a.recordEventWithFallback(OperationEvent{
 				Action: action, Profile: event.Reminder.ProfileName,
 				AppleEmail: event.Reminder.AppleEmail, Source: "background-worker",
 				Phase: event.Action, Confirmed: true, Status: event.Action,
-				RequestID: event.RequestID, JobID: event.JobID, ErrorCode: errorCode,
+				RequestID: event.RequestID, JobID: event.JobID, CycleID: event.CycleID, ErrorCode: errorCode,
 				Message: message,
 			})
 		},
@@ -2443,14 +2448,17 @@ func (a App) cleanupProfileLocalRecordsLockedChanged(profileName, reason string)
 }
 
 func (a App) notifyReleaseReminder(event string, reminder ReleaseReminder, operator, description string) error {
+	return a.notifyReleaseReminderWithDelivery(event, reminder, operator, description, wechatDeliveryContext{Attempt: 1})
+}
+
+func (a App) notifyReleaseReminderWithDelivery(event string, reminder ReleaseReminder, operator, description string, context wechatDeliveryContext) error {
 	requestToken, _ := randomToken(12)
-	context := wechatDeliveryContext{
-		RequestID:  "req-wechat-" + requestToken,
-		Profile:    reminder.ProfileName,
-		AppleEmail: reminder.AppleEmail,
-		Source:     "system",
-		Event:      event,
-		Attempt:    1,
+	context.RequestID = "req-wechat-" + requestToken
+	context.Profile = reminder.ProfileName
+	context.AppleEmail = reminder.AppleEmail
+	context.Event = event
+	if context.Source == "" {
+		context.Source = "system"
 	}
 	notification := WechatNotification{
 		Event:         event,
@@ -2479,19 +2487,22 @@ type wechatDeliveryContext struct {
 	Event       string
 	DeliveryKey string
 	Attempt     int
+	Retrying    bool
+	RetryError  string
+	CycleID     string
 }
 
 func (a App) deliverWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) error {
 	result, sendErr := a.attemptWechatNotification(context, send)
 	if sendErr == nil && !result.Skipped {
-		return a.recordWechatDeliveryState(context, "sent", result, nil)
+		return sanitizeOperationalError(a.recordWechatDeliveryState(context, "sent", result, nil))
 	}
 	if sendErr == nil {
 		sendErr = errWechatWebhookNotConfigured
 	}
-	redacted := errors.New(redactWechatWebhookURL(sendErr.Error()))
-	failedErr := a.recordWechatDeliveryState(context, "failed", result, redacted)
-	return errors.Join(redacted, failedErr)
+	safeErr := sanitizeOperationalError(sendErr)
+	failedErr := a.recordWechatDeliveryState(context, "failed", result, safeErr)
+	return sanitizeOperationalError(errors.Join(safeErr, failedErr))
 }
 
 func (a App) attemptWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) (WechatNotifyResult, error) {
@@ -2501,13 +2512,24 @@ func (a App) attemptWechatNotification(context wechatDeliveryContext, send func(
 	if context.Source == "" {
 		context.Source = "system"
 	}
-	if err := a.recordWechatDeliveryState(context, "pending", WechatNotifyResult{}, nil); err != nil {
+	phase := "pending"
+	var cause error
+	if context.Retrying {
+		phase = "retrying"
+		retryError := strings.TrimSpace(context.RetryError)
+		if retryError == "" {
+			retryError = "wechat notification retry"
+		}
+		cause = errors.New(retryError)
+	}
+	if err := a.recordWechatDeliveryState(context, phase, WechatNotifyResult{}, cause); err != nil {
 		return WechatNotifyResult{}, err
 	}
 	return send()
 }
 
 func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase string, result WechatNotifyResult, cause error) error {
+	cause = sanitizeOperationalError(cause)
 	level := "info"
 	status := phase
 	if phase == "sent" {
@@ -2542,6 +2564,7 @@ func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase stri
 		ActorMemberName:  context.Actor.MemberName,
 		RequestID:        context.RequestID,
 		JobID:            context.JobID,
+		CycleID:          context.CycleID,
 		Operation:        operation,
 		Source:           context.Source,
 		Phase:            phase,
@@ -2563,7 +2586,7 @@ func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase stri
 			eventID = "event-" + context.JobID + "-wechat-sent"
 		}
 	}
-	return a.MemberStore.RecordEvent(OperationEvent{
+	return sanitizeOperationalError(a.MemberStore.RecordEvent(OperationEvent{
 		ID:          eventID,
 		Action:      "wechat." + phase,
 		Profile:     context.Profile,
@@ -2573,12 +2596,13 @@ func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase stri
 		MemberName:  context.Actor.MemberName,
 		RequestID:   context.RequestID,
 		JobID:       context.JobID,
+		CycleID:     context.CycleID,
 		Source:      "system",
 		Phase:       phase,
 		ErrorCode:   errorCode,
 		Status:      status,
 		Message:     wechatAuditMessageForEvent(result, cause, context.Attempt, context.Event),
-	})
+	}))
 }
 
 func wechatAuditMessageForEvent(result WechatNotifyResult, cause error, attempt int, event string) string {

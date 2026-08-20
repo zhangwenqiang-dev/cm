@@ -10,9 +10,9 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
-const mysqlOperationEventSelectColumns = `id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), COALESCE(member_email, ''), COALESCE(member_name, ''), COALESCE(request_id, ''), COALESCE(job_id, ''), COALESCE(session_id_hash, ''), COALESCE(source, ''), COALESCE(phase, ''), COALESCE(target_member_email, ''), COALESCE(error_code, ''), duration_ms, confirmed, status, COALESCE(message, ''), created_at`
+const mysqlOperationEventSelectColumns = `id, action, profile, COALESCE(apple_email, ''), COALESCE(member_id, ''), COALESCE(member_email, ''), COALESCE(member_name, ''), COALESCE(request_id, ''), COALESCE(job_id, ''), COALESCE(cycle_id, ''), COALESCE(session_id_hash, ''), COALESCE(source, ''), COALESCE(phase, ''), COALESCE(target_member_email, ''), COALESCE(error_code, ''), duration_ms, confirmed, status, COALESCE(message, ''), created_at`
 
-const mysqlOperationEventInsertQuery = `INSERT INTO cm_events (id, action, profile, apple_email, member_id, member_email, member_name, request_id, job_id, session_id_hash, source, phase, target_member_email, error_code, duration_ms, confirmed, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const mysqlOperationEventInsertQuery = `INSERT INTO cm_events (id, action, profile, apple_email, member_id, member_email, member_name, request_id, job_id, cycle_id, session_id_hash, source, phase, target_member_email, error_code, duration_ms, confirmed, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 const mysqlCanonicalEventTimestampPattern = `^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{9}Z$`
 
@@ -30,7 +30,7 @@ func operationEventInsertArgs(event OperationEvent) []any {
 	return []any{
 		event.ID, event.Action, event.Profile, event.AppleEmail, event.MemberID,
 		event.MemberEmail, event.MemberName, event.RequestID, event.JobID,
-		event.SessionIDHash, event.Source, event.Phase, event.TargetMemberEmail, event.ErrorCode,
+		event.CycleID, event.SessionIDHash, event.Source, event.Phase, event.TargetMemberEmail, event.ErrorCode,
 		event.DurationMS, event.Confirmed, event.Status, event.Message, event.CreatedAt,
 	}
 }
@@ -39,7 +39,7 @@ func scanMySQLOperationEvent(scanner mysqlReleaseReminderScanner, event *Operati
 	return scanner.Scan(
 		&event.ID, &event.Action, &event.Profile, &event.AppleEmail, &event.MemberID,
 		&event.MemberEmail, &event.MemberName, &event.RequestID, &event.JobID,
-		&event.SessionIDHash, &event.Source, &event.Phase, &event.TargetMemberEmail, &event.ErrorCode,
+		&event.CycleID, &event.SessionIDHash, &event.Source, &event.Phase, &event.TargetMemberEmail, &event.ErrorCode,
 		&event.DurationMS, &event.Confirmed, &event.Status, &event.Message, &event.CreatedAt,
 	)
 }

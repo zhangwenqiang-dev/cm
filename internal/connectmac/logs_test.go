@@ -75,6 +75,7 @@ func TestLogManagerStructuredRedaction(t *testing.T) {
 	entry := LogEntry{
 		RequestID:        "request-1",
 		JobID:            "job-1",
+		CycleID:          "arc-cycle-1",
 		SessionIDHash:    "sha256:session-1",
 		Operation:        "aws.open",
 		Source:           "web",
@@ -169,6 +170,7 @@ func TestLogManagerStructuredRedaction(t *testing.T) {
 	}
 	if got.RequestID != entry.RequestID ||
 		got.JobID != entry.JobID ||
+		got.CycleID != entry.CycleID ||
 		got.SessionIDHash != entry.SessionIDHash ||
 		got.Operation != entry.Operation ||
 		got.Source != entry.Source ||
@@ -183,6 +185,7 @@ func TestLogManagerStructuredRedaction(t *testing.T) {
 	}
 	rawText := string(raw)
 	for _, field := range []string{
+		`"cycle_id":"arc-cycle-1"`,
 		`"actor_member_id":"member-1"`,
 		`"actor_member_email":"actor@example.com"`,
 		`"actor_member_name":"Actor Name"`,
@@ -198,6 +201,9 @@ func TestLogManagerStructuredRedaction(t *testing.T) {
 		if !strings.Contains(rawText, field) {
 			t.Fatalf("raw log missing actor field %s: %s", field, raw)
 		}
+	}
+	if strings.Contains(rawText, "qyapi.weixin.qq.com") {
+		t.Fatalf("raw log retained full webhook URL: %s", raw)
 	}
 }
 

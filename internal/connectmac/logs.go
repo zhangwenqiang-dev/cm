@@ -3,6 +3,7 @@ package connectmac
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -46,6 +47,7 @@ type LogEntry struct {
 	AWSProfile       string `json:"aws_profile,omitempty"`
 	RequestID        string `json:"request_id,omitempty"`
 	JobID            string `json:"job_id,omitempty"`
+	CycleID          string `json:"cycle_id,omitempty"`
 	SessionIDHash    string `json:"session_id_hash,omitempty"`
 	Operation        string `json:"operation,omitempty"`
 	Source           string `json:"source,omitempty"`
@@ -229,6 +231,7 @@ func addLogFileToZip(zw *zip.Writer, file LogFile) error {
 func sanitizeLogText(text string) string {
 	text = strings.TrimSpace(text)
 	text = logPEMBlockPattern.ReplaceAllString(text, "[REDACTED PEM]")
+	text = logWebhookURLPattern.ReplaceAllString(text, "[REDACTED WEBHOOK URL]")
 	text = logAuthorizationPattern.ReplaceAllString(text, "${1}[REDACTED]")
 	text = logCookieHeaderPattern.ReplaceAllString(text, "${1}[REDACTED]")
 	text = logURLCredentialPattern.ReplaceAllString(text, "${1}[REDACTED]${2}")
@@ -244,6 +247,13 @@ func sanitizeLogText(text string) string {
 	return text
 }
 
+func sanitizeOperationalError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(sanitizeLogText(redactWechatWebhookURL(err.Error())))
+}
+
 const logSensitiveKeyPattern = `access_token|client_secret|aws_access_key_id|aws_secret_access_key|aws_session_token|awsaccesskeyid|secretaccesskey|session_token|sessiontoken|pem_path|pem_file|identity_file|private_key_path|password|token|secret|session|cookie`
 
 var (
@@ -252,6 +262,9 @@ var (
 	)
 	logPEMPathPattern = regexp.MustCompile(
 		`(?i)(?:"[^"\r\n]*\.pem"|'[^'\r\n]*\.pem'|(?:~|/)[^\s,;\)\]\}]+\.pem)`,
+	)
+	logWebhookURLPattern = regexp.MustCompile(
+		`(?i)https?://[^\s"'<>]*(?:[?&]key=)[^\s"'<>]*`,
 	)
 	logAuthorizationPattern = regexp.MustCompile(
 		`(?i)(authorization[ \t]*:[ \t]*)[^\r\n]*`,
@@ -300,6 +313,7 @@ func sanitizeLogEntry(entry LogEntry) LogEntry {
 	entry.AWSProfile = sanitizeLogText(entry.AWSProfile)
 	entry.RequestID = sanitizeLogText(entry.RequestID)
 	entry.JobID = sanitizeLogText(entry.JobID)
+	entry.CycleID = sanitizeLogText(entry.CycleID)
 	entry.SessionIDHash = sanitizeLogText(entry.SessionIDHash)
 	entry.Operation = sanitizeLogText(entry.Operation)
 	entry.Source = sanitizeLogText(entry.Source)

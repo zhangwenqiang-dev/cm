@@ -2,6 +2,8 @@ package connectmac
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -28,6 +30,9 @@ type AutoReleaseNotification struct {
 	Kind     AutoReleaseNotificationKind
 	Reminder ReleaseReminder
 	Error    string
+	Attempt  int
+	Retrying bool
+	CycleID  string
 }
 
 type AutoReleaseEvent struct {
@@ -36,6 +41,7 @@ type AutoReleaseEvent struct {
 	Attempt   int
 	RequestID string
 	JobID     string
+	CycleID   string
 	Message   string
 }
 
@@ -168,7 +174,7 @@ func (c *AutoReleaseCoordinator) scheduleDue(reminder ReleaseReminder, now time.
 	}
 	if c.Notify != nil {
 		if err := c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationDue, Reminder: reminder}); err != nil {
-			return err
+			return sanitizeOperationalError(err)
 		}
 	}
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
@@ -310,6 +316,7 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 			Attempt:   reminder.AutoReleaseAttempts,
 			RequestID: job.RequestID,
 			JobID:     job.ID,
+			CycleID:   autoReleaseCycleID(reminder),
 			Message:   fmt.Sprintf("job_id=%s status=%s", job.ID, job.Status),
 		})
 	}
@@ -372,6 +379,7 @@ func (c *AutoReleaseCoordinator) recordAttemptFailure(reminder ReleaseReminder, 
 }
 
 func (c *AutoReleaseCoordinator) markRetrying(reminder ReleaseReminder, now time.Time, cause error) error {
+	cause = sanitizeOperationalError(cause)
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
 			return current, errAutoReleaseCycleChanged
@@ -385,12 +393,13 @@ func (c *AutoReleaseCoordinator) markRetrying(reminder ReleaseReminder, now time
 	}
 	c.emit("retrying", updated, updated.AutoReleaseAttempts, cause.Error())
 	if updated.AutoReleaseAttempts == 1 && c.Notify != nil {
-		return c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFirstFailure, Reminder: updated, Error: cause.Error()})
+		return sanitizeOperationalError(c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFirstFailure, Reminder: updated, Error: cause.Error(), Attempt: updated.AutoReleaseAttempts, CycleID: autoReleaseCycleID(updated)}))
 	}
 	return nil
 }
 
 func (c *AutoReleaseCoordinator) finishFailure(reminder ReleaseReminder, now time.Time, cause error) error {
+	cause = sanitizeOperationalError(cause)
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status == ReleaseReminderStatusReleased || !current.AutoReleaseEnabled {
 			return current, errAutoReleaseCycleChanged
@@ -404,7 +413,7 @@ func (c *AutoReleaseCoordinator) finishFailure(reminder ReleaseReminder, now tim
 	}
 	c.emit("failed", updated, updated.AutoReleaseAttempts, cause.Error())
 	if c.Notify != nil {
-		return c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFinalFailure, Reminder: updated, Error: cause.Error()})
+		return sanitizeOperationalError(c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFinalFailure, Reminder: updated, Error: cause.Error(), Attempt: updated.AutoReleaseAttempts, CycleID: autoReleaseCycleID(updated)}))
 	}
 	return nil
 }
@@ -427,7 +436,7 @@ func (c *AutoReleaseCoordinator) completeRelease(reminder ReleaseReminder, profi
 		return err
 	}
 	c.emit("notification-pending", pending, pending.AutoReleaseAttempts, "resources_clean=true eip_retained=true")
-	return c.notifyAndFinalizeRelease(pending, now)
+	return c.notifyAndFinalizeRelease(pending, now, false, "")
 }
 
 func (c *AutoReleaseCoordinator) observeNotificationPending(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
@@ -453,30 +462,45 @@ func (c *AutoReleaseCoordinator) observeNotificationPending(ctx context.Context,
 		}
 		return c.recordCleanupFailure(reminder, now, cause)
 	}
+	retryingNotification := reminder.AutoReleaseNotifiedAt == ""
+	retryError := ""
+	if retryingNotification {
+		retryError = reminder.AutoReleaseLastError
+	}
 	claimed, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
 			return current, errAutoReleaseCycleChanged
 		}
+		if (current.AutoReleaseNotifiedAt == "") != retryingNotification {
+			return current, errAutoReleaseCycleChanged
+		}
 		current.AutoReleaseLastAttemptAt = now.Format(time.RFC3339)
 		current.AutoReleaseLastError = ""
+		if retryingNotification {
+			current.AutoReleaseAttempts++
+		}
 		return current, nil
 	})
 	if err != nil {
 		return err
 	}
-	return c.notifyAndFinalizeRelease(claimed, now)
+	return c.notifyAndFinalizeRelease(claimed, now, retryingNotification, retryError)
 }
 
-func (c *AutoReleaseCoordinator) notifyAndFinalizeRelease(reminder ReleaseReminder, now time.Time) error {
+func (c *AutoReleaseCoordinator) notifyAndFinalizeRelease(reminder ReleaseReminder, now time.Time, retrying bool, retryError string) error {
 	if reminder.AutoReleaseNotifiedAt == "" {
 		if c.Notify != nil {
-			if err := c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationSuccess, Reminder: reminder}); err != nil {
+			if err := c.Notify(AutoReleaseNotification{
+				Kind: AutoReleaseNotificationSuccess, Reminder: reminder,
+				Error: retryError, Attempt: reminder.AutoReleaseAttempts, Retrying: retrying,
+				CycleID: autoReleaseCycleID(reminder),
+			}); err != nil {
 				return c.recordNotificationFailure(reminder, now, err)
 			}
 		}
 		marked, err := c.Store.MarkAutoReleaseNotified(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339))
 		if err != nil {
-			ambiguous := fmt.Errorf("automatic release success notification was accepted but marker persistence is ambiguous; notification may be duplicated on retry: %w", err)
+			ambiguous := sanitizeOperationalError(fmt.Errorf("automatic release success notification was accepted but marker persistence is ambiguous; notification may be duplicated on retry: %w", err))
 			c.emit("notification-persistence-ambiguous", reminder, reminder.AutoReleaseAttempts, ambiguous.Error())
 			return ambiguous
 		}
@@ -491,10 +515,11 @@ func (c *AutoReleaseCoordinator) notifyAndFinalizeRelease(reminder ReleaseRemind
 }
 
 func (c *AutoReleaseCoordinator) recordNotificationFailure(reminder ReleaseReminder, now time.Time, cause error) error {
-	return c.recordPendingFailure(reminder, now, cause, false)
+	return c.recordPendingFailure(reminder, now, sanitizeOperationalError(cause), false)
 }
 
 func (c *AutoReleaseCoordinator) recordCleanupFailure(reminder ReleaseReminder, now time.Time, cause error) error {
+	cause = sanitizeOperationalError(cause)
 	if err := c.recordPendingFailure(reminder, now, cause, true); err != nil {
 		return err
 	}
@@ -509,6 +534,7 @@ func (c *AutoReleaseCoordinator) recordPendingCompletionFailure(reminder Release
 }
 
 func (c *AutoReleaseCoordinator) recordPendingFailure(reminder ReleaseReminder, now time.Time, cause error, notified bool) error {
+	cause = sanitizeOperationalError(cause)
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseCycle(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
 			return current, errAutoReleaseCycleChanged
@@ -521,7 +547,10 @@ func (c *AutoReleaseCoordinator) recordPendingFailure(reminder ReleaseReminder, 
 		return current, nil
 	})
 	if err != nil {
-		return err
+		if errors.Is(err, errAutoReleaseCycleChanged) {
+			return err
+		}
+		return sanitizeOperationalError(err)
 	}
 	action := "notification-retrying"
 	if notified {
@@ -532,6 +561,7 @@ func (c *AutoReleaseCoordinator) recordPendingFailure(reminder ReleaseReminder, 
 }
 
 func (c *AutoReleaseCoordinator) resumeReleaseRetrying(reminder ReleaseReminder, now time.Time, cause error) error {
+	cause = sanitizeOperationalError(cause)
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || current.AutoReleaseNotifiedAt != "" {
 			return current, errAutoReleaseCycleChanged
@@ -559,9 +589,26 @@ func releaseReminderCycleFromReminder(reminder ReleaseReminder) ReleaseReminderC
 	}
 }
 
+func autoReleaseCycleID(reminder ReleaseReminder) string {
+	cycle := releaseReminderCycleFromReminder(reminder)
+	digest := sha256.New()
+	for _, value := range []string{
+		cycle.ProfileName,
+		cycle.AutoReleaseAt,
+		cycle.AutoReleaseStartedAt,
+		cycle.HostID,
+		cycle.AppleEmail,
+		cycle.OwnerEmail,
+	} {
+		_, _ = fmt.Fprintf(digest, "%d:", len(value))
+		_, _ = digest.Write([]byte(value))
+	}
+	return "arc-" + hex.EncodeToString(digest.Sum(nil))
+}
+
 func (c *AutoReleaseCoordinator) emit(action string, reminder ReleaseReminder, attempt int, message string) {
 	if c.Emit != nil {
-		c.Emit(AutoReleaseEvent{Action: action, Reminder: reminder, Attempt: attempt, Message: message})
+		c.Emit(AutoReleaseEvent{Action: action, Reminder: reminder, Attempt: attempt, CycleID: autoReleaseCycleID(reminder), Message: message})
 	}
 }
 
@@ -711,5 +758,5 @@ func autoReleaseJobOutcome(err error, safetyChecked bool, code string) JobOutcom
 			code = "resource_safety"
 		}
 	}
-	return JobOutcome{ErrorCategory: jobCategory, ErrorCode: code, Reason: redactWechatWebhookURL(err.Error())}
+	return JobOutcome{ErrorCategory: jobCategory, ErrorCode: code, Reason: sanitizeOperationalError(err).Error()}
 }

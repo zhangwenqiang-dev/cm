@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -613,11 +614,19 @@ func TestAutoReleaseCompletionNotificationFailureRetries(t *testing.T) {
 		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-retained"}}, nil
 	}
 	calls := 0
+	var notificationAttempts []int
+	var notificationRetries []bool
+	var notificationCycleIDs []string
+	var notificationErrors []string
 	coordinator.Notify = func(notification AutoReleaseNotification) error {
 		if notification.Kind != AutoReleaseNotificationSuccess {
 			t.Fatalf("notification = %+v", notification)
 		}
 		calls++
+		notificationAttempts = append(notificationAttempts, notification.Attempt)
+		notificationRetries = append(notificationRetries, notification.Retrying)
+		notificationCycleIDs = append(notificationCycleIDs, notification.CycleID)
+		notificationErrors = append(notificationErrors, notification.Error)
 		if calls == 1 {
 			return errors.New("wechat temporarily unavailable")
 		}
@@ -627,8 +636,9 @@ func TestAutoReleaseCompletionNotificationFailureRetries(t *testing.T) {
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("first Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || got.AutoReleaseNotifiedAt != "" || !strings.Contains(got.AutoReleaseLastError, "wechat") {
-		t.Fatalf("first reminder = %+v", got)
+	first := store.get("mac")
+	if first.Status == ReleaseReminderStatusReleased || first.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || first.AutoReleaseNotifiedAt != "" || first.AutoReleaseAttempts != 1 || !strings.Contains(first.AutoReleaseLastError, "wechat") {
+		t.Fatalf("first reminder = %+v", first)
 	}
 	if calls != 1 || store.markCalls != 0 || store.cleanupCalls != 0 {
 		t.Fatalf("first calls=%d marks=%d cleanup=%d", calls, store.markCalls, store.cleanupCalls)
@@ -637,8 +647,14 @@ func TestAutoReleaseCompletionNotificationFailureRetries(t *testing.T) {
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("retry Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || calls != 2 || store.markCalls != 1 || store.cleanupCalls != 1 {
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || got.AutoReleaseAttempts != 2 || got.AutoReleaseStartedAt != first.AutoReleaseStartedAt || calls != 2 || store.markCalls != 1 || store.cleanupCalls != 1 {
 		t.Fatalf("retry reminder=%+v calls=%d marks=%d cleanup=%d", got, calls, store.markCalls, store.cleanupCalls)
+	}
+	if !reflect.DeepEqual(notificationAttempts, []int{1, 2}) || !reflect.DeepEqual(notificationRetries, []bool{false, true}) || len(notificationCycleIDs) != 2 || notificationCycleIDs[0] == "" || notificationCycleIDs[0] != notificationCycleIDs[1] {
+		t.Fatalf("notification retry context attempts=%v retrying=%v cycles=%v", notificationAttempts, notificationRetries, notificationCycleIDs)
+	}
+	if notificationErrors[0] != "" || !strings.Contains(notificationErrors[1], "wechat") {
+		t.Fatalf("notification retry errors = %v", notificationErrors)
 	}
 }
 
@@ -904,6 +920,78 @@ func TestAutoReleaseDeferredJobWithResourcesRetries(t *testing.T) {
 	}
 	if got := store.get("mac"); got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || !strings.Contains(got.AutoReleaseLastError, "pending") {
 		t.Fatalf("partial reminder = %+v", got)
+	}
+}
+
+func TestAutoReleaseCycleIDUsesExactCycleTuple(t *testing.T) {
+	base := ReleaseReminder{
+		ProfileName:          "mac",
+		AppleEmail:           "apple@example.com",
+		HostID:               "h-1",
+		OwnerEmail:           "owner@example.com",
+		AutoReleaseAt:        "2026-08-20T08:30:00Z",
+		AutoReleaseStartedAt: "2026-08-20T08:31:00Z",
+		AutoReleaseAttempts:  1,
+	}
+	want := autoReleaseCycleID(base)
+	if want == "" || strings.Contains(want, base.ProfileName) || strings.Contains(want, base.AppleEmail) || strings.Contains(want, base.HostID) {
+		t.Fatalf("cycle ID is empty or exposes tuple data: %q", want)
+	}
+	nonCycleChange := base
+	nonCycleChange.AutoReleaseAttempts = 99
+	nonCycleChange.AutoReleaseLastAttemptAt = "2026-08-20T09:00:00Z"
+	nonCycleChange.AutoReleaseLastError = "temporary"
+	if got := autoReleaseCycleID(nonCycleChange); got != want {
+		t.Fatalf("non-cycle state changed cycle ID: got %q want %q", got, want)
+	}
+
+	mutations := map[string]func(*ReleaseReminder){
+		"profile":    func(reminder *ReleaseReminder) { reminder.ProfileName += "-new" },
+		"auto at":    func(reminder *ReleaseReminder) { reminder.AutoReleaseAt = "2026-08-20T08:35:00Z" },
+		"started at": func(reminder *ReleaseReminder) { reminder.AutoReleaseStartedAt = "2026-08-20T08:32:00Z" },
+		"host":       func(reminder *ReleaseReminder) { reminder.HostID = "h-2" },
+		"apple":      func(reminder *ReleaseReminder) { reminder.AppleEmail = "other@example.com" },
+		"owner":      func(reminder *ReleaseReminder) { reminder.OwnerEmail = "other-owner@example.com" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			mutate(&changed)
+			if got := autoReleaseCycleID(changed); got == want {
+				t.Fatalf("cycle tuple change did not change ID: %q", got)
+			}
+		})
+	}
+}
+
+func TestAutoReleaseJobOutcomeSanitizesComprehensiveSecrets(t *testing.T) {
+	secrets := []string{
+		"task5-webhook-key",
+		"task5-bearer-token",
+		"task5-session-token",
+		"/Users/test/.ssh/task5-private.pem",
+		"AKIAIOSFODNN7EXAMPLE",
+		"task5-aws-secret",
+	}
+	raw := errors.New(strings.Join([]string{
+		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + secrets[0],
+		"Authorization: Bearer " + secrets[1],
+		"session_token=" + secrets[2],
+		"pem_path=" + secrets[3],
+		"AWS_ACCESS_KEY_ID=" + secrets[4],
+		"AWS_SECRET_ACCESS_KEY=" + secrets[5],
+	}, "\n"))
+	outcome := autoReleaseJobOutcome(RecoverableAutoReleaseError(raw), true, "")
+	if outcome.ErrorCategory != JobErrorCategoryRecoverable || outcome.Reason == "" {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(outcome.Reason, secret) {
+			t.Fatalf("job outcome leaked %q: %s", secret, outcome.Reason)
+		}
+	}
+	if strings.Contains(outcome.Reason, "qyapi.weixin.qq.com") {
+		t.Fatalf("job outcome retained full webhook URL: %s", outcome.Reason)
 	}
 }
 
