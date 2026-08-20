@@ -533,21 +533,26 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 		},
 		Emit: func(event AutoReleaseEvent) {
 			level := "info"
-			if event.Action == "retrying" || event.Action == "failed" || event.Action == "cleanup-retrying" {
+			errorCode := ""
+			if event.Action == "retrying" || event.Action == "failed" || event.Action == "notification-retrying" || event.Action == "cleanup-retrying" {
 				level = "error"
+				errorCode = classifyOperationalError(errors.New(event.Message)).Code
 			}
 			action := "auto-release." + event.Action
+			message := sanitizeLogText(event.Message)
 			a.writeRuntimeLog(LogEntry{
 				Level: level, Action: action, Operation: "auto-release",
 				Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail,
 				Source: "background-worker", Phase: event.Action, Status: event.Action,
-				Message: event.Message,
+				RequestID: event.RequestID, JobID: event.JobID, ErrorCode: errorCode,
+				Attempt: event.Attempt, Message: message,
 			})
 			_ = a.recordEventWithFallback(OperationEvent{
 				Action: action, Profile: event.Reminder.ProfileName,
 				AppleEmail: event.Reminder.AppleEmail, Source: "background-worker",
 				Phase: event.Action, Confirmed: true, Status: event.Action,
-				Message: event.Message,
+				RequestID: event.RequestID, JobID: event.JobID, ErrorCode: errorCode,
+				Message: message,
 			})
 		},
 	}

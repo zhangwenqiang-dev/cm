@@ -521,6 +521,7 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 		Type:                "aws-destroy",
 		Profile:             reminder.ProfileName,
 		AppleEmail:          reminder.AppleEmail,
+		RequestID:           "req-destroy-aaronjasonall-use1",
 		Status:              JobStatusSuccess,
 		StartedAt:           time.Date(2026, 8, 20, 8, 30, 2, 0, time.UTC),
 		FinishedAt:          time.Date(2026, 8, 20, 8, 34, 30, 0, time.UTC),
@@ -549,7 +550,7 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 	var observedStatus AWSStatus
 	events := make([]AutoReleaseEvent, 0, 3)
 	coordinator.Status = func(_ context.Context, profile Profile) (AWSStatus, error) {
-		if len(events) != 1 || events[0].Action != "job-observed" || !strings.Contains(events[0].Message, "destroy-aaronjasonall-use1") || !strings.Contains(events[0].Message, string(JobStatusSuccess)) {
+		if len(events) != 1 || events[0].Action != "job.observed" || events[0].JobID != jobs.jobs[0].ID || events[0].RequestID != jobs.jobs[0].RequestID || !strings.Contains(events[0].Message, "destroy-aaronjasonall-use1") || !strings.Contains(events[0].Message, string(JobStatusSuccess)) {
 			t.Fatalf("events before AWS status = %+v", events)
 		}
 		statusCalls++
@@ -589,7 +590,7 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 	observedEvents := 0
 	releasedEvents := 0
 	for _, event := range events {
-		if event.Action == "job-observed" {
+		if event.Action == "job.observed" {
 			observedEvents++
 		}
 		if event.Action == "released" {

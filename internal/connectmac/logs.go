@@ -237,17 +237,21 @@ func sanitizeLogText(text string) string {
 	text = logAWSAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
 	text = logSensitiveAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
 	text = logAWSAccessKeyPattern.ReplaceAllString(text, "[REDACTED AWS ACCESS KEY]")
+	text = logPEMPathPattern.ReplaceAllString(text, "[REDACTED PEM PATH]")
 	if len(text) > 4000 {
 		text = text[:4000]
 	}
 	return text
 }
 
-const logSensitiveKeyPattern = `access_token|client_secret|aws_access_key_id|aws_secret_access_key|aws_session_token|awsaccesskeyid|secretaccesskey|sessiontoken|password|token|secret|session|cookie`
+const logSensitiveKeyPattern = `access_token|client_secret|aws_access_key_id|aws_secret_access_key|aws_session_token|awsaccesskeyid|secretaccesskey|session_token|sessiontoken|pem_path|pem_file|identity_file|private_key_path|password|token|secret|session|cookie`
 
 var (
 	logPEMBlockPattern = regexp.MustCompile(
 		`(?s)-----BEGIN [^-\r\n]+-----.*?(?:-----END [^-\r\n]+-----|$)`,
+	)
+	logPEMPathPattern = regexp.MustCompile(
+		`(?i)(?:"[^"\r\n]*\.pem"|'[^'\r\n]*\.pem'|(?:~|/)[^\s,;\)\]\}]+\.pem)`,
 	)
 	logAuthorizationPattern = regexp.MustCompile(
 		`(?i)(authorization[ \t]*:[ \t]*)[^\r\n]*`,

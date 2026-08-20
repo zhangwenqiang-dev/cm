@@ -31,10 +31,12 @@ type AutoReleaseNotification struct {
 }
 
 type AutoReleaseEvent struct {
-	Action   string
-	Reminder ReleaseReminder
-	Attempt  int
-	Message  string
+	Action    string
+	Reminder  ReleaseReminder
+	Attempt   int
+	RequestID string
+	JobID     string
+	Message   string
 }
 
 type AutoReleaseStore interface {
@@ -301,7 +303,16 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 	if !found {
 		return c.markRetrying(reminder, now, errors.New("automatic release was running but no active destroy job remains"))
 	}
-	c.emit("job-observed", reminder, reminder.AutoReleaseAttempts, fmt.Sprintf("job_id=%s status=%s", job.ID, job.Status))
+	if c.Emit != nil {
+		c.Emit(AutoReleaseEvent{
+			Action:    "job.observed",
+			Reminder:  reminder,
+			Attempt:   reminder.AutoReleaseAttempts,
+			RequestID: job.RequestID,
+			JobID:     job.ID,
+			Message:   fmt.Sprintf("job_id=%s status=%s", job.ID, job.Status),
+		})
+	}
 	profile, err := c.resolveAndValidateProfile(ctx, reminder)
 	if err != nil {
 		return c.recordAttemptFailure(reminder, now, err, false)
