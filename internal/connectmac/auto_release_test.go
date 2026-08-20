@@ -476,6 +476,96 @@ func TestAutoReleaseObservesSuccessfulJobAndRetainsEIPAllocation(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) {
+	now := time.Date(2026, 8, 20, 8, 35, 0, 0, time.UTC)
+	reminder := ReleaseReminder{
+		ProfileName:              "aaronjasonall-use1",
+		AppleEmail:               "aaronjasonall@example.com",
+		HostID:                   "h-0123456789abcdef0",
+		HostCreatedAt:            "2026-08-19T20:00:00Z",
+		ReleaseDueAt:             "2026-08-20T08:20:00Z",
+		OwnerEmail:               "owner@example.com",
+		LastNotifiedAt:           "2026-08-20T08:20:00Z",
+		Status:                   ReleaseReminderStatusDueNotified,
+		AutoReleaseEnabled:       true,
+		AutoReleaseAt:            "2026-08-20T08:30:00Z",
+		AutoReleaseStartedAt:     "2026-08-20T08:30:00Z",
+		AutoReleaseLastAttemptAt: "2026-08-20T08:30:01Z",
+		AutoReleaseAttempts:      1,
+		AutoReleaseState:         ReleaseReminderAutoReleaseStateRunning,
+		CreatedAt:                "2026-08-19T20:00:00Z",
+		UpdatedAt:                "2026-08-20T08:30:01Z",
+	}
+	store := newAutoReleaseTestStore(reminder)
+	jobs := &autoReleaseTestJobs{jobs: []Job{{
+		ID:                  "destroy-aaronjasonall-use1",
+		Type:                "aws-destroy",
+		Profile:             reminder.ProfileName,
+		AppleEmail:          reminder.AppleEmail,
+		Status:              JobStatusSuccess,
+		StartedAt:           time.Date(2026, 8, 20, 8, 30, 2, 0, time.UTC),
+		FinishedAt:          time.Date(2026, 8, 20, 8, 34, 30, 0, time.UTC),
+		LifecycleState:      "",
+		LifecycleOwnerEmail: "",
+	}}}
+	fakeStatus := AWSStatus{
+		Hosts:     []DedicatedHostStatus{},
+		Instances: []InstanceStatus{},
+		ElasticIP: ElasticIP{AllocationID: "eipalloc-aaronjasonall-use1"},
+	}
+	coordinator, notifications, _ := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = jobs
+	coordinator.ResolveProfile = func(context.Context, ReleaseReminder) (Profile, error) {
+		return Profile{
+			Name: reminder.ProfileName,
+			AWS: AWSConfig{
+				AccountEmail: reminder.AppleEmail,
+				Profile:      "aws-aaronjasonall-use1",
+				Region:       "us-east-1",
+			},
+		}, nil
+	}
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return fakeStatus, nil
+	}
+	startDestroyCalls := 0
+	coordinator.StartDestroy = func(context.Context, Profile) (Job, error) {
+		startDestroyCalls++
+		return Job{}, errors.New("StartDestroy must not be called for a successful legacy destroy job")
+	}
+	events := make([]AutoReleaseEvent, 0, 2)
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if startDestroyCalls != 0 {
+		t.Fatalf("StartDestroy calls = %d, want 0", startDestroyCalls)
+	}
+	if len(*notifications) != 1 || (*notifications)[0].Kind != AutoReleaseNotificationSuccess {
+		t.Fatalf("notifications = %+v", *notifications)
+	}
+	wantCycle := releaseReminderCycleFromReminder(reminder)
+	if store.cleanupCalls != 1 || len(store.completeCycles) != 1 || store.completeCycles[0] != wantCycle {
+		t.Fatalf("completed cycles = %+v, cleanup calls = %d, want exactly %+v", store.completeCycles, store.cleanupCalls, wantCycle)
+	}
+	releasedEvents := 0
+	for _, event := range events {
+		if event.Action == "released" {
+			releasedEvents++
+			if event.Reminder.ProfileName != reminder.ProfileName || !strings.Contains(event.Message, "eip_retained=true") {
+				t.Fatalf("released event = %+v", event)
+			}
+		}
+	}
+	if releasedEvents != 1 {
+		t.Fatalf("released events = %d, events = %+v", releasedEvents, events)
+	}
+	if len(fakeStatus.Hosts) != 0 || len(fakeStatus.Instances) != 0 || fakeStatus.ElasticIP.AllocationID != "eipalloc-aaronjasonall-use1" || fakeStatus.ElasticIP.AssociationID != "" || fakeStatus.ElasticIP.InstanceID != "" {
+		t.Fatalf("fake status was not retained and clean: %+v", fakeStatus)
+	}
+}
+
 func TestAutoReleaseCompletionNotificationFailureRetries(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
@@ -557,11 +647,12 @@ func autoReleaseTestInstance(state string) InstanceStatus {
 }
 
 type autoReleaseTestStore struct {
-	mu            sync.Mutex
-	reminders     map[string]ReleaseReminder
-	beforeUpdate  func(*ReleaseReminder)
-	cleanupCalls  int
-	cleanupErrors []error
+	mu             sync.Mutex
+	reminders      map[string]ReleaseReminder
+	beforeUpdate   func(*ReleaseReminder)
+	cleanupCalls   int
+	completeCycles []ReleaseReminderCycle
+	cleanupErrors  []error
 }
 
 func newAutoReleaseTestStore(reminders ...ReleaseReminder) *autoReleaseTestStore {
@@ -612,6 +703,7 @@ func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, r
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupCalls++
+	s.completeCycles = append(s.completeCycles, cycle)
 	if len(s.cleanupErrors) > 0 {
 		err := s.cleanupErrors[0]
 		s.cleanupErrors = s.cleanupErrors[1:]
