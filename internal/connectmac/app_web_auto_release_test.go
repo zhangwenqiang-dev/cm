@@ -37,6 +37,7 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 		`if (reminder.auto_release_notified_at) return "释放通知已发送，清理重试中";`,
 		`return "释放完成，企业微信通知重试中";`,
 		`自动释放失败`,
+		`const showError = !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");`,
 		`已释放`,
 	} {
 		if !strings.Contains(html, want) {

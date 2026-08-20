@@ -403,7 +403,14 @@ func (c *AutoReleaseCoordinator) inspectAtMutationDeadline(ctx context.Context, 
 		}
 		return c.completeRelease(claimed, profile, now)
 	}
-	return c.finishFailure(reminder, now, fmt.Errorf("automatic release retry window of %s expired while managed resources remain", AutoReleaseRetryWindow))
+	cause := fmt.Errorf("automatic release retry window of %s expired while managed resources remain", AutoReleaseRetryWindow)
+	if completionChecksContinue {
+		if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
+			return c.markRetrying(reminder, now, cause)
+		}
+		return c.recordExpiredCompletionCheckFailure(reminder, cause)
+	}
+	return c.finishFailure(reminder, now, cause)
 }
 
 func (c *AutoReleaseCoordinator) recordMutationDeadlineReadFailure(reminder ReleaseReminder, now time.Time, cause error, completionChecksContinue bool) error {
@@ -418,10 +425,12 @@ func (c *AutoReleaseCoordinator) recordMutationDeadlineReadFailure(reminder Rele
 
 func (c *AutoReleaseCoordinator) recordExpiredCompletionCheckFailure(reminder ReleaseReminder, cause error) error {
 	cause = sanitizeOperationalError(cause)
+	notifyFirstFailure := false
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying {
 			return current, errAutoReleaseCycleChanged
 		}
+		notifyFirstFailure = current.AutoReleaseAttempts == 1 && current.AutoReleaseLastError == ""
 		current.AutoReleaseLastError = cause.Error()
 		return current, nil
 	})
@@ -429,7 +438,7 @@ func (c *AutoReleaseCoordinator) recordExpiredCompletionCheckFailure(reminder Re
 		return err
 	}
 	c.emit("retrying", updated, updated.AutoReleaseAttempts, cause.Error())
-	if updated.AutoReleaseAttempts == 1 && c.Notify != nil {
+	if notifyFirstFailure && c.Notify != nil {
 		return sanitizeOperationalError(c.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationFirstFailure, Reminder: updated, Error: cause.Error(), Attempt: updated.AutoReleaseAttempts, CycleID: autoReleaseCycleID(updated)}))
 	}
 	return nil
@@ -550,11 +559,11 @@ func (c *AutoReleaseCoordinator) observeNotificationPending(ctx context.Context,
 	if err != nil {
 		return c.recordPendingCompletionFailure(reminder, now, err)
 	}
-	if err := validateAutoReleaseOwnership(reminder, profile, status); err != nil {
-		return c.recordPendingCompletionFailure(reminder, now, err)
-	}
 	if !autoReleaseResourcesClean(status) {
 		return c.blockPendingCompletion(reminder, now, errors.New("managed resources reappeared before automatic release completion"))
+	}
+	if err := validateAutoReleaseOwnership(reminder, profile, status); err != nil {
+		return c.recordPendingCompletionFailure(reminder, now, err)
 	}
 	retryingNotification := reminder.AutoReleaseNotifiedAt == ""
 	retryError := ""
