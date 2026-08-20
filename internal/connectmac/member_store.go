@@ -230,6 +230,7 @@ type ReleaseReminder struct {
 	AutoReleaseAt            string `json:"auto_release_at,omitempty"`
 	AutoReleaseStartedAt     string `json:"auto_release_started_at,omitempty"`
 	AutoReleaseLastAttemptAt string `json:"auto_release_last_attempt_at,omitempty"`
+	AutoReleaseNotifiedAt    string `json:"auto_release_notified_at,omitempty"`
 	AutoReleaseAttempts      int    `json:"auto_release_attempts,omitempty"`
 	AutoReleaseLastError     string `json:"auto_release_last_error,omitempty"`
 	AutoReleaseState         string `json:"auto_release_state,omitempty"`
@@ -1141,6 +1142,42 @@ func (s MemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt 
 		return ReleaseReminder{}, err
 	}
 	return completed, nil
+}
+
+func (s MemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer unlock()
+	s = s.normalize()
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	for i := range db.Reminders {
+		current := db.Reminders[i]
+		if current.ProfileName != cycle.ProfileName {
+			continue
+		}
+		if !releaseReminderMatchesCycle(current, cycle) {
+			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+		}
+		if current.AutoReleaseNotifiedAt != "" {
+			return current, nil
+		}
+		if current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
+			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+		}
+		current.AutoReleaseNotifiedAt = notifiedAt
+		current.UpdatedAt = s.currentTime().Format(time.RFC3339)
+		db.Reminders[i] = current
+		if err := s.saveUnlocked(db); err != nil {
+			return ReleaseReminder{}, err
+		}
+		return current, nil
+	}
+	return ReleaseReminder{}, releaseReminderNotFoundError(cycle.ProfileName)
 }
 
 func completeAutoReleaseInData(db *MemberData, cycle ReleaseReminderCycle, releasedAt, updatedAt string) (ReleaseReminder, error) {
@@ -2519,6 +2556,16 @@ func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now stri
 	updated.ProfileName = current.ProfileName
 	updated.CreatedAt = current.CreatedAt
 	updated = normalizeReleaseReminder(updated)
+	if !releaseReminderMatchesCycle(current, ReleaseReminderCycle{
+		ProfileName:          updated.ProfileName,
+		AutoReleaseAt:        updated.AutoReleaseAt,
+		AutoReleaseStartedAt: updated.AutoReleaseStartedAt,
+		HostID:               updated.HostID,
+		AppleEmail:           updated.AppleEmail,
+		OwnerEmail:           updated.OwnerEmail,
+	}) {
+		updated.AutoReleaseNotifiedAt = ""
+	}
 	updated.UpdatedAt = now
 	return updated
 }
@@ -2527,6 +2574,7 @@ func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) Re
 	updated = normalizeReleaseReminderCallback(current, updated, now)
 	if current.HostID != updated.HostID ||
 		current.AppleEmail != updated.AppleEmail ||
+		normalizeEmail(current.OwnerEmail) != normalizeEmail(updated.OwnerEmail) ||
 		(current.Status == ReleaseReminderStatusReleased && updated.Status != ReleaseReminderStatusReleased) {
 		return resetAutoReleaseForNewCycle(updated)
 	}
@@ -2534,6 +2582,7 @@ func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) Re
 	updated.AutoReleaseAt = current.AutoReleaseAt
 	updated.AutoReleaseStartedAt = current.AutoReleaseStartedAt
 	updated.AutoReleaseLastAttemptAt = current.AutoReleaseLastAttemptAt
+	updated.AutoReleaseNotifiedAt = current.AutoReleaseNotifiedAt
 	updated.AutoReleaseAttempts = current.AutoReleaseAttempts
 	updated.AutoReleaseLastError = current.AutoReleaseLastError
 	updated.AutoReleaseState = current.AutoReleaseState
@@ -2545,6 +2594,7 @@ func resetAutoReleaseForNewCycle(reminder ReleaseReminder) ReleaseReminder {
 	reminder.AutoReleaseAt = ""
 	reminder.AutoReleaseStartedAt = ""
 	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseNotifiedAt = ""
 	reminder.AutoReleaseAttempts = 0
 	reminder.AutoReleaseLastError = ""
 	reminder.AutoReleaseState = ""
