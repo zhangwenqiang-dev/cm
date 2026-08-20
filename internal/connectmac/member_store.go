@@ -1160,14 +1160,11 @@ func (s MemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifie
 		if current.ProfileName != cycle.ProfileName {
 			continue
 		}
-		if !releaseReminderMatchesCycle(current, cycle) {
+		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
 			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 		}
 		if current.AutoReleaseNotifiedAt != "" {
 			return current, nil
-		}
-		if current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
-			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 		}
 		current.AutoReleaseNotifiedAt = notifiedAt
 		current.UpdatedAt = s.currentTime().Format(time.RFC3339)

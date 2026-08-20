@@ -1727,7 +1727,7 @@ func markAutoReleaseNotifiedInMySQLTransaction(tx mysqlReleaseReminderTransactio
 		}
 		return ReleaseReminder{}, err
 	}
-	if !releaseReminderMatchesCycle(current, cycle) {
+	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
 		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 	}
 	if current.AutoReleaseNotifiedAt != "" {
@@ -1736,9 +1736,6 @@ func markAutoReleaseNotifiedInMySQLTransaction(tx mysqlReleaseReminderTransactio
 		}
 		committed = true
 		return current, nil
-	}
-	if current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
-		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 	}
 	current.AutoReleaseNotifiedAt = notifiedAt
 	current.UpdatedAt = now.Format(time.RFC3339)
