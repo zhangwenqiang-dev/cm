@@ -368,7 +368,11 @@ func (r *pruneTrackingRepository) callCount() int {
 func TestWebBackgroundWorkersBlockedLifecycleDoesNotBlockAutoRelease(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	lifecycleStarted := make(chan struct{})
+	releaseLifecycle := make(chan struct{})
+	lifecycleReturned := make(chan struct{})
 	autoReleaseScanned := make(chan struct{}, 1)
+	var releaseLifecycleOnce sync.Once
+	t.Cleanup(func() { releaseLifecycleOnce.Do(func() { close(releaseLifecycle) }) })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -378,10 +382,11 @@ func TestWebBackgroundWorkersBlockedLifecycleDoesNotBlockAutoRelease(t *testing.
 			reminderTicks:        make(chan time.Time),
 			lifecycleScanTimeout: time.Second,
 			autoReleaseTimeout:   time.Second,
-			lifecycleScan: func(ctx context.Context, _ string) error {
+			lifecycleScan: func(context.Context, string) error {
 				close(lifecycleStarted)
-				<-ctx.Done()
-				return ctx.Err()
+				defer close(lifecycleReturned)
+				<-releaseLifecycle
+				return nil
 			},
 			autoReleaseScan: func(context.Context, string, time.Time) error {
 				autoReleaseScanned <- struct{}{}
@@ -407,18 +412,25 @@ func TestWebBackgroundWorkersBlockedLifecycleDoesNotBlockAutoRelease(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("background workers did not stop")
 	}
+	releaseLifecycleOnce.Do(func() { close(releaseLifecycle) })
+	select {
+	case <-lifecycleReturned:
+	case <-time.After(time.Second):
+		t.Fatal("noncooperative lifecycle callback did not return after release")
+	}
 }
 
 func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	reminderTicks := make(chan time.Time)
-	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	firstReturned := make(chan struct{})
-	secondScanned := make(chan struct{})
+	scanStarted := make(chan int32, 3)
 	var releaseFirstOnce sync.Once
 	t.Cleanup(func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) })
 	var calls atomic.Int32
+	var concurrent atomic.Int32
+	var maxConcurrent atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -429,45 +441,78 @@ func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 			autoReleaseTimeout: 20 * time.Millisecond,
 			lifecycleScan:      func(context.Context, string) error { return nil },
 			autoReleaseScan: func(context.Context, string, time.Time) error {
-				if calls.Add(1) == 1 {
-					close(firstStarted)
+				active := concurrent.Add(1)
+				defer concurrent.Add(-1)
+				for observed := maxConcurrent.Load(); active > observed; observed = maxConcurrent.Load() {
+					if maxConcurrent.CompareAndSwap(observed, active) {
+						break
+					}
+				}
+				call := calls.Add(1)
+				scanStarted <- call
+				if call == 1 {
 					<-releaseFirst
 					close(firstReturned)
 					return errors.New("late first scan failure")
 				}
-				close(secondScanned)
 				return nil
 			},
 		})
 	}()
 
 	select {
-	case <-firstStarted:
+	case call := <-scanStarted:
+		if call != 1 {
+			t.Fatalf("initial scan call = %d, want 1", call)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("first auto-release scan did not start")
 	}
-	select {
-	case reminderTicks <- time.Now().Add(time.Minute):
-	case <-time.After(time.Second):
-		t.Fatal("worker did not accept the next tick after scan timeout")
+	waitForTestLogAction(t, app.LogManager, "auto-release.scan.timeout")
+	for i := 0; i < 2; i++ {
+		select {
+		case reminderTicks <- time.Now().Add(time.Duration(i+1) * time.Minute):
+		case <-time.After(time.Second):
+			t.Fatal("worker did not accept a tick while the timed-out scan was blocked")
+		}
 	}
 	select {
-	case <-secondScanned:
+	case call := <-scanStarted:
+		t.Fatalf("scan %d started while the timed-out callback remained blocked", call)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls while first scan blocked = %d, want 1", got)
+	}
+
+	releaseFirstOnce.Do(func() { close(releaseFirst) })
+	select {
+	case <-firstReturned:
 	case <-time.After(time.Second):
-		t.Fatal("auto-release scan did not recover while the timed-out callback remained blocked")
+		t.Fatal("timed-out callback did not exit after release")
+	}
+	select {
+	case call := <-scanStarted:
+		if call != 2 {
+			t.Fatalf("catch-up scan call = %d, want 2", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("catch-up scan did not start after the timed-out callback returned")
 	}
 	waitForTestLogAction(t, app.LogManager, "auto-release.scan.completed")
+	select {
+	case call := <-scanStarted:
+		t.Fatalf("unexpected extra coalesced scan %d", call)
+	case <-time.After(50 * time.Millisecond):
+	}
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("background workers did not stop")
 	}
-	releaseFirstOnce.Do(func() { close(releaseFirst) })
-	select {
-	case <-firstReturned:
-	case <-time.After(time.Second):
-		t.Fatal("timed-out callback did not exit after cleanup release")
+	if got := maxConcurrent.Load(); got != 1 {
+		t.Fatalf("max concurrent auto-release scans = %d, want 1", got)
 	}
 
 	var started, completed, failed, timedOut int
@@ -500,13 +545,25 @@ func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 func TestAutoReleaseScanErrorLogsFailed(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	scanErr := errors.New("database unavailable")
-	app.runAutoReleaseScan(
-		context.Background(),
-		"config.yaml",
-		time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC),
-		time.Second,
-		func(context.Context, string, time.Time) error { return scanErr },
-	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.runWebReminderWorker(ctx, "config.yaml", webBackgroundWorkerSchedule{
+			reminderTicks:      make(chan time.Time),
+			autoReleaseTimeout: time.Second,
+			autoReleaseScan: func(context.Context, string, time.Time) error {
+				return scanErr
+			},
+		})
+	}()
+	waitForTestLogAction(t, app.LogManager, "auto-release.scan.failed")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reminder worker did not stop")
+	}
 
 	entries := readTestLogEntries(t, app.LogManager)
 	if len(entries) != 2 || entries[0].Action != "auto-release.scan.started" {

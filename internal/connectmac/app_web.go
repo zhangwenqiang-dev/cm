@@ -101,6 +101,18 @@ type webBackgroundWorkerSchedule struct {
 	autoReleaseScan      func(context.Context, string, time.Time) error
 }
 
+type backgroundScanHooks struct {
+	onTick     func(time.Time)
+	onStarted  func()
+	onTimeout  func(time.Duration)
+	onFinished func(error, time.Duration)
+}
+
+type backgroundScanResult struct {
+	err        error
+	contextErr error
+}
+
 func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	opts, err := parseWebArgs(args)
 	if err != nil {
@@ -274,39 +286,107 @@ func (a App) runWebBackgroundWorkers(ctx context.Context, configPath string, sch
 }
 
 func (a App) runWebLifecycleWorker(ctx context.Context, configPath string, schedule webBackgroundWorkerSchedule) {
-	for {
-		_ = runBoundedBackgroundScan(ctx, schedule.lifecycleScanTimeout, func(scanCtx context.Context) error {
+	runBoundedBackgroundScan(ctx, schedule.lifecycleTicks, schedule.lifecycleScanTimeout,
+		func(scanCtx context.Context, _ time.Time) error {
 			return schedule.lifecycleScan(scanCtx, configPath)
-		})
-		if ctx.Err() != nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-schedule.lifecycleTicks:
-		}
-	}
+		}, backgroundScanHooks{})
 }
 
-func runBoundedBackgroundScan(parent context.Context, timeout time.Duration, scan func(context.Context) error) error {
-	if err := parent.Err(); err != nil {
-		return err
+func runBoundedBackgroundScan(
+	parent context.Context,
+	ticks <-chan time.Time,
+	timeout time.Duration,
+	scan func(context.Context, time.Time) error,
+	hooks backgroundScanHooks,
+) {
+	if parent.Err() != nil {
+		return
 	}
-	scanCtx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	result := make(chan error, 1)
-	go func() {
-		// A late result is intentionally discarded; buffering lets the timed-out scan exit without blocking.
-		result <- scan(scanCtx)
-	}()
-	select {
-	case err := <-result:
-		return err
-	case <-scanCtx.Done():
-		return scanCtx.Err()
-	case <-parent.Done():
-		return parent.Err()
+	var (
+		completion <-chan backgroundScanResult
+		deadline   <-chan struct{}
+		cancelScan context.CancelFunc
+		startedAt  time.Time
+		timedOut   bool
+		missedTick bool
+		catchUpAt  time.Time
+	)
+	start := func(scanAt time.Time) {
+		scanCtx, cancel := context.WithTimeout(parent, timeout)
+		result := make(chan backgroundScanResult, 1)
+		startedAt = time.Now()
+		completion = result
+		deadline = scanCtx.Done()
+		cancelScan = cancel
+		timedOut = false
+		if hooks.onStarted != nil {
+			hooks.onStarted()
+		}
+		go func() {
+			// Buffered completion lets a late scan return after shutdown without blocking.
+			result <- backgroundScanResult{err: scan(scanCtx, scanAt), contextErr: scanCtx.Err()}
+		}()
+	}
+
+	start(time.Now())
+	for {
+		select {
+		case <-parent.Done():
+			if cancelScan != nil {
+				cancelScan()
+			}
+			return
+		case tick, ok := <-ticks:
+			if !ok {
+				ticks = nil
+				continue
+			}
+			if hooks.onTick != nil {
+				hooks.onTick(tick)
+			}
+			if completion == nil {
+				start(tick)
+				continue
+			}
+			// Keep one scan in flight; intervening ticks collapse into one catch-up scan.
+			missedTick = true
+			catchUpAt = tick
+		case result := <-completion:
+			cancelScan()
+			if parent.Err() != nil {
+				return
+			}
+			duration := time.Since(startedAt)
+			wasTimedOut := timedOut
+			completion = nil
+			deadline = nil
+			cancelScan = nil
+			timedOut = false
+			if !wasTimedOut {
+				if errors.Is(result.contextErr, context.DeadlineExceeded) || errors.Is(result.err, context.DeadlineExceeded) {
+					if hooks.onTimeout != nil {
+						hooks.onTimeout(duration)
+					}
+				} else if hooks.onFinished != nil {
+					hooks.onFinished(result.err, duration)
+				}
+			}
+			if missedTick {
+				missedTick = false
+				start(catchUpAt)
+			}
+		case <-deadline:
+			if parent.Err() != nil {
+				cancelScan()
+				return
+			}
+			deadline = nil
+			timedOut = true
+			cancelScan()
+			if hooks.onTimeout != nil {
+				hooks.onTimeout(time.Since(startedAt))
+			}
+		}
 	}
 }
 
@@ -314,83 +394,65 @@ func (a App) runWebReminderWorker(ctx context.Context, configPath string, schedu
 	now := time.Now()
 	a.pruneWebAuditEvents(now)
 	nextAuditPrune := now.Add(24 * time.Hour)
-	a.runAutoReleaseScan(ctx, configPath, now, schedule.autoReleaseTimeout, schedule.autoReleaseScan)
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-schedule.reminderTicks:
-			if !now.Before(nextAuditPrune) {
-				a.pruneWebAuditEvents(now)
-				nextAuditPrune = now.Add(24 * time.Hour)
-			}
-			a.runAutoReleaseScan(ctx, configPath, now, schedule.autoReleaseTimeout, schedule.autoReleaseScan)
-		}
-	}
-}
-
-func (a App) runAutoReleaseScan(
-	ctx context.Context,
-	configPath string,
-	now time.Time,
-	timeout time.Duration,
-	scan func(context.Context, string, time.Time) error,
-) {
-	startedAt := time.Now()
-	a.writeRuntimeLog(LogEntry{
-		Level:     "info",
-		Action:    "auto-release.scan.started",
-		Operation: "auto-release",
-		Source:    "background-worker",
-		Phase:     "started",
-		Message:   "automatic release reconciliation scan started",
-	})
-	err := runBoundedBackgroundScan(ctx, timeout, func(scanCtx context.Context) error {
-		return scan(scanCtx, configPath, now)
-	})
-	durationMS := elapsedDurationMS(startedAt)
-	if ctx.Err() != nil {
-		return
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		a.writeRuntimeLog(LogEntry{
-			Level:      "warn",
-			Action:     "auto-release.scan.timeout",
-			Operation:  "auto-release",
-			Source:     "background-worker",
-			Phase:      "timeout",
-			DurationMS: durationMS,
-			ErrorCode:  classifyOperationalError(context.DeadlineExceeded).Code,
-			Message:    context.DeadlineExceeded.Error(),
+	runBoundedBackgroundScan(ctx, schedule.reminderTicks, schedule.autoReleaseTimeout,
+		func(scanCtx context.Context, now time.Time) error {
+			return schedule.autoReleaseScan(scanCtx, configPath, now)
+		}, backgroundScanHooks{
+			onTick: func(now time.Time) {
+				if !now.Before(nextAuditPrune) {
+					a.pruneWebAuditEvents(now)
+					nextAuditPrune = now.Add(24 * time.Hour)
+				}
+			},
+			onStarted: func() {
+				a.writeRuntimeLog(LogEntry{
+					Level:     "info",
+					Action:    "auto-release.scan.started",
+					Operation: "auto-release",
+					Source:    "background-worker",
+					Phase:     "started",
+					Message:   "automatic release reconciliation scan started",
+				})
+			},
+			onTimeout: func(duration time.Duration) {
+				a.writeRuntimeLog(LogEntry{
+					Level:      "warn",
+					Action:     "auto-release.scan.timeout",
+					Operation:  "auto-release",
+					Source:     "background-worker",
+					Phase:      "timeout",
+					DurationMS: positiveDurationMS(duration),
+					ErrorCode:  classifyOperationalError(context.DeadlineExceeded).Code,
+					Message:    context.DeadlineExceeded.Error(),
+				})
+			},
+			onFinished: func(err error, duration time.Duration) {
+				durationMS := positiveDurationMS(duration)
+				if err != nil {
+					classified := classifyOperationalError(err)
+					a.writeRuntimeLog(LogEntry{
+						Level:      "error",
+						Action:     "auto-release.scan.failed",
+						Operation:  "auto-release",
+						Source:     "background-worker",
+						Phase:      "failed",
+						DurationMS: durationMS,
+						ErrorCode:  classified.Code,
+						Message:    err.Error(),
+					})
+					return
+				}
+				a.writeRuntimeLog(LogEntry{
+					Level:      "info",
+					Action:     "auto-release.scan.completed",
+					Operation:  "auto-release",
+					Source:     "background-worker",
+					Phase:      "completed",
+					DurationMS: durationMS,
+					Message:    "automatic release reconciliation scan completed",
+				})
+			},
 		})
-		return
-	}
-	if err != nil {
-		classified := classifyOperationalError(err)
-		a.writeRuntimeLog(LogEntry{
-			Level:      "error",
-			Action:     "auto-release.scan.failed",
-			Operation:  "auto-release",
-			Source:     "background-worker",
-			Phase:      "failed",
-			DurationMS: durationMS,
-			ErrorCode:  classified.Code,
-			Message:    err.Error(),
-		})
-		return
-	}
-	a.writeRuntimeLog(LogEntry{
-		Level:      "info",
-		Action:     "auto-release.scan.completed",
-		Operation:  "auto-release",
-		Source:     "background-worker",
-		Phase:      "completed",
-		DurationMS: durationMS,
-		Message:    "automatic release reconciliation scan completed",
-	})
 }
 
 func (a App) pruneWebAuditEvents(now time.Time) {
