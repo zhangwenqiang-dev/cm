@@ -436,10 +436,14 @@ func (c *AutoReleaseCoordinator) observeNotificationPending(ctx context.Context,
 		return c.recordPendingCompletionFailure(reminder, now, err)
 	}
 	if !autoReleaseResourcesClean(status) {
-		return c.recordPendingCompletionFailure(reminder, now, errors.New("managed resources reappeared before automatic release completion"))
+		cause := RecoverableAutoReleaseError(errors.New("managed resources reappeared before automatic release completion"))
+		if reminder.AutoReleaseNotifiedAt == "" {
+			return c.resumeReleaseRetrying(reminder, now, cause)
+		}
+		return c.recordCleanupFailure(reminder, now, cause)
 	}
 	claimed, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
-		if !sameAutoReleaseCycle(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
+		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
 			return current, errAutoReleaseCycleChanged
 		}
 		current.AutoReleaseLastAttemptAt = now.Format(time.RFC3339)
@@ -480,11 +484,17 @@ func (c *AutoReleaseCoordinator) recordNotificationFailure(reminder ReleaseRemin
 }
 
 func (c *AutoReleaseCoordinator) recordCleanupFailure(reminder ReleaseReminder, now time.Time, cause error) error {
-	return c.recordPendingFailure(reminder, now, cause, true)
+	if err := c.recordPendingFailure(reminder, now, cause, true); err != nil {
+		return err
+	}
+	return RecoverableAutoReleaseError(cause)
 }
 
 func (c *AutoReleaseCoordinator) recordPendingCompletionFailure(reminder ReleaseReminder, now time.Time, cause error) error {
-	return c.recordPendingFailure(reminder, now, cause, reminder.AutoReleaseNotifiedAt != "")
+	if reminder.AutoReleaseNotifiedAt != "" {
+		return c.recordCleanupFailure(reminder, now, cause)
+	}
+	return c.recordNotificationFailure(reminder, now, cause)
 }
 
 func (c *AutoReleaseCoordinator) recordPendingFailure(reminder ReleaseReminder, now time.Time, cause error, notified bool) error {
@@ -507,6 +517,23 @@ func (c *AutoReleaseCoordinator) recordPendingFailure(reminder ReleaseReminder, 
 		action = "cleanup-retrying"
 	}
 	c.emit(action, updated, updated.AutoReleaseAttempts, cause.Error())
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) resumeReleaseRetrying(reminder ReleaseReminder, now time.Time, cause error) error {
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || current.AutoReleaseNotifiedAt != "" {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+		current.AutoReleaseLastAttemptAt = now.Format(time.RFC3339)
+		current.AutoReleaseLastError = cause.Error()
+		return current, nil
+	})
+	if err != nil {
+		return err
+	}
+	c.emit("retrying", updated, updated.AutoReleaseAttempts, cause.Error())
 	return nil
 }
 

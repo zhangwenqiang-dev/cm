@@ -533,7 +533,7 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 		},
 		Emit: func(event AutoReleaseEvent) {
 			level := "info"
-			if event.Action == "retrying" || event.Action == "failed" {
+			if event.Action == "retrying" || event.Action == "failed" || event.Action == "cleanup-retrying" {
 				level = "error"
 			}
 			action := "auto-release." + event.Action

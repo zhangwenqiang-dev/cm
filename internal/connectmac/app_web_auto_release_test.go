@@ -34,6 +34,8 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 		`将在 ${formatTime(reminder.auto_release_at)} 自动释放`,
 		`正在自动释放`,
 		`释放重试中（第 ${attempts} 次）`,
+		`if (reminder.auto_release_notified_at) return "释放通知已发送，清理重试中";`,
+		`return "释放完成，企业微信通知重试中";`,
 		`自动释放失败`,
 		`已释放`,
 	} {
@@ -41,6 +43,34 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 			t.Fatalf("web auto release UI missing %q", want)
 		}
 	}
+}
+
+func TestAppAutoReleaseCleanupRetryEventLogsError(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	coordinator := app.newAutoReleaseCoordinator("")
+	coordinator.Emit(AutoReleaseEvent{
+		Action: "cleanup-retrying",
+		Reminder: ReleaseReminder{
+			ProfileName:           "xcode-vnc",
+			AppleEmail:            "user@example.com",
+			OwnerEmail:            "admin@example.com",
+			AutoReleaseState:      ReleaseReminderAutoReleaseStateNotifying,
+			AutoReleaseNotifiedAt: "2026-07-13T09:00:00Z",
+		},
+		Attempt: 2,
+		Message: "cleanup released profile records: database unavailable",
+	})
+
+	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		if entry.Action != "auto-release.cleanup-retrying" {
+			continue
+		}
+		if entry.Level != "error" || entry.Operation != "auto-release" || entry.Source != "background-worker" || entry.Phase != "cleanup-retrying" {
+			t.Fatalf("cleanup retry log = %+v", entry)
+		}
+		return
+	}
+	t.Fatal("cleanup retry runtime log not found")
 }
 
 func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {

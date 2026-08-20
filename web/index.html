@@ -2561,7 +2561,10 @@ cm local-agent start</pre>
         const attempts = Math.max(1, Number(reminder.auto_release_attempts) || 0);
         return `释放重试中（第 ${attempts} 次）`;
       }
-      if (reminder.auto_release_state === "notifying") return "释放完成，企业微信通知重试中";
+      if (reminder.auto_release_state === "notifying") {
+        if (reminder.auto_release_notified_at) return "释放通知已发送，清理重试中";
+        return "释放完成，企业微信通知重试中";
+      }
       if (reminder.auto_release_state === "failed") return "自动释放失败";
       return "等待提醒";
     }
