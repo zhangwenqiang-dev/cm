@@ -390,11 +390,13 @@ type autoReleaseTestAPIError struct {
 func (e autoReleaseTestAPIError) Error() string     { return e.message }
 func (e autoReleaseTestAPIError) ErrorCode() string { return e.code }
 
-func TestAutoReleaseCleanupFailureRetriesThenSucceeds(t *testing.T) {
+func TestAutoReleaseCleanupFailureRetriesThenSucceedsWithoutResendingNotification(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
 	store.cleanupErrors = []error{errors.New("local store temporarily unavailable"), nil}
-	coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	events := make([]AutoReleaseEvent, 0, 4)
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
 	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
 		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-1"}}, nil
 	}
@@ -402,23 +404,39 @@ func TestAutoReleaseCleanupFailureRetriesThenSucceeds(t *testing.T) {
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("first Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || store.cleanupCalls != 1 || len(*starts) != 0 {
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || got.AutoReleaseNotifiedAt == "" || store.cleanupCalls != 1 || len(*starts) != 0 {
 		t.Fatalf("failed cleanup persisted terminal state: reminder=%+v cleanup=%d starts=%d", got, store.cleanupCalls, len(*starts))
+	}
+	if len(*notifications) != 1 || (*notifications)[0].Kind != AutoReleaseNotificationSuccess {
+		t.Fatalf("first notifications = %+v", *notifications)
+	}
+	pendingEvent := -1
+	cleanupRetryEvent := -1
+	for i, event := range events {
+		if event.Action == "notification-pending" {
+			pendingEvent = i
+		}
+		if event.Action == "cleanup-retrying" {
+			cleanupRetryEvent = i
+		}
+	}
+	if pendingEvent < 0 || cleanupRetryEvent <= pendingEvent {
+		t.Fatalf("first events = %+v", events)
 	}
 	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryInterval) }
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("retry Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || store.cleanupCalls != 2 {
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || store.cleanupCalls != 2 || len(*notifications) != 1 {
 		t.Fatalf("cleanup retry did not complete: reminder=%+v cleanup=%d", got, store.cleanupCalls)
 	}
 }
 
-func TestAutoReleaseCleanupFailureStopsAtRetryWindow(t *testing.T) {
+func TestAutoReleaseCleanupFailureRetriesBeyondAWSRetryWindow(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
-	store.cleanupErrors = []error{errors.New("local cleanup failed")}
-	coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
+	store.cleanupErrors = []error{errors.New("local cleanup failed"), nil}
+	coordinator, notifications, _ := newAutoReleaseTestCoordinator(now, store)
 	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) { return AWSStatus{}, nil }
 
 	if err := coordinator.Scan(context.Background()); err != nil {
@@ -428,8 +446,8 @@ func TestAutoReleaseCleanupFailureStopsAtRetryWindow(t *testing.T) {
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("timeout Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateFailed || store.cleanupCalls != 1 {
-		t.Fatalf("cleanup timeout reminder=%+v cleanup=%d", got, store.cleanupCalls)
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || store.cleanupCalls != 2 || len(*notifications) != 1 {
+		t.Fatalf("cleanup after retry window reminder=%+v cleanup=%d notifications=%+v", got, store.cleanupCalls, *notifications)
 	}
 }
 
@@ -528,7 +546,11 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 	statusCalls := 0
 	var statusProfile Profile
 	var observedStatus AWSStatus
+	events := make([]AutoReleaseEvent, 0, 3)
 	coordinator.Status = func(_ context.Context, profile Profile) (AWSStatus, error) {
+		if len(events) != 1 || events[0].Action != "job-observed" || !strings.Contains(events[0].Message, "destroy-aaronjasonall-use1") || !strings.Contains(events[0].Message, string(JobStatusSuccess)) {
+			t.Fatalf("events before AWS status = %+v", events)
+		}
 		statusCalls++
 		statusProfile = profile
 		observedStatus = fakeStatus
@@ -539,7 +561,6 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 		startDestroyCalls++
 		return Job{}, errors.New("StartDestroy must not be called for a successful legacy destroy job")
 	}
-	events := make([]AutoReleaseEvent, 0, 2)
 	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
 
 	if err := coordinator.Scan(context.Background()); err != nil {
@@ -552,7 +573,7 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 		t.Fatalf("notifications = %+v", *notifications)
 	}
 	wantCycle := releaseReminderCycleFromReminder(reminder)
-	if notification := (*notifications)[0]; notification.Reminder.ProfileName != reminder.ProfileName || notification.Reminder.AppleEmail != reminder.AppleEmail || notification.Reminder.HostID != reminder.HostID || releaseReminderCycleFromReminder(notification.Reminder) != wantCycle {
+	if notification := (*notifications)[0]; notification.Reminder.ProfileName != reminder.ProfileName || notification.Reminder.AppleEmail != reminder.AppleEmail || notification.Reminder.HostID != reminder.HostID || notification.Reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || notification.Reminder.AutoReleaseNotifiedAt != "" || releaseReminderCycleFromReminder(notification.Reminder) != wantCycle {
 		t.Fatalf("success notification reminder = %+v, want cycle %+v", notification.Reminder, wantCycle)
 	}
 	if statusCalls != 1 || statusProfile.Name != reminder.ProfileName || statusProfile.AWS.AccountEmail != reminder.AppleEmail || statusProfile.AWS.Region != "us-east-1" {
@@ -561,11 +582,15 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 	if len(observedStatus.Hosts) != 0 || len(observedStatus.Instances) != 0 || observedStatus.ElasticIP.AllocationID != "eipalloc-aaronjasonall-use1" || observedStatus.ElasticIP.AssociationID != "" || observedStatus.ElasticIP.InstanceID != "" {
 		t.Fatalf("observed status was not clean with retained EIP: %+v", observedStatus)
 	}
-	if store.cleanupCalls != 1 || len(store.completeCycles) != 1 || store.completeCycles[0] != wantCycle {
-		t.Fatalf("completed cycles = %+v, cleanup calls = %d, want exactly %+v", store.completeCycles, store.cleanupCalls, wantCycle)
+	if store.markCalls != 1 || store.cleanupCalls != 1 || len(store.completeCycles) != 1 || store.completeCycles[0] != wantCycle {
+		t.Fatalf("marker calls = %d, completed cycles = %+v, cleanup calls = %d, want exactly %+v", store.markCalls, store.completeCycles, store.cleanupCalls, wantCycle)
 	}
+	observedEvents := 0
 	releasedEvents := 0
 	for _, event := range events {
+		if event.Action == "job-observed" {
+			observedEvents++
+		}
 		if event.Action == "released" {
 			releasedEvents++
 			if event.Reminder.ProfileName != reminder.ProfileName || !strings.Contains(event.Message, "eip_retained=true") {
@@ -573,8 +598,8 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 			}
 		}
 	}
-	if releasedEvents != 1 {
-		t.Fatalf("released events = %d, events = %+v", releasedEvents, events)
+	if observedEvents != 1 || releasedEvents != 1 {
+		t.Fatalf("observed events = %d, released events = %d, events = %+v", observedEvents, releasedEvents, events)
 	}
 }
 
@@ -600,15 +625,140 @@ func TestAutoReleaseCompletionNotificationFailureRetries(t *testing.T) {
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("first Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || !strings.Contains(got.AutoReleaseLastError, "wechat") {
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || got.AutoReleaseNotifiedAt != "" || !strings.Contains(got.AutoReleaseLastError, "wechat") {
 		t.Fatalf("first reminder = %+v", got)
+	}
+	if calls != 1 || store.markCalls != 0 || store.cleanupCalls != 0 {
+		t.Fatalf("first calls=%d marks=%d cleanup=%d", calls, store.markCalls, store.cleanupCalls)
+	}
+	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryWindow) }
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || calls != 2 || store.markCalls != 1 || store.cleanupCalls != 1 {
+		t.Fatalf("retry reminder=%+v calls=%d marks=%d cleanup=%d", got, calls, store.markCalls, store.cleanupCalls)
+	}
+}
+
+func TestAutoReleaseRestartNotifyingWithoutMarkerRetriesNotification(t *testing.T) {
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	reminder := notifyingAutoRelease(now.Add(-AutoReleaseRetryInterval), "")
+	store := newAutoReleaseTestStore(reminder)
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-retained"}}, nil
+	}
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	got := store.get("mac")
+	if got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || got.AutoReleaseNotifiedAt == "" {
+		t.Fatalf("reminder = %+v", got)
+	}
+	if len(*notifications) != 1 || store.markCalls != 1 || store.cleanupCalls != 1 || len(*starts) != 0 {
+		t.Fatalf("notifications=%+v marks=%d cleanup=%d starts=%d", *notifications, store.markCalls, store.cleanupCalls, len(*starts))
+	}
+}
+
+func TestAutoReleaseRestartNotifyingWithMarkerSkipsNotification(t *testing.T) {
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	reminder := notifyingAutoRelease(now.Add(-AutoReleaseRetryInterval), now.Add(-time.Minute).Format(time.RFC3339))
+	store := newAutoReleaseTestStore(reminder)
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) { return AWSStatus{}, nil }
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased {
+		t.Fatalf("reminder = %+v", got)
+	}
+	if len(*notifications) != 0 || store.markCalls != 0 || store.cleanupCalls != 1 || len(*starts) != 0 {
+		t.Fatalf("notifications=%+v marks=%d cleanup=%d starts=%d", *notifications, store.markCalls, store.cleanupCalls, len(*starts))
+	}
+}
+
+func TestAutoReleaseNotificationMarkerFailureIsExplicitAndMayDuplicate(t *testing.T) {
+	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
+	store := newAutoReleaseTestStore(scheduledAutoRelease(now))
+	store.markErrors = []error{errors.New("marker database unavailable"), nil}
+	coordinator, notifications, _ := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) { return AWSStatus{}, nil }
+	events := make([]AutoReleaseEvent, 0, 4)
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+
+	err := coordinator.Scan(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "may be duplicated") {
+		t.Fatalf("first Scan error = %v", err)
+	}
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || got.AutoReleaseNotifiedAt != "" {
+		t.Fatalf("first reminder = %+v", got)
+	}
+	if len(*notifications) != 1 || store.cleanupCalls != 0 {
+		t.Fatalf("first notifications=%+v cleanup=%d", *notifications, store.cleanupCalls)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "notification-persistence-ambiguous" || !strings.Contains(events[len(events)-1].Message, "may be duplicated") {
+		t.Fatalf("first events = %+v", events)
+	}
+
+	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryInterval) }
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || len(*notifications) != 2 || store.markCalls != 2 || store.cleanupCalls != 1 {
+		t.Fatalf("retry reminder=%+v notifications=%+v marks=%d cleanup=%d", got, *notifications, store.markCalls, store.cleanupCalls)
+	}
+}
+
+func TestAutoReleaseMarkedNotificationDoesNotCompleteWhenResourcesReappear(t *testing.T) {
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	marker := now.Add(-time.Minute).Format(time.RFC3339)
+	store := newAutoReleaseTestStore(notifyingAutoRelease(now.Add(-AutoReleaseRetryInterval), marker))
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	statusCalls := 0
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		statusCalls++
+		if statusCalls == 1 {
+			return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("available")}}, nil
+		}
+		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-retained"}}, nil
+	}
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+	if got := store.get("mac"); got.Status == ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || got.AutoReleaseNotifiedAt != marker || store.cleanupCalls != 0 {
+		t.Fatalf("first reminder=%+v cleanup=%d", got, store.cleanupCalls)
 	}
 	coordinator.Now = func() time.Time { return now.Add(AutoReleaseRetryInterval) }
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("retry Scan: %v", err)
 	}
-	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || calls != 2 {
-		t.Fatalf("retry reminder=%+v calls=%d", got, calls)
+	if got := store.get("mac"); got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || got.AutoReleaseNotifiedAt != marker || len(*notifications) != 0 || len(*starts) != 0 {
+		t.Fatalf("retry reminder=%+v notifications=%+v starts=%d", got, *notifications, len(*starts))
+	}
+}
+
+func TestAutoReleaseReleasedReminderIsNoOp(t *testing.T) {
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	reminder := notifyingAutoRelease(now.Add(-AutoReleaseRetryInterval), now.Add(-time.Minute).Format(time.RFC3339))
+	reminder.Status = ReleaseReminderStatusReleased
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
+	reminder.ReleasedAt = now.Add(-time.Minute).Format(time.RFC3339)
+	store := newAutoReleaseTestStore(reminder)
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	statusCalls := 0
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		statusCalls++
+		return AWSStatus{}, nil
+	}
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(*notifications) != 0 || statusCalls != 0 || store.markCalls != 0 || store.cleanupCalls != 0 || len(*starts) != 0 {
+		t.Fatalf("notifications=%+v status=%d marks=%d cleanup=%d starts=%d", *notifications, statusCalls, store.markCalls, store.cleanupCalls, len(*starts))
 	}
 }
 
@@ -638,6 +788,16 @@ func scheduledAutoRelease(deadline time.Time) ReleaseReminder {
 	return ReleaseReminder{ProfileName: "mac", AppleEmail: "apple@example.com", ReleaseDueAt: deadline.Add(-AutoReleaseGracePeriod).Format(time.RFC3339), LastNotifiedAt: deadline.Add(-AutoReleaseGracePeriod).Format(time.RFC3339), Status: ReleaseReminderStatusDueNotified, AutoReleaseEnabled: true, AutoReleaseAt: deadline.Format(time.RFC3339), AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled}
 }
 
+func notifyingAutoRelease(lastAttempt time.Time, notifiedAt string) ReleaseReminder {
+	reminder := scheduledAutoRelease(lastAttempt.Add(-time.Hour))
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateNotifying
+	reminder.AutoReleaseStartedAt = lastAttempt.Add(-time.Hour).Format(time.RFC3339)
+	reminder.AutoReleaseLastAttemptAt = lastAttempt.Format(time.RFC3339)
+	reminder.AutoReleaseNotifiedAt = notifiedAt
+	reminder.AutoReleaseAttempts = 1
+	return reminder
+}
+
 func autoReleaseTestProfile() Profile {
 	return Profile{Name: "mac", AWS: AWSConfig{AccountEmail: "apple@example.com", Profile: "aws-test", Region: "us-west-2"}}
 }
@@ -665,6 +825,8 @@ type autoReleaseTestStore struct {
 	cleanupCalls   int
 	completeCycles []ReleaseReminderCycle
 	cleanupErrors  []error
+	markCalls      int
+	markErrors     []error
 }
 
 func newAutoReleaseTestStore(reminders ...ReleaseReminder) *autoReleaseTestStore {
@@ -723,7 +885,7 @@ func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, r
 		}
 	}
 	reminder := s.reminders[cycle.ProfileName]
-	if !releaseReminderMatchesCycle(reminder, cycle) || (reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying) {
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.Status != ReleaseReminderStatusDueNotified || !reminder.AutoReleaseEnabled || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || reminder.AutoReleaseNotifiedAt == "" {
 		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 	}
 	reminder.Status = ReleaseReminderStatusReleased
@@ -732,6 +894,29 @@ func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, r
 	reminder.AutoReleaseLastError = ""
 	s.reminders[cycle.ProfileName] = reminder
 	s.completeCycles = append(s.completeCycles, cycle)
+	return reminder, nil
+}
+
+func (s *autoReleaseTestStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markCalls++
+	if len(s.markErrors) > 0 {
+		err := s.markErrors[0]
+		s.markErrors = s.markErrors[1:]
+		if err != nil {
+			return ReleaseReminder{}, err
+		}
+	}
+	reminder := s.reminders[cycle.ProfileName]
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.Status != ReleaseReminderStatusDueNotified || !reminder.AutoReleaseEnabled || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
+		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+	}
+	if reminder.AutoReleaseNotifiedAt != "" {
+		return reminder, nil
+	}
+	reminder.AutoReleaseNotifiedAt = notifiedAt
+	s.reminders[cycle.ProfileName] = reminder
 	return reminder, nil
 }
 

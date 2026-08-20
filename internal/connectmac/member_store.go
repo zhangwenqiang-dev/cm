@@ -80,6 +80,7 @@ type MemberRepository interface {
 	UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error)
 	CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error)
 	CleanupProfileRecordsAndRecordEvent(profileName, releasedAt, reason string, event OperationEvent) (ReleaseReminder, bool, error)
+	MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderReleased(profileName, releasedAt string) (ReleaseReminder, error)
