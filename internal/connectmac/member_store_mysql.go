@@ -1071,6 +1071,11 @@ func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releas
 
 func (s MySQLMemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {
 	defer s.lockMutation()()
+	now := s.currentTime()
+	notifiedAt, err := resolveAutoReleaseNotifiedAt(notifiedAt, now)
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
 	if err := s.EnsureSchema(); err != nil {
 		return ReleaseReminder{}, err
 	}
@@ -1087,7 +1092,7 @@ func (s MySQLMemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, no
 		sqlMySQLReleaseReminderTransaction{tx: tx},
 		cycle,
 		notifiedAt,
-		s.currentTime(),
+		now,
 	)
 }
 
@@ -1772,7 +1777,7 @@ func completeAutoReleaseInMySQLTransaction(tx mysqlReleaseReminderTransaction, c
 		}
 		return ReleaseReminder{}, err
 	}
-	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || (current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying) || !current.AutoReleaseEnabled {
+	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || current.AutoReleaseNotifiedAt == "" {
 		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 	}
 	ownerMemberID := ""

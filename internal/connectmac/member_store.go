@@ -1151,6 +1151,11 @@ func (s MemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifie
 	}
 	defer unlock()
 	s = s.normalize()
+	now := s.currentTime()
+	notifiedAt, err = resolveAutoReleaseNotifiedAt(notifiedAt, now)
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
 	db, err := s.Load()
 	if err != nil {
 		return ReleaseReminder{}, err
@@ -1167,7 +1172,7 @@ func (s MemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifie
 			return current, nil
 		}
 		current.AutoReleaseNotifiedAt = notifiedAt
-		current.UpdatedAt = s.currentTime().Format(time.RFC3339)
+		current.UpdatedAt = now.Format(time.RFC3339)
 		db.Reminders[i] = current
 		if err := s.saveUnlocked(db); err != nil {
 			return ReleaseReminder{}, err
@@ -1183,7 +1188,7 @@ func completeAutoReleaseInData(db *MemberData, cycle ReleaseReminderCycle, relea
 		if current.ProfileName != cycle.ProfileName {
 			continue
 		}
-		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || (current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying) || !current.AutoReleaseEnabled {
+		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying || current.AutoReleaseNotifiedAt == "" {
 			return ReleaseReminder{}, ErrReleaseReminderCycleChanged
 		}
 		ownerIndex := -1
@@ -1219,6 +1224,16 @@ func releaseReminderMatchesCycle(reminder ReleaseReminder, cycle ReleaseReminder
 		reminder.HostID == cycle.HostID &&
 		reminder.AppleEmail == cycle.AppleEmail &&
 		normalizeEmail(reminder.OwnerEmail) == normalizeEmail(cycle.OwnerEmail)
+}
+
+func resolveAutoReleaseNotifiedAt(notifiedAt string, now time.Time) (string, error) {
+	if notifiedAt == "" {
+		return now.Format(time.RFC3339), nil
+	}
+	if _, err := time.Parse(time.RFC3339, notifiedAt); err != nil {
+		return "", err
+	}
+	return notifiedAt, nil
 }
 
 func (s MemberStore) mutateReleaseReminders(mutate func(*MemberData, string) (ReleaseReminder, error)) (ReleaseReminder, error) {
@@ -2553,7 +2568,7 @@ func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now stri
 	updated.ProfileName = current.ProfileName
 	updated.CreatedAt = current.CreatedAt
 	updated = normalizeReleaseReminder(updated)
-	if !releaseReminderMatchesCycle(current, ReleaseReminderCycle{
+	if releaseReminderMatchesCycle(current, ReleaseReminderCycle{
 		ProfileName:          updated.ProfileName,
 		AutoReleaseAt:        updated.AutoReleaseAt,
 		AutoReleaseStartedAt: updated.AutoReleaseStartedAt,
@@ -2561,6 +2576,8 @@ func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now stri
 		AppleEmail:           updated.AppleEmail,
 		OwnerEmail:           updated.OwnerEmail,
 	}) {
+		updated.AutoReleaseNotifiedAt = current.AutoReleaseNotifiedAt
+	} else {
 		updated.AutoReleaseNotifiedAt = ""
 	}
 	updated.UpdatedAt = now

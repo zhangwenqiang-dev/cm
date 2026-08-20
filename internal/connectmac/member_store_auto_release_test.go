@@ -64,6 +64,54 @@ func TestAutoReleaseNotificationMarkerPersistsThroughReload(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseNotificationMarkerDefaultsEmptyTimestamp(t *testing.T) {
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	store.Now = func() time.Time { return now }
+	reminder := notifyingAutoReleaseReminder("owner@example.com")
+	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+
+	marked, err := store.MarkAutoReleaseNotified(releaseReminderCycle(reminder), "")
+	if err != nil {
+		t.Fatalf("mark with default timestamp: %v", err)
+	}
+	wantTimestamp := now.Format(time.RFC3339)
+	if marked.AutoReleaseNotifiedAt != wantTimestamp || marked.UpdatedAt != wantTimestamp {
+		t.Fatalf("defaulted marker = %+v, want timestamp %s", marked, wantTimestamp)
+	}
+	reloaded, ok, err := store.ReleaseReminder(reminder.ProfileName)
+	if err != nil || !ok || !reflect.DeepEqual(reloaded, marked) {
+		t.Fatalf("reloaded marker = %+v ok=%t err=%v", reloaded, ok, err)
+	}
+}
+
+func TestAutoReleaseNotificationMarkerRejectsMalformedTimestamp(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	reminder := notifyingAutoReleaseReminder("owner@example.com")
+	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+	marked, err := store.MarkAutoReleaseNotified(releaseReminderCycle(reminder), "2026-07-13T09:00:00Z")
+	if err != nil {
+		t.Fatalf("seed valid marker: %v", err)
+	}
+
+	if _, err := store.MarkAutoReleaseNotified(releaseReminderCycle(reminder), "not-rfc3339"); err == nil {
+		t.Fatal("malformed notification timestamp was accepted")
+	} else {
+		var parseErr *time.ParseError
+		if !errors.As(err, &parseErr) {
+			t.Fatalf("malformed timestamp error = %T %v, want *time.ParseError", err, err)
+		}
+	}
+	persisted, ok, err := store.ReleaseReminder(reminder.ProfileName)
+	if err != nil || !ok || !reflect.DeepEqual(persisted, marked) {
+		t.Fatalf("marker changed after malformed timestamp: reminder=%+v ok=%t err=%v", persisted, ok, err)
+	}
+}
+
 func TestAutoReleaseNotificationMarkerIsIdempotentForExactCycle(t *testing.T) {
 	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
 	reminder := notifyingAutoReleaseReminder("owner@example.com")
@@ -305,6 +353,7 @@ func TestMemberStoreCompleteAutoReleaseAtomicallyClearsMatchingOwner(t *testing.
 	}
 	reminder := runningAutoReleaseReminder("owner@example.com")
 	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateNotifying
+	reminder.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
 	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
 		t.Fatalf("upsert reminder: %v", err)
 	}
@@ -318,6 +367,53 @@ func TestMemberStoreCompleteAutoReleaseAtomicallyClearsMatchingOwner(t *testing.
 	}
 	if _, ok, err := store.ProfileOwner("mac"); err != nil || ok {
 		t.Fatalf("owner after completion ok=%t err=%v", ok, err)
+	}
+}
+
+func TestMemberStoreCompleteAutoReleaseRequiresPersistedNotification(t *testing.T) {
+	tests := map[string]func(*ReleaseReminder){
+		"running with marker": func(reminder *ReleaseReminder) {
+			reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+		},
+		"notifying without marker": func(reminder *ReleaseReminder) {
+			reminder.AutoReleaseNotifiedAt = ""
+		},
+		"wrong status": func(reminder *ReleaseReminder) {
+			reminder.Status = ReleaseReminderStatusActive
+		},
+		"disabled": func(reminder *ReleaseReminder) {
+			reminder.AutoReleaseEnabled = false
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+			if _, err := store.AddMember("Owner", "owner@example.com", "operator"); err != nil {
+				t.Fatalf("add owner: %v", err)
+			}
+			if _, err := store.SetProfileOwner("mac", "owner@example.com"); err != nil {
+				t.Fatalf("set owner: %v", err)
+			}
+			reminder := notifyingAutoReleaseReminder("owner@example.com")
+			reminder.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
+			mutate(&reminder)
+			stored, err := store.UpsertReleaseReminder(reminder)
+			if err != nil {
+				t.Fatalf("upsert reminder: %v", err)
+			}
+
+			if _, err := store.CompleteAutoRelease(releaseReminderCycle(stored), "2026-07-13T09:00:00Z"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+				t.Fatalf("completion error = %v", err)
+			}
+			persisted, ok, err := store.ReleaseReminder(reminder.ProfileName)
+			if err != nil || !ok || !reflect.DeepEqual(persisted, stored) {
+				t.Fatalf("rejected reminder changed: reminder=%+v ok=%t err=%v", persisted, ok, err)
+			}
+			owner, ok, err := store.ProfileOwner(reminder.ProfileName)
+			if err != nil || !ok || owner.Owner.Email != reminder.OwnerEmail {
+				t.Fatalf("owner changed after rejection: owner=%+v ok=%t err=%v", owner, ok, err)
+			}
+		})
 	}
 }
 
@@ -511,6 +607,46 @@ func TestAutoReleaseNotificationMarkerPreservedOnUnrelatedUpdates(t *testing.T) 
 	}
 	if got.ReleaseDueAt != "2026-07-15T08:00:00Z" || got.AutoReleaseNotifiedAt != old.AutoReleaseNotifiedAt {
 		t.Fatalf("unrelated callback update changed marker: %+v", got)
+	}
+}
+
+func TestAutoReleaseNotificationMarkerCannotBeErasedOrForgedByCallback(t *testing.T) {
+	tests := map[string]string{
+		"reconstructed reminder": "",
+		"forged marker":          "2026-07-13T09:30:00Z",
+	}
+	for name, attemptedMarker := range tests {
+		t.Run(name, func(t *testing.T) {
+			store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+			current := notifyingAutoReleaseReminder("owner@example.com")
+			current.AutoReleaseNotifiedAt = "2026-07-13T09:00:00Z"
+			stored, err := store.UpsertReleaseReminder(current)
+			if err != nil {
+				t.Fatalf("upsert current reminder: %v", err)
+			}
+
+			updated, err := store.UpdateReleaseReminder(current.ProfileName, func(ReleaseReminder) (ReleaseReminder, error) {
+				return ReleaseReminder{
+					ProfileName:              stored.ProfileName,
+					AppleEmail:               stored.AppleEmail,
+					HostID:                   stored.HostID,
+					OwnerEmail:               stored.OwnerEmail,
+					Status:                   stored.Status,
+					AutoReleaseEnabled:       stored.AutoReleaseEnabled,
+					AutoReleaseAt:            stored.AutoReleaseAt,
+					AutoReleaseStartedAt:     stored.AutoReleaseStartedAt,
+					AutoReleaseLastAttemptAt: stored.AutoReleaseLastAttemptAt,
+					AutoReleaseNotifiedAt:    attemptedMarker,
+					AutoReleaseState:         stored.AutoReleaseState,
+				}, nil
+			})
+			if err != nil {
+				t.Fatalf("update reconstructed reminder: %v", err)
+			}
+			if updated.AutoReleaseNotifiedAt != stored.AutoReleaseNotifiedAt {
+				t.Fatalf("callback changed marker: got %q want %q", updated.AutoReleaseNotifiedAt, stored.AutoReleaseNotifiedAt)
+			}
+		})
 	}
 }
 
@@ -718,6 +854,59 @@ func TestMySQLAutoReleaseNotificationMarkerPersistsAndReloads(t *testing.T) {
 	}
 }
 
+func TestMySQLAutoReleaseNotificationMarkerDefaultsEmptyTimestamp(t *testing.T) {
+	reminder := notifyingAutoReleaseReminder("owner@example.com")
+	reminder.CreatedAt = "2026-07-13T08:00:00Z"
+	reminder.UpdatedAt = "2026-07-13T08:10:00Z"
+	now := time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC)
+	want := reminder
+	want.AutoReleaseNotifiedAt = now.Format(time.RFC3339)
+	want.UpdatedAt = now.Format(time.RFC3339)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	store := mysqlAutoReleaseTestStore(db, now)
+	mock.ExpectBegin()
+	expectMySQLAutoReleaseLockedReminder(mock, reminder)
+	expectMySQLAutoReleaseReminderUpdate(mock, want)
+	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).
+		WithArgs(mysqlStoreLockName).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	got, err := store.MarkAutoReleaseNotified(releaseReminderCycle(reminder), "")
+	if err != nil {
+		t.Fatalf("mark with default timestamp: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaulted marker = %+v, want %+v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMySQLAutoReleaseNotificationMarkerRejectsMalformedTimestamp(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+	store := mysqlAutoReleaseTestStore(db, time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC))
+	if _, err := store.MarkAutoReleaseNotified(releaseReminderCycle(notifyingAutoReleaseReminder("owner@example.com")), "not-rfc3339"); err == nil {
+		t.Fatal("malformed notification timestamp was accepted")
+	} else {
+		var parseErr *time.ParseError
+		if !errors.As(err, &parseErr) {
+			t.Fatalf("malformed timestamp error = %T %v, want *time.ParseError", err, err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMySQLAutoReleaseNotificationMarkerIsIdempotentForExactCycle(t *testing.T) {
 	reminder := notifyingAutoReleaseReminder("owner@example.com")
 	reminder.AutoReleaseNotifiedAt = "2026-07-13T09:00:00Z"
@@ -873,6 +1062,44 @@ func TestMySQLCompleteAutoReleaseTransactionClearsOnlyMatchingOwner(t *testing.T
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMySQLCompleteAutoReleaseRequiresPersistedNotification(t *testing.T) {
+	tests := map[string]func(*ReleaseReminder){
+		"running with marker": func(reminder *ReleaseReminder) {
+			reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+		},
+		"notifying without marker": func(reminder *ReleaseReminder) {
+			reminder.AutoReleaseNotifiedAt = ""
+		},
+		"wrong status": func(reminder *ReleaseReminder) {
+			reminder.Status = ReleaseReminderStatusActive
+		},
+		"disabled": func(reminder *ReleaseReminder) {
+			reminder.AutoReleaseEnabled = false
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			reminder := notifyingAutoReleaseReminder("owner@example.com")
+			reminder.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
+			mutate(&reminder)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			store := mysqlAutoReleaseTestStore(db, time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC))
+			mock.ExpectBegin()
+			expectMySQLAutoReleaseLockedReminder(mock, reminder)
+			mock.ExpectRollback()
+			if _, err := store.CompleteAutoRelease(releaseReminderCycle(reminder), "2026-07-13T09:00:00Z"); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+				t.Fatalf("completion error = %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

@@ -1695,6 +1695,7 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 		reminder.OwnerEmail = " OWNER@EXAMPLE.COM "
 		reminder.LastExtendedByEmail = " ADMIN@EXAMPLE.COM "
 		reminder.Status = ""
+		reminder.AutoReleaseNotifiedAt = "2026-07-02T08:02:45Z"
 		reminder.AutoReleaseAttempts++
 		reminder.AutoReleaseLastError = ""
 		reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
