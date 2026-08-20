@@ -315,41 +315,103 @@ func TestLogManagerRedactsPlainSensitiveAssignments(t *testing.T) {
 	}
 }
 
-func TestSanitizeOperationalErrorTextRedactsValuesAndPreservesDiagnostics(t *testing.T) {
-	secrets := []string{
-		"webhook-key-secret",
-		"bearer-token-secret",
-		"assigned-token-secret",
-		"assigned-session-secret",
-		"/Users/test/.ssh/operational-private.pem",
-		"AKIAIOSFODNN7EXAMPLE",
-		"aws-secret-value",
+func TestSanitizeOperationalErrorTextRedactsSensitiveValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		secrets []string
+	}{
+		{
+			name: "webhook URLs and keys",
+			input: strings.Join([]string{
+				"post https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=webhook-url-secret failed",
+				"wechat webhook key=standalone-webhook-key-secret",
+				`{"key":"json-webhook-key-secret"}`,
+				"webhook_url=https://hooks.example.invalid/send?key=assigned-webhook-url-secret",
+			}, "\n"),
+			secrets: []string{"webhook-url-secret", "standalone-webhook-key-secret", "json-webhook-key-secret", "assigned-webhook-url-secret", "qyapi.weixin.qq.com", "hooks.example.invalid"},
+		},
+		{
+			name: "cookie headers",
+			input: strings.Join([]string{
+				"Cookie: cm_session=cookie-session-secret; preference=cookie-preference-secret",
+				"Set-Cookie: cm_session=set-cookie-session-secret; Path=/; HttpOnly",
+				"Set-Cookie: csrf=set-cookie-csrf-secret; Path=/; Secure",
+			}, "\n"),
+			secrets: []string{"cookie-session-secret", "cookie-preference-secret", "set-cookie-session-secret", "set-cookie-csrf-secret"},
+		},
+		{
+			name:    "URL basic auth credentials",
+			input:   "request https://basic-user-secret:basic-password-secret@example.invalid/path failed",
+			secrets: []string{"basic-user-secret", "basic-password-secret"},
+		},
+		{
+			name: "strict assignments",
+			input: strings.Join([]string{
+				"token=assigned-token-secret",
+				"session: 'assigned-session-secret'",
+				`secret = "assigned-secret-secret"`,
+				"password: assigned-password-secret",
+				"access_key=assigned-access-key-secret",
+				`secret_access_key: "assigned-secret-access-key-secret"`,
+			}, "\n"),
+			secrets: []string{"assigned-token-secret", "assigned-session-secret", "assigned-secret-secret", "assigned-password-secret", "assigned-access-key-secret", "assigned-secret-access-key-secret"},
+		},
+		{
+			name:  "quoted JSON assignments",
+			input: `{"token":"json-token-secret","session":'json-session-secret','secret':"json-secret-secret","password"='json-password-secret',"access_key":"json-access-key-secret",'secret_access_key':'json-secret-access-key-secret'}`,
+			secrets: []string{
+				"json-token-secret", "json-session-secret", "json-secret-secret",
+				"json-password-secret", "json-access-key-secret", "json-secret-access-key-secret",
+			},
+		},
+		{
+			name: "authorization and bearer values",
+			input: strings.Join([]string{
+				"Authorization: Bearer authorization-bearer-secret",
+				"Bearer standalone-bearer-secret",
+			}, "\n"),
+			secrets: []string{"authorization-bearer-secret", "standalone-bearer-secret"},
+		},
+		{
+			name: "AWS assignments and access key IDs",
+			input: strings.Join([]string{
+				"AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+				"AWS_SECRET_ACCESS_KEY=aws-secret-value",
+			}, "\n"),
+			secrets: []string{"AKIAIOSFODNN7EXAMPLE", "aws-secret-value"},
+		},
+		{
+			name: "PEM paths",
+			input: strings.Join([]string{
+				"load /Users/test/.ssh/absolute-private.pem failed",
+				"load ~/.ssh/home-private.pem failed",
+			}, "\n"),
+			secrets: []string{"/Users/test/.ssh/absolute-private.pem", "~/.ssh/home-private.pem"},
+		},
 	}
-	raw := strings.Join([]string{
-		"post https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + secrets[0] + " failed",
-		"Bearer " + secrets[1],
-		"token=" + secrets[2],
-		"session: " + secrets[3],
-		"load key " + secrets[4] + " failed",
-		"AWS_ACCESS_KEY_ID=" + secrets[5],
-		"AWS_SECRET_ACCESS_KEY=" + secrets[6],
-		"token expired",
-		"session unavailable",
-		"secret rotation failed",
-	}, "\n")
 
-	got := sanitizeOperationalErrorText(raw)
-	for _, secret := range secrets {
-		if strings.Contains(got, secret) {
-			t.Fatalf("operational error retained %q: %s", secret, got)
-		}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := sanitizeOperationalErrorText(test.input)
+			for _, secret := range test.secrets {
+				if strings.Contains(got, secret) {
+					t.Fatalf("operational error retained %q: %s", secret, got)
+				}
+			}
+			if !strings.Contains(got, "[REDACTED") {
+				t.Fatalf("operational error did not record redaction: %s", got)
+			}
+		})
 	}
+}
+
+func TestSanitizeOperationalErrorTextPreservesNoValueDiagnosticsExactly(t *testing.T) {
 	for _, diagnostic := range []string{"token expired", "session unavailable", "secret rotation failed"} {
-		if !strings.Contains(got, diagnostic) {
-			t.Fatalf("operational error lost diagnostic %q: %s", diagnostic, got)
-		}
-	}
-	if strings.Contains(got, "qyapi.weixin.qq.com") {
-		t.Fatalf("operational error retained webhook URL: %s", got)
+		t.Run(diagnostic, func(t *testing.T) {
+			if got := sanitizeOperationalErrorText(diagnostic); got != diagnostic {
+				t.Fatalf("sanitizeOperationalErrorText(%q) = %q", diagnostic, got)
+			}
+		})
 	}
 }

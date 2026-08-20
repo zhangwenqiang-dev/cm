@@ -293,6 +293,20 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 		"/Users/test/.ssh/task5-private.pem",
 		"AKIAIOSFODNN7EXAMPLE",
 		"task5-fake-aws-secret",
+		"task5-cookie-session",
+		"task5-cookie-preference",
+		"task5-set-cookie-session",
+		"task5-basic-user",
+		"task5-basic-password",
+		"task5-standalone-webhook-key",
+		"task5-json-token",
+		"task5-json-session",
+		"task5-json-secret",
+		"task5-json-password",
+		"task5-access-key",
+		"task5-secret-access-key",
+		"~/.ssh/task5-home-private.pem",
+		"task5-set-cookie-csrf",
 	}
 	var injected string
 	var webhookCalls atomic.Int32
@@ -313,6 +327,15 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 		"pem_path=" + secrets[3],
 		"AWS_ACCESS_KEY_ID=" + secrets[4],
 		"AWS_SECRET_ACCESS_KEY=" + secrets[5],
+		"Cookie: cm_session=" + secrets[6] + "; preference=" + secrets[7],
+		"Set-Cookie: cm_session=" + secrets[8] + "; Path=/; HttpOnly",
+		"Set-Cookie: csrf=" + secrets[19] + "; Path=/; Secure",
+		"https://" + secrets[9] + ":" + secrets[10] + "@example.invalid/path",
+		"key=" + secrets[11],
+		`{"token":"` + secrets[12] + `","session":'` + secrets[13] + `','secret':"` + secrets[14] + `","password"='` + secrets[15] + `'}`,
+		"access_key=" + secrets[16],
+		"secret_access_key: " + secrets[17],
+		"load " + secrets[18] + " failed",
 		"token expired",
 		"session unavailable",
 		"secret rotation failed",
@@ -495,13 +518,25 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 
 func TestDeliverWechatNotificationReturnsComprehensivelySanitizedError(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
-	secrets := []string{"return-webhook-key", "return-bearer", "return-session", "/Users/test/.ssh/return.pem", "return-aws-secret"}
+	secrets := []string{
+		"return-webhook-key", "return-bearer", "return-session", "/Users/test/.ssh/return.pem", "return-aws-secret",
+		"return-cookie", "return-set-cookie", "return-basic-user", "return-basic-password", "return-standalone-key",
+		"return-json-token", "return-access-key", "return-secret-access-key", "~/.ssh/return-home.pem",
+	}
 	raw := strings.Join([]string{
 		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + secrets[0],
 		"Authorization: Bearer " + secrets[1],
 		"session_token=" + secrets[2],
 		"pem_path=" + secrets[3],
 		"AWS_SECRET_ACCESS_KEY=" + secrets[4],
+		"Cookie: cm_session=" + secrets[5] + "; preference=dark",
+		"Set-Cookie: csrf=" + secrets[6] + "; Path=/; Secure",
+		"https://" + secrets[7] + ":" + secrets[8] + "@example.invalid/path",
+		"key=" + secrets[9],
+		`{"token":"` + secrets[10] + `"}`,
+		"access_key=" + secrets[11],
+		"secret_access_key: " + secrets[12],
+		"load " + secrets[13] + " failed",
 		"token expired",
 		"session unavailable",
 		"secret rotation failed",

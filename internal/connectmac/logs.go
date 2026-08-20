@@ -231,14 +231,16 @@ func addLogFileToZip(zw *zip.Writer, file LogFile) error {
 func sanitizeLogText(text string) string {
 	text = strings.TrimSpace(text)
 	text = logPEMBlockPattern.ReplaceAllString(text, "[REDACTED PEM]")
-	text = logWebhookURLPattern.ReplaceAllString(text, "[REDACTED WEBHOOK URL]")
 	text = logAuthorizationPattern.ReplaceAllString(text, "${1}[REDACTED]")
 	text = logCookieHeaderPattern.ReplaceAllString(text, "${1}[REDACTED]")
-	text = logURLCredentialPattern.ReplaceAllString(text, "${1}[REDACTED]${2}")
+	text = logURLCredentialPattern.ReplaceAllString(text, "${1}[REDACTED]@")
 	text = logJSONSensitivePattern.ReplaceAllString(text, `${1}"[REDACTED]"`)
+	text = operationalQuotedSensitiveAssignmentPattern.ReplaceAllString(text, `${1}"[REDACTED]"`)
 	text = logSensitiveQueryPattern.ReplaceAllString(text, "${1}[REDACTED]")
 	text = logAWSAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
 	text = logSensitiveAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = operationalSensitiveAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = logWebhookURLPattern.ReplaceAllString(text, "[REDACTED WEBHOOK URL]")
 	text = logAWSAccessKeyPattern.ReplaceAllString(text, "[REDACTED AWS ACCESS KEY]")
 	text = logPEMPathPattern.ReplaceAllString(text, "[REDACTED PEM PATH]")
 	if len(text) > 4000 {
@@ -256,7 +258,7 @@ func sanitizeOperationalError(err error) error {
 
 const logSensitiveKeyPattern = `access_token|client_secret|aws_access_key_id|aws_secret_access_key|aws_session_token|awsaccesskeyid|secretaccesskey|session_token|sessiontoken|pem_path|pem_file|identity_file|private_key_path|password|token|secret|session|cookie`
 
-const operationalSensitiveKeyPattern = logSensitiveKeyPattern + `|webhook_key|webhook_url|wechat_webhook_url`
+const operationalSensitiveKeyPattern = logSensitiveKeyPattern + `|access_key|secret_access_key|webhook_key|webhook_url|wechat_webhook_url|key`
 
 var (
 	logPEMBlockPattern = regexp.MustCompile(
@@ -278,7 +280,7 @@ var (
 		`(?i)((?:set-cookie|cookie)[ \t]*:[ \t]*)[^\r\n]*`,
 	)
 	logURLCredentialPattern = regexp.MustCompile(
-		`(?i)([a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+(@)`,
+		`(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@`,
 	)
 	logJSONSensitivePattern = regexp.MustCompile(
 		`(?i)("(?:` + logSensitiveKeyPattern + `|x-amz-credential|x-amz-security-token|x-amz-signature)"[ \t]*:[ \t]*)"(?:\\.|[^"\\])*"`,
@@ -295,6 +297,9 @@ var (
 	operationalSensitiveAssignmentPattern = regexp.MustCompile(
 		`(?i)(^|[?&;,\s])((?:` + operationalSensitiveKeyPattern + `)[ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
 	)
+	operationalQuotedSensitiveAssignmentPattern = regexp.MustCompile(
+		`(?i)(["'](?:` + operationalSensitiveKeyPattern + `)["'][ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;\}\]]+)`,
+	)
 	logAWSAccessKeyPattern = regexp.MustCompile(
 		`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`,
 	)
@@ -302,14 +307,18 @@ var (
 
 func sanitizeOperationalErrorText(text string) string {
 	text = strings.TrimSpace(text)
+	text = redactWechatWebhookURL(text)
 	text = logPEMBlockPattern.ReplaceAllString(text, "[REDACTED PEM]")
-	text = logWebhookURLPattern.ReplaceAllString(text, "[REDACTED WEBHOOK URL]")
 	text = logAuthorizationPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logCookieHeaderPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logURLCredentialPattern.ReplaceAllString(text, "${1}[REDACTED]@")
 	text = operationalBearerTokenPattern.ReplaceAllString(text, "${1}[REDACTED]")
 	text = logJSONSensitivePattern.ReplaceAllString(text, `${1}"[REDACTED]"`)
+	text = operationalQuotedSensitiveAssignmentPattern.ReplaceAllString(text, `${1}"[REDACTED]"`)
 	text = logSensitiveQueryPattern.ReplaceAllString(text, "${1}[REDACTED]")
 	text = logAWSAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
 	text = operationalSensitiveAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = logWebhookURLPattern.ReplaceAllString(text, "[REDACTED WEBHOOK URL]")
 	text = logAWSAccessKeyPattern.ReplaceAllString(text, "[REDACTED AWS ACCESS KEY]")
 	text = logPEMPathPattern.ReplaceAllString(text, "[REDACTED PEM PATH]")
 	if len(text) > 4000 {
