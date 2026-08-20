@@ -116,7 +116,7 @@ func TestMemberStoreRecordEventExplicitIDIsIdempotent(t *testing.T) {
 	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
 	first := OperationEvent{
 		ID: "event-idempotent", Action: "aws.open.ready", Profile: "iossupport-usw2",
-		Status: "success", Message: "first",
+		Attempt: 3, Status: "success", Message: "first",
 	}
 	if err := store.RecordEvent(first); err != nil {
 		t.Fatalf("record first event: %v", err)
@@ -130,7 +130,7 @@ func TestMemberStoreRecordEventExplicitIDIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query events: %v", err)
 	}
-	if len(page.Events) != 1 || page.Events[0].ID != first.ID || page.Events[0].Message != "first" {
+	if len(page.Events) != 1 || page.Events[0].ID != first.ID || page.Events[0].Attempt != first.Attempt || page.Events[0].Message != "first" {
 		t.Fatalf("idempotent events = %+v", page.Events)
 	}
 }

@@ -251,10 +251,12 @@ func sanitizeOperationalError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(sanitizeLogText(redactWechatWebhookURL(err.Error())))
+	return errors.New(sanitizeOperationalErrorText(err.Error()))
 }
 
 const logSensitiveKeyPattern = `access_token|client_secret|aws_access_key_id|aws_secret_access_key|aws_session_token|awsaccesskeyid|secretaccesskey|session_token|sessiontoken|pem_path|pem_file|identity_file|private_key_path|password|token|secret|session|cookie`
+
+const operationalSensitiveKeyPattern = logSensitiveKeyPattern + `|webhook_key|webhook_url|wechat_webhook_url`
 
 var (
 	logPEMBlockPattern = regexp.MustCompile(
@@ -268,6 +270,9 @@ var (
 	)
 	logAuthorizationPattern = regexp.MustCompile(
 		`(?i)(authorization[ \t]*:[ \t]*)[^\r\n]*`,
+	)
+	operationalBearerTokenPattern = regexp.MustCompile(
+		`(?i)\b(bearer[ \t]+)[^\s,;]+`,
 	)
 	logCookieHeaderPattern = regexp.MustCompile(
 		`(?i)((?:set-cookie|cookie)[ \t]*:[ \t]*)[^\r\n]*`,
@@ -287,10 +292,31 @@ var (
 	logSensitiveAssignmentPattern = regexp.MustCompile(
 		`(?i)(^|[?&;,\s])((?:` + logSensitiveKeyPattern + `)(?:[ \t]*[:=][ \t]*|[ \t]+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
 	)
+	operationalSensitiveAssignmentPattern = regexp.MustCompile(
+		`(?i)(^|[?&;,\s])((?:` + operationalSensitiveKeyPattern + `)[ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
+	)
 	logAWSAccessKeyPattern = regexp.MustCompile(
 		`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`,
 	)
 )
+
+func sanitizeOperationalErrorText(text string) string {
+	text = strings.TrimSpace(text)
+	text = logPEMBlockPattern.ReplaceAllString(text, "[REDACTED PEM]")
+	text = logWebhookURLPattern.ReplaceAllString(text, "[REDACTED WEBHOOK URL]")
+	text = logAuthorizationPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = operationalBearerTokenPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logJSONSensitivePattern.ReplaceAllString(text, `${1}"[REDACTED]"`)
+	text = logSensitiveQueryPattern.ReplaceAllString(text, "${1}[REDACTED]")
+	text = logAWSAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = operationalSensitiveAssignmentPattern.ReplaceAllString(text, "${1}${2}[REDACTED]")
+	text = logAWSAccessKeyPattern.ReplaceAllString(text, "[REDACTED AWS ACCESS KEY]")
+	text = logPEMPathPattern.ReplaceAllString(text, "[REDACTED PEM PATH]")
+	if len(text) > 4000 {
+		text = text[:4000]
+	}
+	return text
+}
 
 func sanitizeLogEntry(entry LogEntry) LogEntry {
 	entry.Time = sanitizeLogText(entry.Time)

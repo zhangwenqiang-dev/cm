@@ -74,7 +74,7 @@ func TestAppAutoReleaseCleanupRetryEventLogsError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("query cleanup retry event: %v", err)
 		}
-		if len(events.Events) != 1 || events.Events[0].Action != entry.Action || events.Events[0].CycleID != cycleID || events.Events[0].ErrorCode != entry.ErrorCode {
+		if len(events.Events) != 1 || events.Events[0].Action != entry.Action || events.Events[0].CycleID != cycleID || events.Events[0].Attempt != 2 || events.Events[0].ErrorCode != entry.ErrorCode {
 			t.Fatalf("cleanup retry events = %+v", events.Events)
 		}
 		return
@@ -197,6 +197,9 @@ func TestAppAutoReleaseCompletionObservabilityChain(t *testing.T) {
 	for _, event := range events.Events {
 		if wantAction[event.Action] {
 			eventCounts[event.Action]++
+			if event.Attempt != reminder.AutoReleaseAttempts {
+				t.Fatalf("operation event %s attempt = %d, want %d: %+v", event.Action, event.Attempt, reminder.AutoReleaseAttempts, event)
+			}
 		}
 		if event.Action == "auto-release.job.observed" && (event.JobID != job.ID || event.RequestID != job.RequestID) {
 			t.Fatalf("observed job event missing correlation: %+v", event)
@@ -213,6 +216,71 @@ func TestAppAutoReleaseCompletionObservabilityChain(t *testing.T) {
 	}
 	if strings.Contains(string(logs), webhookKey) {
 		t.Fatalf("runtime logs leaked webhook key: %s", logs)
+	}
+}
+
+func TestAppAutoReleaseScheduleDueNormalizesWechatAttempt(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name           string
+		response       string
+		terminalAction string
+		wantError      bool
+	}{
+		{name: "sent", response: `{"errcode":0,"errmsg":"ok"}`, terminalAction: "wechat.sent"},
+		{name: "failed", response: `{"errcode":93000,"errmsg":"temporary failure"}`, terminalAction: "wechat.failed", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+			t.Setenv(envWechatWebhookURL, server.URL+"?key=schedule-due-secret")
+
+			app := newWebAutoReleaseTestApp(t)
+			reminder := ReleaseReminder{
+				ProfileName:        "xcode-vnc",
+				AppleEmail:         "user@example.com",
+				ReleaseDueAt:       now.Add(-time.Minute).Format(time.RFC3339),
+				Status:             ReleaseReminderStatusActive,
+				AutoReleaseEnabled: true,
+			}
+			if _, err := app.MemberStore.UpsertReleaseReminder(reminder); err != nil {
+				t.Fatalf("seed reminder: %v", err)
+			}
+			coordinator := app.newAutoReleaseCoordinator("")
+			coordinator.Now = func() time.Time { return now }
+			err := coordinator.Scan(context.Background())
+			if (err != nil) != test.wantError {
+				t.Fatalf("scan error = %v, wantError=%t", err, test.wantError)
+			}
+
+			entries := readTestLogEntries(t, app.LogManager)
+			var pending, terminal LogEntry
+			for _, entry := range entries {
+				switch entry.Action {
+				case "wechat.pending":
+					pending = entry
+				case test.terminalAction:
+					terminal = entry
+				}
+			}
+			if pending.Attempt != 1 || terminal.Attempt != 1 || pending.RequestID == "" || pending.RequestID != terminal.RequestID {
+				t.Fatalf("scheduleDue delivery attempts pending=%+v terminal=%+v", pending, terminal)
+			}
+
+			page, queryErr := app.MemberStore.QueryEvents(EventQuery{Profile: reminder.ProfileName, IncludeSystem: true, Limit: 10})
+			if queryErr != nil {
+				t.Fatalf("query events: %v", queryErr)
+			}
+			attempts := map[string]int{}
+			for _, event := range page.Events {
+				attempts[event.Action] = event.Attempt
+			}
+			if attempts["wechat.pending"] != 1 || attempts[test.terminalAction] != 1 {
+				t.Fatalf("scheduleDue operation event attempts = %+v", attempts)
+			}
+		})
 	}
 }
 
@@ -245,6 +313,9 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 		"pem_path=" + secrets[3],
 		"AWS_ACCESS_KEY_ID=" + secrets[4],
 		"AWS_SECRET_ACCESS_KEY=" + secrets[5],
+		"token expired",
+		"session unavailable",
+		"secret rotation failed",
 	}, "\n")
 	t.Setenv(envWechatWebhookURL, webhookURL)
 
@@ -303,6 +374,11 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 		t.Fatalf("first reminder = %+v", first)
 	}
 	assertTask5SecretsAbsent(t, "persisted reminder error", first.AutoReleaseLastError, sensitiveValues)
+	for _, diagnostic := range []string{"token expired", "session unavailable", "secret rotation failed"} {
+		if !strings.Contains(first.AutoReleaseLastError, diagnostic) {
+			t.Fatalf("persisted reminder error lost diagnostic %q: %s", diagnostic, first.AutoReleaseLastError)
+		}
+	}
 
 	apiResponse := httptest.NewRecorder()
 	app.newWebHandler("").ServeHTTP(apiResponse, apiRequest)
@@ -310,6 +386,11 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 		t.Fatalf("reminder API status=%d body=%s", apiResponse.Code, apiResponse.Body.String())
 	}
 	assertTask5SecretsAbsent(t, "reminder API response", apiResponse.Body.String(), sensitiveValues)
+	for _, diagnostic := range []string{"token expired", "session unavailable", "secret rotation failed"} {
+		if !strings.Contains(apiResponse.Body.String(), diagnostic) {
+			t.Fatalf("reminder API response lost diagnostic %q: %s", diagnostic, apiResponse.Body.String())
+		}
+	}
 
 	scanNow = now.Add(AutoReleaseRetryInterval)
 	if err := coordinator.Scan(context.Background()); err != nil {
@@ -375,6 +456,14 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 	assertTask5SecretsAbsent(t, "operation events", string(rawEvents), sensitiveValues)
 
 	eventCounts := map[string]int{}
+	wantAttempts := map[string]int{
+		"wechat.pending":                     1,
+		"wechat.failed":                      1,
+		"wechat.retrying":                    2,
+		"wechat.sent":                        2,
+		"auto-release.notification-retrying": 1,
+		"auto-release.released":              2,
+	}
 	for _, event := range events.Events {
 		if event.Profile != reminder.ProfileName {
 			continue
@@ -385,6 +474,9 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 				t.Fatalf("event cycle ID = %q, want %q: %+v", event.CycleID, cycleID, event)
 			}
 		}
+		if wantAttempt, ok := wantAttempts[event.Action]; ok && event.Attempt != wantAttempt {
+			t.Fatalf("event %s attempt = %d, want %d: %+v", event.Action, event.Attempt, wantAttempt, event)
+		}
 		if event.Action == "wechat.retrying" && event.ErrorCode != "notification_error" {
 			t.Fatalf("wechat retry event missing error code: %+v", event)
 		}
@@ -392,6 +484,11 @@ func TestAppAutoReleaseNotificationRetryUsesProductionDeliveryAndRedactsSecrets(
 	for _, action := range []string{"wechat.pending", "wechat.failed", "wechat.retrying", "wechat.sent", "auto-release.notification-retrying", "auto-release.released"} {
 		if eventCounts[action] != 1 {
 			t.Fatalf("operation event count %s = %d, want 1: %+v", action, eventCounts[action], events.Events)
+		}
+	}
+	for _, diagnostic := range []string{"token expired", "session unavailable", "secret rotation failed"} {
+		if !strings.Contains(string(rawEvents), diagnostic) {
+			t.Fatalf("operation events lost diagnostic %q: %s", diagnostic, rawEvents)
 		}
 	}
 }
@@ -405,6 +502,9 @@ func TestDeliverWechatNotificationReturnsComprehensivelySanitizedError(t *testin
 		"session_token=" + secrets[2],
 		"pem_path=" + secrets[3],
 		"AWS_SECRET_ACCESS_KEY=" + secrets[4],
+		"token expired",
+		"session unavailable",
+		"secret rotation failed",
 	}, "\n")
 	err := app.deliverWechatNotification(wechatDeliveryContext{
 		RequestID: "req-return", Profile: "xcode-vnc", AppleEmail: "user@example.com",
@@ -418,6 +518,11 @@ func TestDeliverWechatNotificationReturnsComprehensivelySanitizedError(t *testin
 	assertTask5SecretsAbsent(t, "delivery error", err.Error(), secrets)
 	if strings.Contains(err.Error(), "qyapi.weixin.qq.com") {
 		t.Fatalf("delivery error retained full webhook URL: %v", err)
+	}
+	for _, diagnostic := range []string{"token expired", "session unavailable", "secret rotation failed"} {
+		if !strings.Contains(err.Error(), diagnostic) {
+			t.Fatalf("delivery error lost diagnostic %q: %v", diagnostic, err)
+		}
 	}
 }
 

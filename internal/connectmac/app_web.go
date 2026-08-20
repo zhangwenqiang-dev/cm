@@ -544,20 +544,21 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 				errorCode = classifyOperationalError(errors.New(event.Message)).Code
 			}
 			action := "auto-release." + event.Action
-			message := sanitizeLogText(event.Message)
+			logMessage := sanitizeLogText(event.Message)
+			eventMessage := sanitizeOperationalErrorText(event.Message)
 			a.writeRuntimeLog(LogEntry{
 				Level: level, Action: action, Operation: "auto-release",
 				Profile: event.Reminder.ProfileName, AppleEmail: event.Reminder.AppleEmail,
 				Source: "background-worker", Phase: event.Action, Status: event.Action,
 				RequestID: event.RequestID, JobID: event.JobID, CycleID: event.CycleID, ErrorCode: errorCode,
-				Attempt: event.Attempt, Message: message,
+				Attempt: event.Attempt, Message: logMessage,
 			})
 			_ = a.recordEventWithFallback(OperationEvent{
 				Action: action, Profile: event.Reminder.ProfileName,
 				AppleEmail: event.Reminder.AppleEmail, Source: "background-worker",
 				Phase: event.Action, Confirmed: true, Status: event.Action,
 				RequestID: event.RequestID, JobID: event.JobID, CycleID: event.CycleID, ErrorCode: errorCode,
-				Message: message,
+				Attempt: event.Attempt, Message: eventMessage,
 			})
 		},
 	}
@@ -2493,6 +2494,7 @@ type wechatDeliveryContext struct {
 }
 
 func (a App) deliverWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) error {
+	context = normalizeWechatDeliveryContext(context)
 	result, sendErr := a.attemptWechatNotification(context, send)
 	if sendErr == nil && !result.Skipped {
 		return sanitizeOperationalError(a.recordWechatDeliveryState(context, "sent", result, nil))
@@ -2505,12 +2507,19 @@ func (a App) deliverWechatNotification(context wechatDeliveryContext, send func(
 	return sanitizeOperationalError(errors.Join(safeErr, failedErr))
 }
 
-func (a App) attemptWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) (WechatNotifyResult, error) {
+func normalizeWechatDeliveryContext(context wechatDeliveryContext) wechatDeliveryContext {
 	if context.Attempt <= 0 {
 		context.Attempt = 1
 	}
 	if context.Source == "" {
 		context.Source = "system"
+	}
+	return context
+}
+
+func (a App) attemptWechatNotification(context wechatDeliveryContext, send func() (WechatNotifyResult, error)) (WechatNotifyResult, error) {
+	if context.Attempt <= 0 || context.Source == "" {
+		context = normalizeWechatDeliveryContext(context)
 	}
 	phase := "pending"
 	var cause error
@@ -2597,6 +2606,7 @@ func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase stri
 		RequestID:   context.RequestID,
 		JobID:       context.JobID,
 		CycleID:     context.CycleID,
+		Attempt:     context.Attempt,
 		Source:      "system",
 		Phase:       phase,
 		ErrorCode:   errorCode,

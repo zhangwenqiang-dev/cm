@@ -264,6 +264,7 @@ type OperationEvent struct {
 	RequestID         string `json:"request_id,omitempty"`
 	JobID             string `json:"job_id,omitempty"`
 	CycleID           string `json:"cycle_id,omitempty"`
+	Attempt           int    `json:"attempt,omitempty"`
 	SessionIDHash     string `json:"session_id_hash,omitempty"`
 	Source            string `json:"source,omitempty"`
 	Phase             string `json:"phase,omitempty"`

@@ -314,3 +314,42 @@ func TestLogManagerRedactsPlainSensitiveAssignments(t *testing.T) {
 		t.Fatalf("redacted message = %q, want %q", got.Message, want)
 	}
 }
+
+func TestSanitizeOperationalErrorTextRedactsValuesAndPreservesDiagnostics(t *testing.T) {
+	secrets := []string{
+		"webhook-key-secret",
+		"bearer-token-secret",
+		"assigned-token-secret",
+		"assigned-session-secret",
+		"/Users/test/.ssh/operational-private.pem",
+		"AKIAIOSFODNN7EXAMPLE",
+		"aws-secret-value",
+	}
+	raw := strings.Join([]string{
+		"post https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + secrets[0] + " failed",
+		"Bearer " + secrets[1],
+		"token=" + secrets[2],
+		"session: " + secrets[3],
+		"load key " + secrets[4] + " failed",
+		"AWS_ACCESS_KEY_ID=" + secrets[5],
+		"AWS_SECRET_ACCESS_KEY=" + secrets[6],
+		"token expired",
+		"session unavailable",
+		"secret rotation failed",
+	}, "\n")
+
+	got := sanitizeOperationalErrorText(raw)
+	for _, secret := range secrets {
+		if strings.Contains(got, secret) {
+			t.Fatalf("operational error retained %q: %s", secret, got)
+		}
+	}
+	for _, diagnostic := range []string{"token expired", "session unavailable", "secret rotation failed"} {
+		if !strings.Contains(got, diagnostic) {
+			t.Fatalf("operational error lost diagnostic %q: %s", diagnostic, got)
+		}
+	}
+	if strings.Contains(got, "qyapi.weixin.qq.com") {
+		t.Fatalf("operational error retained webhook URL: %s", got)
+	}
+}
