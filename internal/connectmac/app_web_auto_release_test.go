@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -411,9 +412,13 @@ func TestWebBackgroundWorkersBlockedLifecycleDoesNotBlockAutoRelease(t *testing.
 func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	reminderTicks := make(chan time.Time)
-	firstFinished := make(chan struct{})
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstReturned := make(chan struct{})
 	secondScanned := make(chan struct{})
-	var calls int
+	var releaseFirstOnce sync.Once
+	t.Cleanup(func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) })
+	var calls atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -423,12 +428,12 @@ func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 			reminderTicks:      reminderTicks,
 			autoReleaseTimeout: 20 * time.Millisecond,
 			lifecycleScan:      func(context.Context, string) error { return nil },
-			autoReleaseScan: func(ctx context.Context, _ string, _ time.Time) error {
-				calls++
-				if calls == 1 {
-					<-ctx.Done()
-					close(firstFinished)
-					return ctx.Err()
+			autoReleaseScan: func(context.Context, string, time.Time) error {
+				if calls.Add(1) == 1 {
+					close(firstStarted)
+					<-releaseFirst
+					close(firstReturned)
+					return errors.New("late first scan failure")
 				}
 				close(secondScanned)
 				return nil
@@ -437,24 +442,35 @@ func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 	}()
 
 	select {
-	case <-firstFinished:
+	case <-firstStarted:
 	case <-time.After(time.Second):
-		t.Fatal("first auto-release scan did not time out")
+		t.Fatal("first auto-release scan did not start")
 	}
-	reminderTicks <- time.Now().Add(time.Minute)
+	select {
+	case reminderTicks <- time.Now().Add(time.Minute):
+	case <-time.After(time.Second):
+		t.Fatal("worker did not accept the next tick after scan timeout")
+	}
 	select {
 	case <-secondScanned:
 	case <-time.After(time.Second):
-		t.Fatal("auto-release scan did not recover on the next tick")
+		t.Fatal("auto-release scan did not recover while the timed-out callback remained blocked")
 	}
+	waitForTestLogAction(t, app.LogManager, "auto-release.scan.completed")
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("background workers did not stop")
 	}
+	releaseFirstOnce.Do(func() { close(releaseFirst) })
+	select {
+	case <-firstReturned:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out callback did not exit after cleanup release")
+	}
 
-	var started, completed, timedOut int
+	var started, completed, failed, timedOut int
 	for _, entry := range readTestLogEntries(t, app.LogManager) {
 		switch entry.Action {
 		case "auto-release.scan.started":
@@ -472,11 +488,60 @@ func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
 				entry.DurationMS <= 0 || entry.ErrorCode != "request_timeout" {
 				t.Fatalf("timeout scan log = %+v", entry)
 			}
+		case "auto-release.scan.failed":
+			failed++
 		}
 	}
-	if started != 2 || completed != 1 || timedOut != 1 {
-		t.Fatalf("scan logs: started=%d completed=%d timeout=%d", started, completed, timedOut)
+	if started != 2 || completed != 1 || timedOut != 1 || failed != 0 {
+		t.Fatalf("scan logs: started=%d completed=%d timeout=%d failed=%d", started, completed, timedOut, failed)
 	}
+}
+
+func TestAutoReleaseScanErrorLogsFailed(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	scanErr := errors.New("database unavailable")
+	app.runAutoReleaseScan(
+		context.Background(),
+		"config.yaml",
+		time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC),
+		time.Second,
+		func(context.Context, string, time.Time) error { return scanErr },
+	)
+
+	entries := readTestLogEntries(t, app.LogManager)
+	if len(entries) != 2 || entries[0].Action != "auto-release.scan.started" {
+		t.Fatalf("scan logs = %+v", entries)
+	}
+	failed := entries[1]
+	if failed.Level != "error" || failed.Action != "auto-release.scan.failed" ||
+		failed.Operation != "auto-release" || failed.Source != "background-worker" ||
+		failed.Phase != "failed" || failed.DurationMS <= 0 ||
+		failed.ErrorCode != "storage_error" || failed.Message != scanErr.Error() {
+		t.Fatalf("failed scan log = %+v", failed)
+	}
+}
+
+func waitForTestLogAction(t *testing.T, manager LogManager, action string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	needle := `"action":"` + action + `"`
+	for time.Now().Before(deadline) {
+		files, err := manager.List()
+		if err != nil {
+			t.Fatalf("list logs: %v", err)
+		}
+		if len(files) == 1 {
+			data, err := os.ReadFile(files[0].Path)
+			if err != nil {
+				t.Fatalf("read logs: %v", err)
+			}
+			if strings.Contains(string(data), needle) {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("log action %q was not written", action)
 }
 
 func TestWebBackgroundWorkerPrunesEventsDailyAndLogsSummary(t *testing.T) {

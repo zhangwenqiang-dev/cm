@@ -275,9 +275,9 @@ func (a App) runWebBackgroundWorkers(ctx context.Context, configPath string, sch
 
 func (a App) runWebLifecycleWorker(ctx context.Context, configPath string, schedule webBackgroundWorkerSchedule) {
 	for {
-		scanCtx, cancel := context.WithTimeout(ctx, schedule.lifecycleScanTimeout)
-		_ = schedule.lifecycleScan(scanCtx, configPath)
-		cancel()
+		_ = runBoundedBackgroundScan(ctx, schedule.lifecycleScanTimeout, func(scanCtx context.Context) error {
+			return schedule.lifecycleScan(scanCtx, configPath)
+		})
 		if ctx.Err() != nil {
 			return
 		}
@@ -286,6 +286,27 @@ func (a App) runWebLifecycleWorker(ctx context.Context, configPath string, sched
 			return
 		case <-schedule.lifecycleTicks:
 		}
+	}
+}
+
+func runBoundedBackgroundScan(parent context.Context, timeout time.Duration, scan func(context.Context) error) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	scanCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		// A late result is intentionally discarded; buffering lets the timed-out scan exit without blocking.
+		result <- scan(scanCtx)
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-scanCtx.Done():
+		return scanCtx.Err()
+	case <-parent.Done():
+		return parent.Err()
 	}
 }
 
@@ -327,15 +348,14 @@ func (a App) runAutoReleaseScan(
 		Phase:     "started",
 		Message:   "automatic release reconciliation scan started",
 	})
-	scanCtx, cancel := context.WithTimeout(ctx, timeout)
-	err := scan(scanCtx, configPath, now)
-	scanContextErr := scanCtx.Err()
-	cancel()
+	err := runBoundedBackgroundScan(ctx, timeout, func(scanCtx context.Context) error {
+		return scan(scanCtx, configPath, now)
+	})
 	durationMS := elapsedDurationMS(startedAt)
 	if ctx.Err() != nil {
 		return
 	}
-	if errors.Is(scanContextErr, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		a.writeRuntimeLog(LogEntry{
 			Level:      "warn",
 			Action:     "auto-release.scan.timeout",
@@ -348,7 +368,21 @@ func (a App) runAutoReleaseScan(
 		})
 		return
 	}
-	entry := LogEntry{
+	if err != nil {
+		classified := classifyOperationalError(err)
+		a.writeRuntimeLog(LogEntry{
+			Level:      "error",
+			Action:     "auto-release.scan.failed",
+			Operation:  "auto-release",
+			Source:     "background-worker",
+			Phase:      "failed",
+			DurationMS: durationMS,
+			ErrorCode:  classified.Code,
+			Message:    err.Error(),
+		})
+		return
+	}
+	a.writeRuntimeLog(LogEntry{
 		Level:      "info",
 		Action:     "auto-release.scan.completed",
 		Operation:  "auto-release",
@@ -356,14 +390,7 @@ func (a App) runAutoReleaseScan(
 		Phase:      "completed",
 		DurationMS: durationMS,
 		Message:    "automatic release reconciliation scan completed",
-	}
-	if err != nil {
-		classified := classifyOperationalError(err)
-		entry.Level = classified.Level
-		entry.ErrorCode = classified.Code
-		entry.Message = err.Error()
-	}
-	a.writeRuntimeLog(entry)
+	})
 }
 
 func (a App) pruneWebAuditEvents(now time.Time) {
