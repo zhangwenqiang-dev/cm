@@ -45,13 +45,13 @@ const mysqlTransferPhaseUpdateQuery = `UPDATE cm_transfer_records SET phase = ? 
 
 const mysqlTransferDeleteQuery = `DELETE FROM cm_transfer_records WHERE id = ? AND member_id = ?`
 
-const mysqlReleaseReminderSelectColumns = `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
+const mysqlReleaseReminderSelectColumns = `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
 
 const mysqlReleaseReminderSelectForUpdate = `SELECT ` + mysqlReleaseReminderSelectColumns + ` FROM cm_release_reminders WHERE profile_name = ? FOR UPDATE`
 
-const mysqlReleaseReminderInsertQuery = `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const mysqlReleaseReminderInsertQuery = `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-const mysqlReleaseReminderUpdateQuery = `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
+const mysqlReleaseReminderUpdateQuery = `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 
 const mysqlProfileOwnerForUpdateQuery = `SELECT o.member_id, COALESCE(m.email, '') FROM cm_profile_owners o LEFT JOIN cm_members m ON m.id = o.member_id WHERE o.profile_name = ? FOR UPDATE`
 
@@ -83,6 +83,7 @@ var mysqlReleaseReminderMigrationStatements = []string{
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_at VARCHAR(64) NULL`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_started_at VARCHAR(64) NULL`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_last_attempt_at VARCHAR(64) NULL`,
+	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_notified_at VARCHAR(64) NULL`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_attempts INT NOT NULL DEFAULT 0`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_last_error TEXT NULL`,
 	`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_state VARCHAR(64) NULL`,
@@ -321,6 +322,7 @@ func mysqlSchemaStatements() []string {
 			auto_release_at VARCHAR(64) NULL,
 			auto_release_started_at VARCHAR(64) NULL,
 			auto_release_last_attempt_at VARCHAR(64) NULL,
+			auto_release_notified_at VARCHAR(64) NULL,
 			auto_release_attempts INT NOT NULL DEFAULT 0,
 			auto_release_last_error TEXT NULL,
 			auto_release_state VARCHAR(64) NULL,
@@ -1067,6 +1069,28 @@ func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releas
 	return completeAutoReleaseInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, cycle, releasedTime)
 }
 
+func (s MySQLMemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {
+	defer s.lockMutation()()
+	if err := s.EnsureSchema(); err != nil {
+		return ReleaseReminder{}, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return ReleaseReminder{}, err
+	}
+	return markAutoReleaseNotifiedInMySQLTransaction(
+		sqlMySQLReleaseReminderTransaction{tx: tx},
+		cycle,
+		notifiedAt,
+		s.currentTime(),
+	)
+}
+
 func (s MySQLMemberStore) CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error) {
 	return s.cleanupProfileRecordsAndMaybeRecordEvent(profileName, releasedAt, reason, nil)
 }
@@ -1405,12 +1429,12 @@ func deleteTransferRecordInMySQLTransaction(tx mysqlTransferDeleteTransaction, m
 
 func insertMySQLReleaseReminder(execer mysqlReleaseReminderExecer, reminder ReleaseReminder) error {
 	return execer.Exec(mysqlReleaseReminderInsertQuery,
-		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt)
+		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseNotifiedAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt)
 }
 
 func updateMySQLReleaseReminder(execer mysqlReleaseReminderExecer, profileName string, reminder ReleaseReminder) error {
 	return execer.Exec(mysqlReleaseReminderUpdateQuery,
-		reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.UpdatedAt, profileName)
+		reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseNotifiedAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.UpdatedAt, profileName)
 }
 
 func upsertReleaseReminderInMySQLTransaction(tx mysqlReleaseReminderTransaction, reminder ReleaseReminder, now time.Time) (result ReleaseReminder, err error) {
@@ -1683,6 +1707,54 @@ func cleanupProfileRecordsAndMaybeEventInMySQLTransaction(tx mysqlReleaseReminde
 	return reminder, true, nil
 }
 
+func markAutoReleaseNotifiedInMySQLTransaction(tx mysqlReleaseReminderTransaction, cycle ReleaseReminderCycle, notifiedAt string, now time.Time) (updated ReleaseReminder, err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
+	var current ReleaseReminder
+	if err = scanMySQLReleaseReminder(tx.QueryRow(mysqlReleaseReminderSelectForUpdate, cycle.ProfileName), &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ReleaseReminder{}, releaseReminderNotFoundError(cycle.ProfileName)
+		}
+		return ReleaseReminder{}, err
+	}
+	if !releaseReminderMatchesCycle(current, cycle) {
+		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+	}
+	if current.AutoReleaseNotifiedAt != "" {
+		if err = tx.Commit(); err != nil {
+			return ReleaseReminder{}, err
+		}
+		committed = true
+		return current, nil
+	}
+	if current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateNotifying {
+		return ReleaseReminder{}, ErrReleaseReminderCycleChanged
+	}
+	current.AutoReleaseNotifiedAt = notifiedAt
+	current.UpdatedAt = now.Format(time.RFC3339)
+	if err = updateMySQLReleaseReminder(tx, cycle.ProfileName, current); err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return ReleaseReminder{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ReleaseReminder{}, err
+	}
+	committed = true
+	return current, nil
+}
+
 func completeAutoReleaseInMySQLTransaction(tx mysqlReleaseReminderTransaction, cycle ReleaseReminderCycle, releasedAt time.Time) (updated ReleaseReminder, err error) {
 	committed := false
 	defer func() {
@@ -1852,6 +1924,7 @@ func scanMySQLReleaseReminder(scanner mysqlReleaseReminderScanner, reminder *Rel
 		&reminder.AutoReleaseAt,
 		&reminder.AutoReleaseStartedAt,
 		&reminder.AutoReleaseLastAttemptAt,
+		&reminder.AutoReleaseNotifiedAt,
 		&reminder.AutoReleaseAttempts,
 		&reminder.AutoReleaseLastError,
 		&reminder.AutoReleaseState,
