@@ -1372,7 +1372,6 @@ func (a App) webReleaseRemindersHandler() http.HandlerFunc {
 }
 
 var (
-	errAutomaticReleaseRunning = errors.New("automatic release is already running; wait for the release to finish")
 	errActiveDestroyJob        = errors.New("automatic release cannot be changed while an active aws-destroy job exists")
 	errAutoReleaseMacNotReady  = errors.New("automatic release requires a ready Mac")
 	errAutoReleaseOwnerMissing = errors.New("automatic release requires a profile owner")
@@ -1483,7 +1482,7 @@ func (a App) webReleaseReminderAutoReleaseHandler(configPath string) http.Handle
 					}
 					return current, nil
 				}
-				if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
+				if autoReleaseStateBlocksUserMutation(current.AutoReleaseState) {
 					return current, errAutomaticReleaseRunning
 				}
 				current.AutoReleaseEnabled = false
@@ -1555,7 +1554,7 @@ func (a App) webReleaseReminderExtendHandler() http.HandlerFunc {
 			}
 			var updateErr error
 			reminder, updateErr = a.MemberStore.UpdateReleaseReminder(profileName, func(current ReleaseReminder) (ReleaseReminder, error) {
-				if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRunning {
+				if autoReleaseStateBlocksUserMutation(current.AutoReleaseState) {
 					return current, errAutomaticReleaseRunning
 				}
 				oldDueAt = current.ReleaseDueAt

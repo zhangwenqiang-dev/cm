@@ -1660,6 +1660,13 @@ func cleanupProfileRecordsAndMaybeEventInMySQLTransaction(tx mysqlReleaseReminde
 		reminderFound = false
 		reminder = ReleaseReminder{ProfileName: profileName, Status: ReleaseReminderStatusReleased}
 	}
+	if reminderFound && genericCleanupMustPreserveAutoRelease(reminder, reason) {
+		if err = tx.Commit(); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		committed = true
+		return reminder, false, nil
+	}
 	reminderChanged := reminderFound && releaseReminderNeedsConvergence(reminder)
 	if !ownerChanged && !reminderChanged {
 		if err = tx.Commit(); err != nil {

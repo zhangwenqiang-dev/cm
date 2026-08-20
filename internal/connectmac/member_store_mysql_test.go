@@ -1150,6 +1150,67 @@ func TestMySQLCleanupProfileRecordsRollsBackOwnerReminderAndEventTogether(t *tes
 	}
 }
 
+func TestMySQLAutomaticCleanupProtectsCoordinatorOwnedRecords(t *testing.T) {
+	for _, state := range []string{
+		ReleaseReminderAutoReleaseStateScheduled,
+		ReleaseReminderAutoReleaseStateRunning,
+		ReleaseReminderAutoReleaseStateRetrying,
+		ReleaseReminderAutoReleaseStateNotifying,
+		ReleaseReminderAutoReleaseStateFailed,
+	} {
+		t.Run(state, func(t *testing.T) {
+			current := notifyingAutoReleaseReminder("owner@example.com")
+			current.ProfileName = "apple-usw2"
+			current.AutoReleaseState = state
+			if state == ReleaseReminderAutoReleaseStateNotifying {
+				current.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
+			}
+			tx := &fakeMySQLReleaseReminderTransaction{
+				row:      fakeMySQLReleaseReminderRow{reminder: current},
+				ownerRow: fakeMySQLProfileOwnerRow{memberID: "member-1", email: current.OwnerEmail},
+			}
+
+			got, changed, err := cleanupProfileRecordsInMySQLTransaction(
+				tx,
+				current.ProfileName,
+				"2026-07-13T09:00:00Z",
+				"auto-status",
+				time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC),
+			)
+			if err != nil {
+				t.Fatalf("automatic cleanup: %v", err)
+			}
+			if changed || !reflect.DeepEqual(got, current) || !tx.committed || tx.rolledBack || tx.ownerDeleted || tx.execQuery != "" || len(tx.eventExecArgs) != 0 {
+				t.Fatalf("automatic cleanup changed protected records: changed=%t reminder=%+v tx=%+v", changed, got, tx)
+			}
+		})
+	}
+}
+
+func TestMySQLManualCleanupCanOverrideCoordinatorOwnedRecords(t *testing.T) {
+	current := notifyingAutoReleaseReminder("owner@example.com")
+	current.ProfileName = "apple-usw2"
+	current.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
+	tx := &fakeMySQLReleaseReminderTransaction{
+		row:      fakeMySQLReleaseReminderRow{reminder: current},
+		ownerRow: fakeMySQLProfileOwnerRow{memberID: "member-1", email: current.OwnerEmail},
+	}
+
+	got, changed, err := cleanupProfileRecordsInMySQLTransaction(
+		tx,
+		current.ProfileName,
+		"2026-07-13T09:00:00Z",
+		"manual",
+		time.Date(2026, 7, 13, 9, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("manual cleanup: %v", err)
+	}
+	if !changed || got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || got.AutoReleaseNotifiedAt != current.AutoReleaseNotifiedAt || !tx.ownerDeleted || !tx.committed || tx.rolledBack {
+		t.Fatalf("manual cleanup did not complete: changed=%t reminder=%+v tx=%+v", changed, got, tx)
+	}
+}
+
 func TestMySQLManualCleanupAuditFailureRollsBackTransaction(t *testing.T) {
 	current := ReleaseReminder{
 		ProfileName: "apple-usw2",

@@ -306,6 +306,72 @@ func TestMemberStoreCompleteAutoReleasePreservesNotificationMarker(t *testing.T)
 	}
 }
 
+func TestMemberStoreAutomaticCleanupProtectsCoordinatorOwnedRecords(t *testing.T) {
+	for _, state := range []string{
+		ReleaseReminderAutoReleaseStateScheduled,
+		ReleaseReminderAutoReleaseStateRunning,
+		ReleaseReminderAutoReleaseStateRetrying,
+		ReleaseReminderAutoReleaseStateNotifying,
+		ReleaseReminderAutoReleaseStateFailed,
+	} {
+		t.Run(state, func(t *testing.T) {
+			store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+			if _, err := store.AddMember("Owner", "owner@example.com", "operator"); err != nil {
+				t.Fatalf("add owner: %v", err)
+			}
+			if _, err := store.SetProfileOwner("mac", "owner@example.com"); err != nil {
+				t.Fatalf("set owner: %v", err)
+			}
+			reminder := notifyingAutoReleaseReminder("owner@example.com")
+			reminder.AutoReleaseState = state
+			if state == ReleaseReminderAutoReleaseStateNotifying {
+				reminder.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
+			}
+			before, err := store.UpsertReleaseReminder(reminder)
+			if err != nil {
+				t.Fatalf("upsert reminder: %v", err)
+			}
+
+			got, changed, err := store.CleanupProfileRecords("mac", "2026-07-13T09:00:00Z", "auto-status")
+			if err != nil {
+				t.Fatalf("automatic cleanup: %v", err)
+			}
+			if changed || !reflect.DeepEqual(got, before) {
+				t.Fatalf("automatic cleanup changed protected reminder: changed=%t\n got: %+v\nwant: %+v", changed, got, before)
+			}
+			if owner, ok, err := store.ProfileOwner("mac"); err != nil || !ok || owner.Owner.Email != "owner@example.com" {
+				t.Fatalf("automatic cleanup changed owner: owner=%+v ok=%t err=%v", owner, ok, err)
+			}
+		})
+	}
+}
+
+func TestMemberStoreManualCleanupCanOverrideCoordinatorOwnedRecords(t *testing.T) {
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	if _, err := store.AddMember("Owner", "owner@example.com", "operator"); err != nil {
+		t.Fatalf("add owner: %v", err)
+	}
+	if _, err := store.SetProfileOwner("mac", "owner@example.com"); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+	reminder := notifyingAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseNotifiedAt = "2026-07-13T08:59:00Z"
+	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+
+	got, changed, err := store.CleanupProfileRecords("mac", "2026-07-13T09:00:00Z", "manual")
+	if err != nil {
+		t.Fatalf("manual cleanup: %v", err)
+	}
+	if !changed || got.Status != ReleaseReminderStatusReleased || got.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || got.AutoReleaseNotifiedAt != reminder.AutoReleaseNotifiedAt {
+		t.Fatalf("manual cleanup reminder: changed=%t reminder=%+v", changed, got)
+	}
+	if owner, ok, err := store.ProfileOwner("mac"); err != nil || ok {
+		t.Fatalf("owner after manual cleanup: owner=%+v ok=%t err=%v", owner, ok, err)
+	}
+}
+
 func TestMemberStoreCompleteAutoReleaseSaveFailurePreservesDurableNotificationMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "members.json")
 	store := NewMemberStore(path)

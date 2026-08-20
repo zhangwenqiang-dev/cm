@@ -1056,6 +1056,9 @@ func cleanupProfileRecordsInData(db *MemberData, profileName, releasedAt, reason
 			break
 		}
 	}
+	if reminderIndex >= 0 && genericCleanupMustPreserveAutoRelease(reminder, reason) {
+		return reminder, false, nil
+	}
 	reminderChanged := reminderIndex >= 0 && releaseReminderNeedsConvergence(reminder)
 	ownerChanged := ownerIndex >= 0
 	if !ownerChanged && !reminderChanged {
@@ -1121,6 +1124,24 @@ func cleanupProfileRecordsEvent(reminder ReleaseReminder, reminderFound, ownerCh
 
 func shouldRecordAutomaticCleanupEvent(reason string) bool {
 	return !strings.EqualFold(strings.TrimSpace(reason), "manual")
+}
+
+func genericCleanupMustPreserveAutoRelease(reminder ReleaseReminder, reason string) bool {
+	if strings.EqualFold(strings.TrimSpace(reason), "manual") ||
+		reminder.Status != ReleaseReminderStatusDueNotified ||
+		!reminder.AutoReleaseEnabled {
+		return false
+	}
+	switch reminder.AutoReleaseState {
+	case ReleaseReminderAutoReleaseStateScheduled,
+		ReleaseReminderAutoReleaseStateRunning,
+		ReleaseReminderAutoReleaseStateRetrying,
+		ReleaseReminderAutoReleaseStateNotifying,
+		ReleaseReminderAutoReleaseStateFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s MemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error) {

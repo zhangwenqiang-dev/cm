@@ -679,6 +679,81 @@ func TestCleanupProfileLocalRecordsIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestWebAWSStatusCleanupPreservesNotifyingCycleUntilCoordinatorCompletes(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	owner, err := app.MemberStore.SetupAdmin("Test Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatalf("setup owner: %v", err)
+	}
+	profile := validAWSProfile()
+	if _, err := app.MemberStore.SetProfileOwner(profile.Name, owner.Email); err != nil {
+		t.Fatalf("set profile owner: %v", err)
+	}
+	now := app.JobManager.Now().UTC()
+	reminder := ReleaseReminder{
+		ProfileName: profile.Name, AppleEmail: profile.AWS.AccountEmail, HostID: "h-1",
+		ReleaseDueAt: now.Add(-2 * time.Hour).Format(time.RFC3339), OwnerEmail: owner.Email, OwnerName: owner.Name,
+		LastNotifiedAt: now.Add(-time.Hour).Format(time.RFC3339), Status: ReleaseReminderStatusDueNotified,
+		AutoReleaseEnabled: true, AutoReleaseAt: now.Add(-50 * time.Minute).Format(time.RFC3339),
+		AutoReleaseStartedAt:     now.Add(-45 * time.Minute).Format(time.RFC3339),
+		AutoReleaseLastAttemptAt: now.Add(-AutoReleaseRetryInterval).Format(time.RFC3339),
+		AutoReleaseAttempts:      1, AutoReleaseState: ReleaseReminderAutoReleaseStateNotifying,
+	}
+	if _, err := app.MemberStore.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("upsert notifying reminder: %v", err)
+	}
+	beforePoll := mustReleaseReminder(t, app, profile.Name)
+	cleanStatus := AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-retained"}}
+	app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+		return &fakeAWSClient{status: cleanStatus}, nil
+	}
+
+	if _, status, err := app.webAWSStatusWithCleanup(context.Background(), profile); err != nil {
+		t.Fatalf("poll AWS status: %v", err)
+	} else if !autoReleaseResourcesClean(status) {
+		t.Fatalf("polled status is not clean: %+v", status)
+	}
+	if afterPoll := mustReleaseReminder(t, app, profile.Name); !reflect.DeepEqual(afterPoll, beforePoll) {
+		t.Fatalf("status polling changed coordinator-owned reminder:\n got: %+v\nwant: %+v", afterPoll, beforePoll)
+	}
+	if persistedOwner, ok, err := app.MemberStore.ProfileOwner(profile.Name); err != nil || !ok || persistedOwner.Owner.Email != owner.Email {
+		t.Fatalf("status polling changed owner: owner=%+v ok=%t err=%v", persistedOwner, ok, err)
+	}
+
+	notifications := 0
+	starts := 0
+	coordinator := AutoReleaseCoordinator{
+		Now:   func() time.Time { return now },
+		Store: app.MemberStore,
+		Jobs:  app.JobManager,
+		ResolveProfile: func(context.Context, ReleaseReminder) (Profile, error) {
+			return profile, nil
+		},
+		Status: func(context.Context, Profile) (AWSStatus, error) { return cleanStatus, nil },
+		StartDestroy: func(context.Context, Profile) (Job, error) {
+			starts++
+			return Job{}, errors.New("unexpected destroy mutation")
+		},
+		Notify: func(notification AutoReleaseNotification) error {
+			if notification.Kind != AutoReleaseNotificationSuccess {
+				t.Fatalf("notification = %+v", notification)
+			}
+			notifications++
+			return nil
+		},
+	}
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("coordinator Scan: %v", err)
+	}
+	completed := mustReleaseReminder(t, app, profile.Name)
+	if completed.Status != ReleaseReminderStatusReleased || completed.AutoReleaseState != ReleaseReminderAutoReleaseStateReleased || completed.AutoReleaseNotifiedAt == "" || notifications != 1 || starts != 0 {
+		t.Fatalf("coordinator completion reminder=%+v notifications=%d starts=%d", completed, notifications, starts)
+	}
+	if persistedOwner, ok, err := app.MemberStore.ProfileOwner(profile.Name); err != nil || ok {
+		t.Fatalf("owner after exact-cycle completion: owner=%+v ok=%t err=%v", persistedOwner, ok, err)
+	}
+}
+
 func TestCleanupDefaultLocalConfigProfilesMissingFileIsNoop(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1560,8 +1635,7 @@ func TestAppWebAutoReleaseToggleAdminEnableDisable(t *testing.T) {
 			seed: ReleaseReminder{
 				ProfileName: "xcode-vnc", AppleEmail: "user@example.com", Status: ReleaseReminderStatusDueNotified,
 				AutoReleaseEnabled: true, AutoReleaseAt: "2026-07-01T12:40:45Z",
-				AutoReleaseStartedAt: "2026-07-01T12:30:45Z", AutoReleaseLastAttemptAt: "2026-07-01T12:35:45Z",
-				AutoReleaseAttempts: 2, AutoReleaseLastError: "temporary", AutoReleaseState: ReleaseReminderAutoReleaseStateRetrying,
+				AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled,
 			},
 		},
 	} {
@@ -1749,7 +1823,7 @@ func TestAppWebAutoReleaseToggleAssignedMemberAccess(t *testing.T) {
 	for _, role := range []string{"operator", "viewer"} {
 		t.Run(role+" assigned", func(t *testing.T) {
 			app := newWebAutoReleaseTestApp(t)
-			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusActive)
+			seedWebAutoReleaseReminderWithState(t, app, ReleaseReminderStatusActive, ReleaseReminderAutoReleaseStateScheduled)
 			if _, err := app.MemberStore.UpsertManagedProfile(Profile{Name: "xcode-vnc"}); err != nil {
 				t.Fatalf("upsert managed profile: %v", err)
 			}
@@ -1838,7 +1912,7 @@ func TestAppWebAutoReleaseEnablePreservesRunningCycleWithActiveDestroyJob(t *tes
 	}
 }
 
-func TestAppWebAutoReleaseToggleRejectsRunningRelease(t *testing.T) {
+func TestAppWebAutoReleaseToggleRejectsProtectedReleaseStatesOrJob(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		seed      ReleaseReminder
@@ -1847,6 +1921,14 @@ func TestAppWebAutoReleaseToggleRejectsRunningRelease(t *testing.T) {
 		{
 			name: "running state",
 			seed: ReleaseReminder{ProfileName: "xcode-vnc", AutoReleaseEnabled: true, AutoReleaseAt: "2026-07-01T12:40:45Z", AutoReleaseAttempts: 1, AutoReleaseState: ReleaseReminderAutoReleaseStateRunning},
+		},
+		{
+			name: "retrying state",
+			seed: ReleaseReminder{ProfileName: "xcode-vnc", AutoReleaseEnabled: true, AutoReleaseAt: "2026-07-01T12:40:45Z", AutoReleaseAttempts: 2, AutoReleaseState: ReleaseReminderAutoReleaseStateRetrying},
+		},
+		{
+			name: "notifying state with marker",
+			seed: ReleaseReminder{ProfileName: "xcode-vnc", AutoReleaseEnabled: true, AutoReleaseAt: "2026-07-01T12:40:45Z", AutoReleaseAttempts: 2, AutoReleaseState: ReleaseReminderAutoReleaseStateNotifying, AutoReleaseNotifiedAt: "2026-07-01T12:45:45Z"},
 		},
 		{
 			name:      "active destroy job",
@@ -1870,7 +1952,7 @@ func TestAppWebAutoReleaseToggleRejectsRunningRelease(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 			}
 			got := mustReleaseReminder(t, app, "xcode-vnc")
-			if !got.AutoReleaseEnabled || got.AutoReleaseAt != test.seed.AutoReleaseAt || got.AutoReleaseState != test.seed.AutoReleaseState || got.AutoReleaseAttempts != test.seed.AutoReleaseAttempts {
+			if !got.AutoReleaseEnabled || got.AutoReleaseAt != test.seed.AutoReleaseAt || got.AutoReleaseState != test.seed.AutoReleaseState || got.AutoReleaseAttempts != test.seed.AutoReleaseAttempts || got.AutoReleaseNotifiedAt != test.seed.AutoReleaseNotifiedAt {
 				t.Fatalf("running release was modified: %+v", got)
 			}
 		})
@@ -1951,7 +2033,7 @@ func TestAppWebReleaseReminderExtendBoundaryAndCycleReset(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			app := newWebAutoReleaseTestApp(t)
-			seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
+			seedWebAutoReleaseReminderWithState(t, app, ReleaseReminderStatusDueNotified, ReleaseReminderAutoReleaseStateScheduled)
 			rec := postWebExtension(t, &app, "admin", test.dueAt)
 			if rec.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d, body = %s", rec.Code, test.wantStatus, rec.Body.String())
@@ -1960,7 +2042,7 @@ func TestAppWebReleaseReminderExtendBoundaryAndCycleReset(t *testing.T) {
 	}
 
 	app := newWebAutoReleaseTestApp(t)
-	seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
+	seedWebAutoReleaseReminderWithState(t, app, ReleaseReminderStatusDueNotified, ReleaseReminderAutoReleaseStateScheduled)
 	dueAt := serverNow.Add(time.Hour)
 	rec := postWebExtension(t, &app, "admin", dueAt)
 	if rec.Code != http.StatusOK {
@@ -1990,7 +2072,7 @@ func TestAppWebReleaseReminderExtendNotificationUsesBeijingDisplayTime(t *testin
 	t.Setenv(envWechatWebhookURL, server.URL)
 
 	app := newWebAutoReleaseTestApp(t)
-	reminder := seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
+	reminder := seedWebAutoReleaseReminderWithState(t, app, ReleaseReminderStatusDueNotified, ReleaseReminderAutoReleaseStateScheduled)
 	reminder.ReleaseDueAt = "2026-07-17T09:17:07Z"
 	if _, err := app.MemberStore.UpsertReleaseReminder(reminder); err != nil {
 		t.Fatalf("update reminder: %v", err)
@@ -2025,13 +2107,15 @@ func TestAppWebReleaseReminderExtendNotificationUsesBeijingDisplayTime(t *testin
 	}
 }
 
-func TestAppWebReleaseReminderExtendRejectsRunningStateOrJob(t *testing.T) {
+func TestAppWebReleaseReminderExtendRejectsProtectedStatesOrJob(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		state     string
 		activeJob bool
 	}{
 		{name: "running state", state: ReleaseReminderAutoReleaseStateRunning},
+		{name: "retrying state", state: ReleaseReminderAutoReleaseStateRetrying},
+		{name: "notifying state", state: ReleaseReminderAutoReleaseStateNotifying},
 		{name: "active destroy job", state: ReleaseReminderAutoReleaseStateScheduled, activeJob: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2040,6 +2124,9 @@ func TestAppWebReleaseReminderExtendRejectsRunningStateOrJob(t *testing.T) {
 			var err error
 			reminder, err = app.MemberStore.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 				current.AutoReleaseState = test.state
+				if test.state == ReleaseReminderAutoReleaseStateNotifying {
+					current.AutoReleaseNotifiedAt = "2026-07-01T12:36:45Z"
+				}
 				return current, nil
 			})
 			if err != nil {
@@ -2055,7 +2142,7 @@ func TestAppWebReleaseReminderExtendRejectsRunningStateOrJob(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 			}
 			got := mustReleaseReminder(t, app, "xcode-vnc")
-			if got.ReleaseDueAt != reminder.ReleaseDueAt || got.AutoReleaseState != reminder.AutoReleaseState || got.AutoReleaseAt != reminder.AutoReleaseAt {
+			if got.ReleaseDueAt != reminder.ReleaseDueAt || got.AutoReleaseState != reminder.AutoReleaseState || got.AutoReleaseAt != reminder.AutoReleaseAt || got.AutoReleaseNotifiedAt != reminder.AutoReleaseNotifiedAt {
 				t.Fatalf("running release was modified: %+v", got)
 			}
 		})
@@ -2065,11 +2152,13 @@ func TestAppWebReleaseReminderExtendRejectsRunningStateOrJob(t *testing.T) {
 func TestAppWebReleaseReminderExtensionWinsAtomicRaceWithAutoClaim(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	now := app.JobManager.Now()
-	reminder := seedWebAutoReleaseReminder(t, app, ReleaseReminderStatusDueNotified)
-	reminder.ReleaseDueAt = now.Add(-AutoReleaseGracePeriod).Format(time.RFC3339)
-	reminder.AutoReleaseAt = now.Format(time.RFC3339)
-	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateScheduled
-	if _, err := app.MemberStore.UpsertReleaseReminder(reminder); err != nil {
+	reminder := seedWebAutoReleaseReminderWithState(t, app, ReleaseReminderStatusDueNotified, ReleaseReminderAutoReleaseStateScheduled)
+	reminder, err := app.MemberStore.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		current.ReleaseDueAt = now.Add(-AutoReleaseGracePeriod).Format(time.RFC3339)
+		current.AutoReleaseAt = now.Format(time.RFC3339)
+		return current, nil
+	})
+	if err != nil {
 		t.Fatalf("update reminder: %v", err)
 	}
 
@@ -2263,6 +2352,19 @@ func seedWebAutoReleaseReminder(t *testing.T, app App, status string) ReleaseRem
 		t.Fatalf("upsert reminder: %v", err)
 	}
 	return reminder
+}
+
+func seedWebAutoReleaseReminderWithState(t *testing.T, app App, status, state string) ReleaseReminder {
+	t.Helper()
+	reminder := seedWebAutoReleaseReminder(t, app, status)
+	updated, err := app.MemberStore.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		current.AutoReleaseState = state
+		return current, nil
+	})
+	if err != nil {
+		t.Fatalf("set automatic release state: %v", err)
+	}
+	return updated
 }
 
 func postWebAutoRelease(t *testing.T, app *App, role, profile string, enabled bool) *httptest.ResponseRecorder {
