@@ -87,6 +87,20 @@ type webElasticIP struct {
 	PublicIP      string `json:"public_ip"`
 }
 
+const (
+	webAWSLifecycleScanTimeout = 45 * time.Second
+	autoReleaseScanTimeout     = 45 * time.Second
+)
+
+type webBackgroundWorkerSchedule struct {
+	lifecycleTicks       <-chan time.Time
+	reminderTicks        <-chan time.Time
+	lifecycleScanTimeout time.Duration
+	autoReleaseTimeout   time.Duration
+	lifecycleScan        func(context.Context, string) error
+	autoReleaseScan      func(context.Context, string, time.Time) error
+}
+
 func (a App) runWeb(ctx context.Context, configPath string, args []string) int {
 	opts, err := parseWebArgs(args)
 	if err != nil {
@@ -221,31 +235,135 @@ func (a App) runReleaseReminderWorker(ctx context.Context, configPath string) {
 }
 
 func (a App) runWebBackgroundWorker(ctx context.Context, configPath string, lifecycleTicks, reminderTicks <-chan time.Time) {
-	scan := a.WebAWSLifecycleScan
-	if scan == nil {
-		scan = func(ctx context.Context, configPath string) error {
-			return a.reconcileWebAWSLifecycles(ctx, configPath)
+	a.runWebBackgroundWorkers(ctx, configPath, webBackgroundWorkerSchedule{
+		lifecycleTicks: lifecycleTicks,
+		reminderTicks:  reminderTicks,
+	})
+}
+
+func (a App) runWebBackgroundWorkers(ctx context.Context, configPath string, schedule webBackgroundWorkerSchedule) {
+	if schedule.lifecycleScanTimeout <= 0 {
+		schedule.lifecycleScanTimeout = webAWSLifecycleScanTimeout
+	}
+	if schedule.autoReleaseTimeout <= 0 {
+		schedule.autoReleaseTimeout = autoReleaseScanTimeout
+	}
+	if schedule.lifecycleScan == nil {
+		schedule.lifecycleScan = a.WebAWSLifecycleScan
+		if schedule.lifecycleScan == nil {
+			schedule.lifecycleScan = func(ctx context.Context, configPath string) error {
+				return a.reconcileWebAWSLifecycles(ctx, configPath)
+			}
 		}
 	}
-	_ = scan(ctx, configPath)
-	now := time.Now()
-	a.pruneWebAuditEvents(now)
-	nextAuditPrune := now.Add(24 * time.Hour)
-	a.advanceAutoReleaseReminders(ctx, configPath, now)
+	if schedule.autoReleaseScan == nil {
+		schedule.autoReleaseScan = a.scanAutoReleaseReminders
+	}
+
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		a.runWebLifecycleWorker(ctx, configPath, schedule)
+	}()
+	go func() {
+		defer func() { done <- struct{}{} }()
+		a.runWebReminderWorker(ctx, configPath, schedule)
+	}()
+	<-done
+	<-done
+}
+
+func (a App) runWebLifecycleWorker(ctx context.Context, configPath string, schedule webBackgroundWorkerSchedule) {
 	for {
+		scanCtx, cancel := context.WithTimeout(ctx, schedule.lifecycleScanTimeout)
+		_ = schedule.lifecycleScan(scanCtx, configPath)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-lifecycleTicks:
-			_ = scan(ctx, configPath)
-		case now := <-reminderTicks:
+		case <-schedule.lifecycleTicks:
+		}
+	}
+}
+
+func (a App) runWebReminderWorker(ctx context.Context, configPath string, schedule webBackgroundWorkerSchedule) {
+	now := time.Now()
+	a.pruneWebAuditEvents(now)
+	nextAuditPrune := now.Add(24 * time.Hour)
+	a.runAutoReleaseScan(ctx, configPath, now, schedule.autoReleaseTimeout, schedule.autoReleaseScan)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-schedule.reminderTicks:
 			if !now.Before(nextAuditPrune) {
 				a.pruneWebAuditEvents(now)
 				nextAuditPrune = now.Add(24 * time.Hour)
 			}
-			a.advanceAutoReleaseReminders(ctx, configPath, now)
+			a.runAutoReleaseScan(ctx, configPath, now, schedule.autoReleaseTimeout, schedule.autoReleaseScan)
 		}
 	}
+}
+
+func (a App) runAutoReleaseScan(
+	ctx context.Context,
+	configPath string,
+	now time.Time,
+	timeout time.Duration,
+	scan func(context.Context, string, time.Time) error,
+) {
+	startedAt := time.Now()
+	a.writeRuntimeLog(LogEntry{
+		Level:     "info",
+		Action:    "auto-release.scan.started",
+		Operation: "auto-release",
+		Source:    "background-worker",
+		Phase:     "started",
+		Message:   "automatic release reconciliation scan started",
+	})
+	scanCtx, cancel := context.WithTimeout(ctx, timeout)
+	err := scan(scanCtx, configPath, now)
+	scanContextErr := scanCtx.Err()
+	cancel()
+	durationMS := elapsedDurationMS(startedAt)
+	if ctx.Err() != nil {
+		return
+	}
+	if errors.Is(scanContextErr, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		a.writeRuntimeLog(LogEntry{
+			Level:      "warn",
+			Action:     "auto-release.scan.timeout",
+			Operation:  "auto-release",
+			Source:     "background-worker",
+			Phase:      "timeout",
+			DurationMS: durationMS,
+			ErrorCode:  classifyOperationalError(context.DeadlineExceeded).Code,
+			Message:    context.DeadlineExceeded.Error(),
+		})
+		return
+	}
+	entry := LogEntry{
+		Level:      "info",
+		Action:     "auto-release.scan.completed",
+		Operation:  "auto-release",
+		Source:     "background-worker",
+		Phase:      "completed",
+		DurationMS: durationMS,
+		Message:    "automatic release reconciliation scan completed",
+	}
+	if err != nil {
+		classified := classifyOperationalError(err)
+		entry.Level = classified.Level
+		entry.ErrorCode = classified.Code
+		entry.Message = err.Error()
+	}
+	a.writeRuntimeLog(entry)
 }
 
 func (a App) pruneWebAuditEvents(now time.Time) {
@@ -280,11 +398,15 @@ func (a App) sendDueReleaseReminders(now time.Time) {
 }
 
 func (a App) advanceAutoReleaseReminders(ctx context.Context, configPath string, now time.Time) {
-	coordinator := a.newAutoReleaseCoordinator(configPath)
-	coordinator.Now = func() time.Time { return now }
-	if err := coordinator.Scan(ctx); err != nil {
+	if err := a.scanAutoReleaseReminders(ctx, configPath, now); err != nil {
 		a.writeRuntimeLog(LogEntry{Level: "error", Action: "release-reminder.worker", Operation: "auto-release", Source: "background-worker", Phase: "scan", ErrorCode: classifyOperationalError(err).Code, Message: err.Error()})
 	}
+}
+
+func (a App) scanAutoReleaseReminders(ctx context.Context, configPath string, now time.Time) error {
+	coordinator := a.newAutoReleaseCoordinator(configPath)
+	coordinator.Now = func() time.Time { return now }
+	return coordinator.Scan(ctx)
 }
 
 func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinator {

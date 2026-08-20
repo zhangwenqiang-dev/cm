@@ -364,6 +364,121 @@ func (r *pruneTrackingRepository) callCount() int {
 	return r.calls
 }
 
+func TestWebBackgroundWorkersBlockedLifecycleDoesNotBlockAutoRelease(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	lifecycleStarted := make(chan struct{})
+	autoReleaseScanned := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.runWebBackgroundWorkers(ctx, "config.yaml", webBackgroundWorkerSchedule{
+			lifecycleTicks:       make(chan time.Time),
+			reminderTicks:        make(chan time.Time),
+			lifecycleScanTimeout: time.Second,
+			autoReleaseTimeout:   time.Second,
+			lifecycleScan: func(ctx context.Context, _ string) error {
+				close(lifecycleStarted)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			autoReleaseScan: func(context.Context, string, time.Time) error {
+				autoReleaseScanned <- struct{}{}
+				return nil
+			},
+		})
+	}()
+
+	select {
+	case <-lifecycleStarted:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle scan did not start")
+	}
+	select {
+	case <-autoReleaseScanned:
+	case <-time.After(time.Second):
+		t.Fatal("blocked lifecycle scan prevented auto-release scan")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("background workers did not stop")
+	}
+}
+
+func TestAutoReleaseScanTimeoutRecoversOnNextTick(t *testing.T) {
+	app := newWebAutoReleaseTestApp(t)
+	reminderTicks := make(chan time.Time)
+	firstFinished := make(chan struct{})
+	secondScanned := make(chan struct{})
+	var calls int
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.runWebBackgroundWorkers(ctx, "config.yaml", webBackgroundWorkerSchedule{
+			lifecycleTicks:     make(chan time.Time),
+			reminderTicks:      reminderTicks,
+			autoReleaseTimeout: 20 * time.Millisecond,
+			lifecycleScan:      func(context.Context, string) error { return nil },
+			autoReleaseScan: func(ctx context.Context, _ string, _ time.Time) error {
+				calls++
+				if calls == 1 {
+					<-ctx.Done()
+					close(firstFinished)
+					return ctx.Err()
+				}
+				close(secondScanned)
+				return nil
+			},
+		})
+	}()
+
+	select {
+	case <-firstFinished:
+	case <-time.After(time.Second):
+		t.Fatal("first auto-release scan did not time out")
+	}
+	reminderTicks <- time.Now().Add(time.Minute)
+	select {
+	case <-secondScanned:
+	case <-time.After(time.Second):
+		t.Fatal("auto-release scan did not recover on the next tick")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("background workers did not stop")
+	}
+
+	var started, completed, timedOut int
+	for _, entry := range readTestLogEntries(t, app.LogManager) {
+		switch entry.Action {
+		case "auto-release.scan.started":
+			started++
+		case "auto-release.scan.completed":
+			completed++
+			if entry.Operation != "auto-release" || entry.Source != "background-worker" ||
+				entry.Phase != "completed" || entry.DurationMS <= 0 {
+				t.Fatalf("completed scan log = %+v", entry)
+			}
+		case "auto-release.scan.timeout":
+			timedOut++
+			if entry.Level != "warn" || entry.Operation != "auto-release" ||
+				entry.Source != "background-worker" || entry.Phase != "timeout" ||
+				entry.DurationMS <= 0 || entry.ErrorCode != "request_timeout" {
+				t.Fatalf("timeout scan log = %+v", entry)
+			}
+		}
+	}
+	if started != 2 || completed != 1 || timedOut != 1 {
+		t.Fatalf("scan logs: started=%d completed=%d timeout=%d", started, completed, timedOut)
+	}
+}
+
 func TestWebBackgroundWorkerPrunesEventsDailyAndLogsSummary(t *testing.T) {
 	app := newWebAutoReleaseTestApp(t)
 	tracking := &pruneTrackingRepository{MemberRepository: app.MemberStore, removed: 7}
