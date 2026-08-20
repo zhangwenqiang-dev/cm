@@ -525,8 +525,14 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 			},
 		}, nil
 	}
-	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
-		return fakeStatus, nil
+	statusCalls := 0
+	var statusProfile Profile
+	var observedStatus AWSStatus
+	coordinator.Status = func(_ context.Context, profile Profile) (AWSStatus, error) {
+		statusCalls++
+		statusProfile = profile
+		observedStatus = fakeStatus
+		return observedStatus, nil
 	}
 	startDestroyCalls := 0
 	coordinator.StartDestroy = func(context.Context, Profile) (Job, error) {
@@ -546,6 +552,15 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 		t.Fatalf("notifications = %+v", *notifications)
 	}
 	wantCycle := releaseReminderCycleFromReminder(reminder)
+	if notification := (*notifications)[0]; notification.Reminder.ProfileName != reminder.ProfileName || notification.Reminder.AppleEmail != reminder.AppleEmail || notification.Reminder.HostID != reminder.HostID || releaseReminderCycleFromReminder(notification.Reminder) != wantCycle {
+		t.Fatalf("success notification reminder = %+v, want cycle %+v", notification.Reminder, wantCycle)
+	}
+	if statusCalls != 1 || statusProfile.Name != reminder.ProfileName || statusProfile.AWS.AccountEmail != reminder.AppleEmail || statusProfile.AWS.Region != "us-east-1" {
+		t.Fatalf("Status calls = %d, profile = %+v", statusCalls, statusProfile)
+	}
+	if len(observedStatus.Hosts) != 0 || len(observedStatus.Instances) != 0 || observedStatus.ElasticIP.AllocationID != "eipalloc-aaronjasonall-use1" || observedStatus.ElasticIP.AssociationID != "" || observedStatus.ElasticIP.InstanceID != "" {
+		t.Fatalf("observed status was not clean with retained EIP: %+v", observedStatus)
+	}
 	if store.cleanupCalls != 1 || len(store.completeCycles) != 1 || store.completeCycles[0] != wantCycle {
 		t.Fatalf("completed cycles = %+v, cleanup calls = %d, want exactly %+v", store.completeCycles, store.cleanupCalls, wantCycle)
 	}
@@ -560,9 +575,6 @@ func TestAutoReleaseRecoversSuccessfulLegacyDestroyJobAndNotifies(t *testing.T) 
 	}
 	if releasedEvents != 1 {
 		t.Fatalf("released events = %d, events = %+v", releasedEvents, events)
-	}
-	if len(fakeStatus.Hosts) != 0 || len(fakeStatus.Instances) != 0 || fakeStatus.ElasticIP.AllocationID != "eipalloc-aaronjasonall-use1" || fakeStatus.ElasticIP.AssociationID != "" || fakeStatus.ElasticIP.InstanceID != "" {
-		t.Fatalf("fake status was not retained and clean: %+v", fakeStatus)
 	}
 }
 
@@ -703,7 +715,6 @@ func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, r
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleanupCalls++
-	s.completeCycles = append(s.completeCycles, cycle)
 	if len(s.cleanupErrors) > 0 {
 		err := s.cleanupErrors[0]
 		s.cleanupErrors = s.cleanupErrors[1:]
@@ -720,6 +731,7 @@ func (s *autoReleaseTestStore) CompleteAutoRelease(cycle ReleaseReminderCycle, r
 	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateReleased
 	reminder.AutoReleaseLastError = ""
 	s.reminders[cycle.ProfileName] = reminder
+	s.completeCycles = append(s.completeCycles, cycle)
 	return reminder, nil
 }
 
