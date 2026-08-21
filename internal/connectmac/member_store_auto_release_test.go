@@ -793,7 +793,7 @@ func TestMySQLAutoReleaseNotificationMarkerSchemaAndLegacyEmptyValue(t *testing.
 		t.Fatalf("release reminder schema marker ordering missing from:\n%s", joinedSchema)
 	}
 
-	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
+	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_architecture, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
 	if mysqlReleaseReminderSelectColumns != wantColumns {
 		t.Fatalf("release reminder SELECT columns = %q, want %q", mysqlReleaseReminderSelectColumns, wantColumns)
 	}
@@ -834,9 +834,9 @@ func TestMySQLAutoReleaseNotificationMarkerSQLColumnAndArgumentOrdering(t *testi
 	reminder.CreatedAt = "2026-07-13T08:00:00Z"
 	reminder.UpdatedAt = "2026-07-13T09:01:00Z"
 
-	wantInsertQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	wantInsertQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_architecture, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	wantInsertArgs := []any{
-		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt,
+		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt,
 		reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName,
 		reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status,
 		reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt,
@@ -851,9 +851,9 @@ func TestMySQLAutoReleaseNotificationMarkerSQLColumnAndArgumentOrdering(t *testi
 		t.Fatalf("insert query/args = %q %#v, want %q %#v", insertRecorder.query, insertRecorder.args, wantInsertQuery, wantInsertArgs)
 	}
 
-	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
+	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_architecture = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 	wantUpdateArgs := []any{
-		reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail,
+		reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail,
 		reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt,
 		reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled,
 		reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt,
@@ -1256,7 +1256,7 @@ func (e *mysqlAutoReleaseRecordingExecer) Exec(query string, args ...any) error 
 }
 
 var mysqlAutoReleaseReminderColumnNames = []string{
-	"profile_name", "apple_email", "host_id", "host_created_at", "release_due_at", "owner_email", "owner_name",
+	"profile_name", "apple_email", "host_id", "host_architecture", "host_created_at", "release_due_at", "owner_email", "owner_name",
 	"last_extended_by_email", "last_extended_by_name", "last_extended_at", "last_notified_at", "released_at", "status",
 	"auto_release_enabled", "auto_release_at", "auto_release_started_at", "auto_release_last_attempt_at", "auto_release_notified_at",
 	"auto_release_attempts", "auto_release_last_error", "auto_release_state", "created_at", "updated_at",
@@ -1264,7 +1264,7 @@ var mysqlAutoReleaseReminderColumnNames = []string{
 
 func mysqlAutoReleaseReminderRows(reminder ReleaseReminder) *sqlmock.Rows {
 	return sqlmock.NewRows(mysqlAutoReleaseReminderColumnNames).AddRow(
-		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt,
+		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt,
 		reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName,
 		reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status,
 		reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt,
@@ -1294,7 +1294,7 @@ func expectMySQLAutoReleaseLockedReminder(mock sqlmock.Sqlmock, reminder Release
 func expectMySQLAutoReleaseReminderUpdate(mock sqlmock.Sqlmock, reminder ReleaseReminder) {
 	mock.ExpectExec(regexp.QuoteMeta(mysqlReleaseReminderUpdateQuery)).
 		WithArgs(
-			reminder.AppleEmail, reminder.HostID, reminder.HostCreatedAt, reminder.ReleaseDueAt,
+			reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt,
 			reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName,
 			reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status,
 			reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt,

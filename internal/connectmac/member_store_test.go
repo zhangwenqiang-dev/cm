@@ -252,7 +252,7 @@ func TestMemberStoreReleaseReminderLegacyJSONDefaultsAutoRelease(t *testing.T) {
 	if !ok {
 		t.Fatal("legacy reminder not found")
 	}
-	if reminder.AutoReleaseEnabled || reminder.AutoReleaseAt != "" || reminder.AutoReleaseAttempts != 0 || reminder.AutoReleaseState != "" {
+	if reminder.HostArchitecture != "" || reminder.AutoReleaseEnabled || reminder.AutoReleaseAt != "" || reminder.AutoReleaseAttempts != 0 || reminder.AutoReleaseState != "" {
 		t.Fatalf("legacy auto-release defaults = %+v", reminder)
 	}
 }
@@ -261,6 +261,7 @@ func TestMemberStoreReleaseReminderAutoReleaseRoundTrip(t *testing.T) {
 	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
 	want := ReleaseReminder{
 		ProfileName:              "apple-usw2",
+		HostArchitecture:         "arm64",
 		Status:                   ReleaseReminderStatusActive,
 		AutoReleaseEnabled:       true,
 		AutoReleaseAt:            "2026-07-02T08:00:00Z",
@@ -280,7 +281,7 @@ func TestMemberStoreReleaseReminderAutoReleaseRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("saved reminder not found")
 	}
-	if !got.AutoReleaseEnabled || got.AutoReleaseAt != want.AutoReleaseAt || got.AutoReleaseStartedAt != want.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != want.AutoReleaseLastAttemptAt || got.AutoReleaseAttempts != want.AutoReleaseAttempts || got.AutoReleaseLastError != want.AutoReleaseLastError || got.AutoReleaseState != want.AutoReleaseState {
+	if got.HostArchitecture != want.HostArchitecture || !got.AutoReleaseEnabled || got.AutoReleaseAt != want.AutoReleaseAt || got.AutoReleaseStartedAt != want.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != want.AutoReleaseLastAttemptAt || got.AutoReleaseAttempts != want.AutoReleaseAttempts || got.AutoReleaseLastError != want.AutoReleaseLastError || got.AutoReleaseState != want.AutoReleaseState {
 		t.Fatalf("auto-release round trip = %+v", got)
 	}
 }

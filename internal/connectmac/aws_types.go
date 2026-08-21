@@ -121,6 +121,17 @@ func IsIntelMacInstanceType(instanceType string) bool {
 	return instanceType == "mac1.metal"
 }
 
+func MacHostArchitecture(instanceType string) string {
+	instanceType = strings.TrimSpace(instanceType)
+	if !SupportedMacInstanceTypes[instanceType] {
+		return ""
+	}
+	if IsIntelMacInstanceType(instanceType) {
+		return "x86"
+	}
+	return "arm64"
+}
+
 func amiForInstanceType(cfg AWSConfig, instanceType string) string {
 	if IsIntelMacInstanceType(instanceType) {
 		return cfg.AMI.MacX86

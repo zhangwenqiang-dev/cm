@@ -483,12 +483,14 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 	}
 	now := time.Now()
 	hostID := ""
+	hostArchitecture := ""
 	hostCreatedAt := now.Format(time.RFC3339)
 	for _, host := range status.Hosts {
 		if host.HostID == "" || strings.EqualFold(host.State, "released") {
 			continue
 		}
 		hostID = host.HostID
+		hostArchitecture = MacHostArchitecture(host.InstanceType)
 		if strings.TrimSpace(host.CreatedAt) != "" {
 			hostCreatedAt = host.CreatedAt
 		}
@@ -501,6 +503,7 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
 		existing.OwnerEmail = owner.Owner.Email
 		existing.OwnerName = owner.Owner.Name
+		existing.HostArchitecture = hostArchitecture
 		return a.MemberStore.UpsertReleaseReminder(existing)
 	}
 	createdAt, parseErr := time.Parse(time.RFC3339, hostCreatedAt)
@@ -509,14 +512,15 @@ func (a App) finalizeWebAWSOpen(profile Profile, ownerEmail string, status AWSSt
 		hostCreatedAt = now.Format(time.RFC3339)
 	}
 	return a.MemberStore.UpsertReleaseReminder(ReleaseReminder{
-		ProfileName:   profile.Name,
-		AppleEmail:    profile.AWS.AccountEmail,
-		HostID:        hostID,
-		HostCreatedAt: hostCreatedAt,
-		ReleaseDueAt:  createdAt.Add(24 * time.Hour).Format(time.RFC3339),
-		OwnerEmail:    owner.Owner.Email,
-		OwnerName:     owner.Owner.Name,
-		Status:        ReleaseReminderStatusActive,
+		ProfileName:      profile.Name,
+		AppleEmail:       profile.AWS.AccountEmail,
+		HostID:           hostID,
+		HostArchitecture: hostArchitecture,
+		HostCreatedAt:    hostCreatedAt,
+		ReleaseDueAt:     createdAt.Add(24 * time.Hour).Format(time.RFC3339),
+		OwnerEmail:       owner.Owner.Email,
+		OwnerName:        owner.Owner.Name,
+		Status:           ReleaseReminderStatusActive,
 	})
 }
 
@@ -561,16 +565,16 @@ func (a App) notifyWebAWSLifecycleObserved(job Job, event string, reminder Relea
 		Attempt: job.LifecycleNotifyAttempts,
 	}
 	notification := WechatNotification{
-		Event:         event,
-		Profile:       reminder.ProfileName,
-		AppleEmail:    reminder.AppleEmail,
-		Owner:         displayNameEmail(reminder.OwnerName, reminder.OwnerEmail),
-		Operator:      operator,
-		HostID:        reminder.HostID,
-		HostCreatedAt: reminder.HostCreatedAt,
-		DueAt:         reminder.ReleaseDueAt,
-		Management:    true,
-		Description:   description,
+		Event:            event,
+		AppleEmail:       reminder.AppleEmail,
+		Owner:            displayNameEmail(reminder.OwnerName, reminder.OwnerEmail),
+		Operator:         operator,
+		HostID:           reminder.HostID,
+		HostArchitecture: reminder.HostArchitecture,
+		HostCreatedAt:    reminder.HostCreatedAt,
+		DueAt:            reminder.ReleaseDueAt,
+		Management:       true,
+		Description:      description,
 	}
 	send := func() (WechatNotifyResult, error) {
 		if a.WebAWSLifecycleNotifier != nil {

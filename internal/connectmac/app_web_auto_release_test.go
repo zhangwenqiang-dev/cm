@@ -2013,11 +2013,11 @@ func TestAppAutoReleaseSuccessNotificationUsesWechatWebhook(t *testing.T) {
 
 	app := newWebAutoReleaseTestApp(t)
 	coordinator := app.newAutoReleaseCoordinator("")
-	err := coordinator.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationSuccess, Reminder: ReleaseReminder{ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-1"}})
+	err := coordinator.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationSuccess, Reminder: ReleaseReminder{ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-1", HostArchitecture: "x86"}})
 	if err != nil {
 		t.Fatalf("notify: %v", err)
 	}
-	if !strings.Contains(markdown, "Mac 自动释放成功，Elastic IP 分配已保留") || !strings.Contains(markdown, "xcode-vnc") {
+	if !strings.Contains(markdown, "Mac 自动释放成功，Elastic IP 分配已保留") || !strings.Contains(markdown, "Apple：user@example.com") || !strings.Contains(markdown, "Host 架构类型：x86") || strings.Contains(markdown, "ConnectMac") || strings.Contains(markdown, "Profile：") || strings.Contains(markdown, "xcode-vnc") {
 		t.Fatalf("markdown = %q", markdown)
 	}
 }

@@ -24,16 +24,16 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 
 	notifier := WechatNotifier{WebhookURL: server.URL, WebBaseURL: "https://cm.example.com"}
 	result, err := notifier.Send(WechatNotification{
-		Event:         "open",
-		Profile:       "apple-usw2",
-		AppleEmail:    "apple@example.com",
-		Owner:         "Profile Owner",
-		Operator:      "Operation Actor",
-		HostID:        "h-123",
-		HostCreatedAt: "2026-07-16T08:03:24Z",
-		DueAt:         "2026-07-17T16:00:00Z",
-		Management:    true,
-		Description:   "打开成功",
+		Event:            "open",
+		AppleEmail:       "apple@example.com",
+		Owner:            "Profile Owner",
+		Operator:         "Operation Actor",
+		HostID:           "h-123",
+		HostArchitecture: "arm64",
+		HostCreatedAt:    "2026-07-16T08:03:24Z",
+		DueAt:            "2026-07-17T16:00:00Z",
+		Management:       true,
+		Description:      "打开成功",
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
@@ -50,10 +50,9 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 	markdown := got["markdown"].(map[string]interface{})
 	content := markdown["content"].(string)
 	for _, want := range []string{
-		"ConnectMac",
-		"apple-usw2",
 		"apple@example.com",
 		"操作人：Operation Actor",
+		"Host 架构类型：arm64",
 		"https://cm.example.com",
 		"Host 创建时间：2026-07-16 16:03:24（北京时间）",
 		"释放提醒时间：2026-07-18 00:00:00（北京时间）",
@@ -62,7 +61,7 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 			t.Fatalf("content missing %q:\n%s", want, content)
 		}
 	}
-	for _, forbidden := range []string{"负责人", "Profile Owner"} {
+	for _, forbidden := range []string{"ConnectMac", "Profile：", "apple-usw2", "负责人", "Profile Owner"} {
 		if strings.Contains(content, forbidden) {
 			t.Fatalf("content contains forbidden owner value %q:\n%s", forbidden, content)
 		}
@@ -74,13 +73,23 @@ func TestWechatNotifierSendsMarkdown(t *testing.T) {
 	}
 }
 
+func TestWechatNotifierOmitsHostArchitectureFromUnrelatedEvents(t *testing.T) {
+	notifier := WechatNotifier{}
+	for _, event := range []string{"extend", "due", "release", "auto-release-failure", "auto-release-failed"} {
+		content := notifier.markdown(WechatNotification{Event: event, HostArchitecture: "arm64"})
+		if strings.Contains(content, "Host 架构类型") {
+			t.Fatalf("event %q unexpectedly includes architecture: %s", event, content)
+		}
+	}
+}
+
 func TestWechatNotifierReturnsFailureMetadataWithoutLeakingBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`{"errcode":93000,"errmsg":"temporary failure","secret":"must-not-appear"}`))
 	}))
 	defer server.Close()
-	result, err := (WechatNotifier{WebhookURL: server.URL}).Send(WechatNotification{Event: "open", Profile: "p"})
+	result, err := (WechatNotifier{WebhookURL: server.URL}).Send(WechatNotification{Event: "open"})
 	if err == nil {
 		t.Fatal("send should fail")
 	}
@@ -130,7 +139,7 @@ func TestGeneralWechatDeliveryFailureIsSingleAttemptExhausted(t *testing.T) {
 
 func TestWechatNotifierMissingWebhookSkips(t *testing.T) {
 	notifier := WechatNotifier{}
-	result, err := notifier.Send(WechatNotification{Event: "due", Profile: "apple-usw2"})
+	result, err := notifier.Send(WechatNotification{Event: "due"})
 	if !errors.Is(err, errWechatWebhookNotConfigured) {
 		t.Fatalf("missing webhook error = %v", err)
 	}

@@ -30,16 +30,16 @@ type WechatNotifier struct {
 }
 
 type WechatNotification struct {
-	Event         string
-	Profile       string
-	AppleEmail    string
-	Owner         string
-	Operator      string
-	HostID        string
-	HostCreatedAt string
-	DueAt         string
-	Management    bool
-	Description   string
+	Event            string
+	AppleEmail       string
+	Owner            string
+	Operator         string
+	HostID           string
+	HostArchitecture string
+	HostCreatedAt    string
+	DueAt            string
+	Management       bool
+	Description      string
 }
 
 type WechatNotifyResult struct {
@@ -107,11 +107,13 @@ func (n WechatNotifier) markdown(notification WechatNotification) string {
 	if notification.Description != "" {
 		title = notification.Description
 	}
-	fmt.Fprintf(&b, "## ConnectMac %s\n", title)
-	writeWechatField(&b, "Profile", notification.Profile)
+	fmt.Fprintf(&b, "## %s\n", title)
 	writeWechatField(&b, "Apple", notification.AppleEmail)
 	writeWechatField(&b, "操作人", notification.Operator)
 	writeWechatField(&b, "Host", notification.HostID)
+	if notification.Event == "open" || notification.Event == "auto-release-success" {
+		writeWechatField(&b, "Host 架构类型", notification.HostArchitecture)
+	}
 	writeWechatField(&b, "Host 创建时间", formatBeijingDisplayTime(notification.HostCreatedAt))
 	writeWechatField(&b, "释放提醒时间", formatBeijingDisplayTime(notification.DueAt))
 	if notification.Management && strings.TrimSpace(n.WebBaseURL) != "" {

@@ -2308,6 +2308,7 @@ func (a App) afterConfirmedWebAWSAction(r *http.Request, configPath, command, pr
 func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile, owner PublicMember) error {
 	now := time.Now()
 	hostID := ""
+	hostArchitecture := ""
 	hostCreatedAt := now.Format(time.RFC3339)
 	if _, status, err := a.AWSService.StatusWithOptions(ctx, profile, AWSStatusOptions{IncludeTerminal: false}); err == nil {
 		for _, host := range status.Hosts {
@@ -2315,6 +2316,7 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 				continue
 			}
 			hostID = host.HostID
+			hostArchitecture = MacHostArchitecture(host.InstanceType)
 			if strings.TrimSpace(host.CreatedAt) != "" {
 				hostCreatedAt = host.CreatedAt
 			}
@@ -2328,6 +2330,7 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 	if ok && existing.HostID == hostID && existing.Status != ReleaseReminderStatusReleased {
 		existing.OwnerEmail = owner.Email
 		existing.OwnerName = owner.Name
+		existing.HostArchitecture = hostArchitecture
 		existing, err = a.MemberStore.UpsertReleaseReminder(existing)
 		if err != nil {
 			return err
@@ -2341,14 +2344,15 @@ func (a App) upsertReleaseReminderAfterOpen(ctx context.Context, profile Profile
 		hostCreatedAt = now.Format(time.RFC3339)
 	}
 	reminder := ReleaseReminder{
-		ProfileName:   profile.Name,
-		AppleEmail:    profile.AWS.AccountEmail,
-		HostID:        hostID,
-		HostCreatedAt: hostCreatedAt,
-		ReleaseDueAt:  createdAt.Add(24 * time.Hour).Format(time.RFC3339),
-		OwnerEmail:    owner.Email,
-		OwnerName:     owner.Name,
-		Status:        ReleaseReminderStatusActive,
+		ProfileName:      profile.Name,
+		AppleEmail:       profile.AWS.AccountEmail,
+		HostID:           hostID,
+		HostArchitecture: hostArchitecture,
+		HostCreatedAt:    hostCreatedAt,
+		ReleaseDueAt:     createdAt.Add(24 * time.Hour).Format(time.RFC3339),
+		OwnerEmail:       owner.Email,
+		OwnerName:        owner.Name,
+		Status:           ReleaseReminderStatusActive,
 	}
 	reminder, err = a.MemberStore.UpsertReleaseReminder(reminder)
 	if err != nil {
@@ -2461,16 +2465,16 @@ func (a App) notifyReleaseReminderWithDelivery(event string, reminder ReleaseRem
 		context.Source = "system"
 	}
 	notification := WechatNotification{
-		Event:         event,
-		Profile:       reminder.ProfileName,
-		AppleEmail:    reminder.AppleEmail,
-		Owner:         displayNameEmail(reminder.OwnerName, reminder.OwnerEmail),
-		Operator:      operator,
-		HostID:        reminder.HostID,
-		HostCreatedAt: reminder.HostCreatedAt,
-		DueAt:         reminder.ReleaseDueAt,
-		Management:    true,
-		Description:   description,
+		Event:            event,
+		AppleEmail:       reminder.AppleEmail,
+		Owner:            displayNameEmail(reminder.OwnerName, reminder.OwnerEmail),
+		Operator:         operator,
+		HostID:           reminder.HostID,
+		HostArchitecture: reminder.HostArchitecture,
+		HostCreatedAt:    reminder.HostCreatedAt,
+		DueAt:            reminder.ReleaseDueAt,
+		Management:       true,
+		Description:      description,
 	}
 	return a.deliverWechatNotification(context, func() (WechatNotifyResult, error) {
 		return NewWechatNotifierFromEnv().Send(notification)

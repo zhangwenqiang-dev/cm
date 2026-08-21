@@ -8,6 +8,23 @@ import (
 	"time"
 )
 
+func TestMacHostArchitecture(t *testing.T) {
+	for instanceType := range SupportedMacInstanceTypes {
+		want := "arm64"
+		if instanceType == "mac1.metal" {
+			want = "x86"
+		}
+		if got := MacHostArchitecture(instanceType); got != want {
+			t.Errorf("MacHostArchitecture(%q) = %q, want %q", instanceType, got, want)
+		}
+	}
+	for _, instanceType := range []string{"", "unknown.metal", " mac1.metal.invalid "} {
+		if got := MacHostArchitecture(instanceType); got != "" {
+			t.Errorf("MacHostArchitecture(%q) = %q, want empty", instanceType, got)
+		}
+	}
+}
+
 func TestBuildMacPlanSelectsARMDefault(t *testing.T) {
 	profile := validAWSProfile()
 	profile.AWS.InstanceTypePriority = nil

@@ -16,9 +16,10 @@ import (
 func TestWebAWSLifecycleStateTransitions(t *testing.T) {
 	ready := AWSStatus{
 		Hosts: []DedicatedHostStatus{{
-			HostID:    "h-1",
-			State:     "available",
-			CreatedAt: "2026-07-16T01:00:00Z",
+			HostID:       "h-1",
+			State:        "available",
+			InstanceType: "mac2-m2.metal",
+			CreatedAt:    "2026-07-16T01:00:00Z",
 		}},
 		Instances: []InstanceStatus{{
 			InstanceID:          "i-1",
@@ -37,20 +38,21 @@ func TestWebAWSLifecycleStateTransitions(t *testing.T) {
 	stopped := AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-1", PublicIP: "203.0.113.10"}}
 
 	tests := []struct {
-		name         string
-		command      string
-		jobStatus    JobStatus
-		awsStatus    AWSStatus
-		seedOwner    bool
-		seedReminder bool
-		wantState    JobLifecycleState
-		wantOwner    string
-		wantReleased bool
-		wantNotify   string
+		name             string
+		command          string
+		jobStatus        JobStatus
+		awsStatus        AWSStatus
+		seedOwner        bool
+		seedReminder     bool
+		wantState        JobLifecycleState
+		wantOwner        string
+		wantReleased     bool
+		wantNotify       string
+		wantArchitecture string
 	}{
 		{name: "open running remains pending", command: "open", jobStatus: JobStatusRunning, wantState: JobLifecyclePending},
 		{name: "open success waits for ready", command: "open", jobStatus: JobStatusSuccess, awsStatus: resources, wantState: JobLifecycleWaiting},
-		{name: "open success ready finalizes", command: "open", jobStatus: JobStatusSuccess, awsStatus: ready, wantState: JobLifecycleFinalized, wantOwner: "owner@example.com", wantNotify: "open"},
+		{name: "open success ready finalizes", command: "open", jobStatus: JobStatusSuccess, awsStatus: ready, wantState: JobLifecycleFinalized, wantOwner: "owner@example.com", wantNotify: "open", wantArchitecture: "arm64"},
 		{name: "failed open fails without success notification", command: "open", jobStatus: JobStatusFailed, wantState: JobLifecycleFailed},
 		{name: "interrupted open fails without success notification", command: "open", jobStatus: JobStatusInterrupted, wantState: JobLifecycleFailed},
 		{name: "destroy success waits for resources", command: "destroy", jobStatus: JobStatusSuccess, awsStatus: resources, seedOwner: true, seedReminder: true, wantState: JobLifecycleWaiting, wantOwner: "owner@example.com"},
@@ -105,6 +107,9 @@ func TestWebAWSLifecycleStateTransitions(t *testing.T) {
 			}
 			if tt.wantReleased && (!reminderOK || reminder.Status != ReleaseReminderStatusReleased) {
 				t.Fatalf("reminder = %+v ok=%t, want released", reminder, reminderOK)
+			}
+			if tt.wantArchitecture != "" && (!reminderOK || reminder.HostArchitecture != tt.wantArchitecture) {
+				t.Fatalf("reminder architecture = %q ok=%t, want %q", reminder.HostArchitecture, reminderOK, tt.wantArchitecture)
 			}
 			if tt.wantNotify == "" {
 				if len(notifications) != 0 {

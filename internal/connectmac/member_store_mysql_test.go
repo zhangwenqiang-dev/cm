@@ -118,32 +118,33 @@ func (r fakeMySQLReleaseReminderRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	if len(dest) != 23 {
+	if len(dest) != 24 {
 		return errors.New("unexpected release reminder scan destination count")
 	}
 	*dest[0].(*string) = r.reminder.ProfileName
 	*dest[1].(*string) = r.reminder.AppleEmail
 	*dest[2].(*string) = r.reminder.HostID
-	*dest[3].(*string) = r.reminder.HostCreatedAt
-	*dest[4].(*string) = r.reminder.ReleaseDueAt
-	*dest[5].(*string) = r.reminder.OwnerEmail
-	*dest[6].(*string) = r.reminder.OwnerName
-	*dest[7].(*string) = r.reminder.LastExtendedByEmail
-	*dest[8].(*string) = r.reminder.LastExtendedByName
-	*dest[9].(*string) = r.reminder.LastExtendedAt
-	*dest[10].(*string) = r.reminder.LastNotifiedAt
-	*dest[11].(*string) = r.reminder.ReleasedAt
-	*dest[12].(*string) = r.reminder.Status
-	*dest[13].(*bool) = r.reminder.AutoReleaseEnabled
-	*dest[14].(*string) = r.reminder.AutoReleaseAt
-	*dest[15].(*string) = r.reminder.AutoReleaseStartedAt
-	*dest[16].(*string) = r.reminder.AutoReleaseLastAttemptAt
-	*dest[17].(*string) = r.reminder.AutoReleaseNotifiedAt
-	*dest[18].(*int) = r.reminder.AutoReleaseAttempts
-	*dest[19].(*string) = r.reminder.AutoReleaseLastError
-	*dest[20].(*string) = r.reminder.AutoReleaseState
-	*dest[21].(*string) = r.reminder.CreatedAt
-	*dest[22].(*string) = r.reminder.UpdatedAt
+	*dest[3].(*string) = r.reminder.HostArchitecture
+	*dest[4].(*string) = r.reminder.HostCreatedAt
+	*dest[5].(*string) = r.reminder.ReleaseDueAt
+	*dest[6].(*string) = r.reminder.OwnerEmail
+	*dest[7].(*string) = r.reminder.OwnerName
+	*dest[8].(*string) = r.reminder.LastExtendedByEmail
+	*dest[9].(*string) = r.reminder.LastExtendedByName
+	*dest[10].(*string) = r.reminder.LastExtendedAt
+	*dest[11].(*string) = r.reminder.LastNotifiedAt
+	*dest[12].(*string) = r.reminder.ReleasedAt
+	*dest[13].(*string) = r.reminder.Status
+	*dest[14].(*bool) = r.reminder.AutoReleaseEnabled
+	*dest[15].(*string) = r.reminder.AutoReleaseAt
+	*dest[16].(*string) = r.reminder.AutoReleaseStartedAt
+	*dest[17].(*string) = r.reminder.AutoReleaseLastAttemptAt
+	*dest[18].(*string) = r.reminder.AutoReleaseNotifiedAt
+	*dest[19].(*int) = r.reminder.AutoReleaseAttempts
+	*dest[20].(*string) = r.reminder.AutoReleaseLastError
+	*dest[21].(*string) = r.reminder.AutoReleaseState
+	*dest[22].(*string) = r.reminder.CreatedAt
+	*dest[23].(*string) = r.reminder.UpdatedAt
 	return nil
 }
 
@@ -211,13 +212,44 @@ func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) e
 	}
 	switch query {
 	case mysqlReleaseReminderInsertQuery:
-		if len(args) != 23 {
+		if len(args) != 24 {
 			return fmt.Errorf("unexpected release reminder insert argument count: %d", len(args))
 		}
 		tx.written = ReleaseReminder{
 			ProfileName:              args[0].(string),
 			AppleEmail:               args[1].(string),
 			HostID:                   args[2].(string),
+			HostArchitecture:         args[3].(string),
+			HostCreatedAt:            args[4].(string),
+			ReleaseDueAt:             args[5].(string),
+			OwnerEmail:               args[6].(string),
+			OwnerName:                args[7].(string),
+			LastExtendedByEmail:      args[8].(string),
+			LastExtendedByName:       args[9].(string),
+			LastExtendedAt:           args[10].(string),
+			LastNotifiedAt:           args[11].(string),
+			ReleasedAt:               args[12].(string),
+			Status:                   args[13].(string),
+			AutoReleaseEnabled:       args[14].(bool),
+			AutoReleaseAt:            args[15].(string),
+			AutoReleaseStartedAt:     args[16].(string),
+			AutoReleaseLastAttemptAt: args[17].(string),
+			AutoReleaseNotifiedAt:    args[18].(string),
+			AutoReleaseAttempts:      args[19].(int),
+			AutoReleaseLastError:     args[20].(string),
+			AutoReleaseState:         args[21].(string),
+			CreatedAt:                args[22].(string),
+			UpdatedAt:                args[23].(string),
+		}
+	case mysqlReleaseReminderUpdateQuery:
+		if len(args) != 23 {
+			return fmt.Errorf("unexpected release reminder update argument count: %d", len(args))
+		}
+		tx.written = ReleaseReminder{
+			ProfileName:              args[22].(string),
+			AppleEmail:               args[0].(string),
+			HostID:                   args[1].(string),
+			HostArchitecture:         args[2].(string),
 			HostCreatedAt:            args[3].(string),
 			ReleaseDueAt:             args[4].(string),
 			OwnerEmail:               args[5].(string),
@@ -236,36 +268,7 @@ func (tx *fakeMySQLReleaseReminderTransaction) Exec(query string, args ...any) e
 			AutoReleaseAttempts:      args[18].(int),
 			AutoReleaseLastError:     args[19].(string),
 			AutoReleaseState:         args[20].(string),
-			CreatedAt:                args[21].(string),
-			UpdatedAt:                args[22].(string),
-		}
-	case mysqlReleaseReminderUpdateQuery:
-		if len(args) != 22 {
-			return fmt.Errorf("unexpected release reminder update argument count: %d", len(args))
-		}
-		tx.written = ReleaseReminder{
-			ProfileName:              args[21].(string),
-			AppleEmail:               args[0].(string),
-			HostID:                   args[1].(string),
-			HostCreatedAt:            args[2].(string),
-			ReleaseDueAt:             args[3].(string),
-			OwnerEmail:               args[4].(string),
-			OwnerName:                args[5].(string),
-			LastExtendedByEmail:      args[6].(string),
-			LastExtendedByName:       args[7].(string),
-			LastExtendedAt:           args[8].(string),
-			LastNotifiedAt:           args[9].(string),
-			ReleasedAt:               args[10].(string),
-			Status:                   args[11].(string),
-			AutoReleaseEnabled:       args[12].(bool),
-			AutoReleaseAt:            args[13].(string),
-			AutoReleaseStartedAt:     args[14].(string),
-			AutoReleaseLastAttemptAt: args[15].(string),
-			AutoReleaseNotifiedAt:    args[16].(string),
-			AutoReleaseAttempts:      args[17].(int),
-			AutoReleaseLastError:     args[18].(string),
-			AutoReleaseState:         args[19].(string),
-			UpdatedAt:                args[20].(string),
+			UpdatedAt:                args[21].(string),
 		}
 		if row, ok := tx.row.(fakeMySQLReleaseReminderRow); ok {
 			tx.written.CreatedAt = row.reminder.CreatedAt
@@ -286,6 +289,7 @@ func (tx *fakeMySQLReleaseReminderTransaction) Rollback() error {
 
 func TestMySQLReleaseReminderAutoReleaseSchemaMigrations(t *testing.T) {
 	wantColumns := []string{
+		"host_architecture",
 		"auto_release_enabled",
 		"auto_release_at",
 		"auto_release_started_at",
@@ -944,7 +948,7 @@ func mysqlTransferRows(record TransferRecord) *sqlmock.Rows {
 }
 
 func TestMySQLReleaseReminderSelectColumnsIncludeAutoReleaseState(t *testing.T) {
-	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
+	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_architecture, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
 	if mysqlReleaseReminderSelectColumns != wantColumns {
 		t.Fatalf("release reminder SELECT columns = %q, want %q", mysqlReleaseReminderSelectColumns, wantColumns)
 	}
@@ -1038,6 +1042,7 @@ func TestMySQLSaveReleaseReminderInsertRoundTripsThroughScan(t *testing.T) {
 		ProfileName:              "apple-usw2",
 		AppleEmail:               "apple@example.com",
 		HostID:                   "h-123",
+		HostArchitecture:         "arm64",
 		HostCreatedAt:            "2026-07-01T08:00:00Z",
 		ReleaseDueAt:             "2026-07-02T08:00:00Z",
 		OwnerEmail:               "owner@example.com",
@@ -1063,12 +1068,12 @@ func TestMySQLSaveReleaseReminderInsertRoundTripsThroughScan(t *testing.T) {
 	if err := insertMySQLReleaseReminder(tx, want); err != nil {
 		t.Fatalf("insert reminder: %v", err)
 	}
-	wantQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	wantQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_architecture, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if tx.execQuery != wantQuery {
 		t.Fatalf("INSERT query = %q, want %q", tx.execQuery, wantQuery)
 	}
-	if len(tx.execArgs) != 23 {
-		t.Fatalf("INSERT arg count = %d, want 23", len(tx.execArgs))
+	if len(tx.execArgs) != 24 {
+		t.Fatalf("INSERT arg count = %d, want 24", len(tx.execArgs))
 	}
 	var got ReleaseReminder
 	if err := scanMySQLReleaseReminder(fakeMySQLReleaseReminderRow{reminder: tx.written}, &got); err != nil {
@@ -1784,10 +1789,10 @@ func TestMySQLUpdateReleaseReminderSelectScanAndWriteRoundTrip(t *testing.T) {
 	if !strings.HasPrefix(tx.execQuery, "UPDATE cm_release_reminders SET ") {
 		t.Fatalf("UPDATE query = %q", tx.execQuery)
 	}
-	if len(tx.execArgs) != 22 {
-		t.Fatalf("UPDATE arg count = %d, want 22", len(tx.execArgs))
+	if len(tx.execArgs) != 23 {
+		t.Fatalf("UPDATE arg count = %d, want 23", len(tx.execArgs))
 	}
-	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
+	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_architecture = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 	if tx.execQuery != wantUpdateQuery {
 		t.Fatalf("UPDATE query = %q, want %q", tx.execQuery, wantUpdateQuery)
 	}

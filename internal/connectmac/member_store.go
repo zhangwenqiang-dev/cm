@@ -217,6 +217,7 @@ type ReleaseReminder struct {
 	ProfileName              string `json:"profile_name"`
 	AppleEmail               string `json:"apple_email,omitempty"`
 	HostID                   string `json:"host_id,omitempty"`
+	HostArchitecture         string `json:"host_architecture,omitempty"`
 	HostCreatedAt            string `json:"host_created_at,omitempty"`
 	ReleaseDueAt             string `json:"release_due_at,omitempty"`
 	OwnerEmail               string `json:"owner_email,omitempty"`
