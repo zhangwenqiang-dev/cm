@@ -528,6 +528,8 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 				event, description = "auto-release-failed", "自动释放已停止："+notification.Error
 			case AutoReleaseNotificationSuccess:
 				event, description = "auto-release-success", "Mac 自动释放成功，Elastic IP 分配已保留"
+			case AutoReleaseNotificationStalled:
+				event, description = "auto-release-stalled", "Host 释放状态超过 24 小时仍未完成，系统将继续检查，不会重复提交释放。"
 			}
 			return a.notifyReleaseReminderWithDelivery(event, notification.Reminder, "", description, wechatDeliveryContext{
 				Attempt:    notification.Attempt,
@@ -539,7 +541,7 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 		Emit: func(event AutoReleaseEvent) {
 			level := "info"
 			errorCode := ""
-			if event.Action == "retrying" || event.Action == "failed" || event.Action == "notification-retrying" || event.Action == "cleanup-retrying" {
+			if event.Action == "retrying" || event.Action == "failed" || event.Action == "notification-retrying" || event.Action == "cleanup-retrying" || event.Action == "convergence-read-error" {
 				level = "error"
 				errorCode = classifyOperationalError(errors.New(event.Message)).Code
 			}
@@ -1575,6 +1577,8 @@ func clearReleaseReminderAutoCycle(reminder ReleaseReminder) ReleaseReminder {
 	reminder.AutoReleaseAt = ""
 	reminder.AutoReleaseStartedAt = ""
 	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseAcceptedAt = ""
+	reminder.AutoReleaseStalledNotifiedAt = ""
 	reminder.AutoReleaseAttempts = 0
 	reminder.AutoReleaseLastError = ""
 	reminder.AutoReleaseState = ""

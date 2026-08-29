@@ -26,6 +26,7 @@ const (
 	AutoReleaseNotificationFirstFailure AutoReleaseNotificationKind = "first_failure"
 	AutoReleaseNotificationFinalFailure AutoReleaseNotificationKind = "final_failure"
 	AutoReleaseNotificationSuccess      AutoReleaseNotificationKind = "success"
+	AutoReleaseNotificationStalled      AutoReleaseNotificationKind = "stalled"
 )
 
 type AutoReleaseNotification struct {
@@ -52,6 +53,8 @@ type AutoReleaseStore interface {
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error)
+	MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, bool, error)
+	ClaimAutoReleaseConvergenceStatusCheck(cycle ReleaseReminderCycle, attemptedAt string, interval time.Duration) (ReleaseReminder, bool, error)
 	MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 }
@@ -409,6 +412,36 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 }
 
 func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	acceptedAt, err := parseAutoReleaseTime(reminder.AutoReleaseAcceptedAt)
+	if err != nil {
+		return c.recordConvergenceReadFailure(reminder, fmt.Errorf("invalid automatic release acceptance time: %w", err))
+	}
+	stalled := !now.Before(acceptedAt.Add(AutoReleaseConvergenceWindow))
+	if stalled && reminder.AutoReleaseStalledNotifiedAt == "" {
+		if c.Notify != nil {
+			if err := c.Notify(AutoReleaseNotification{
+				Kind: AutoReleaseNotificationStalled, Reminder: reminder,
+				Attempt: reminder.AutoReleaseAttempts, CycleID: autoReleaseCycleID(reminder),
+			}); err != nil {
+				return sanitizeOperationalError(err)
+			}
+		}
+		marked, transitioned, err := c.Store.MarkAutoReleaseStalledNotified(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		reminder = marked
+		if transitioned {
+			c.emit("convergence-stalled", reminder, reminder.AutoReleaseAttempts, "accepted host release remains incomplete after 24 hours")
+		}
+	}
+	if stalled {
+		claimed, ok, err := c.Store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339), AutoReleaseStalledStatusInterval)
+		if err != nil || !ok {
+			return err
+		}
+		reminder = claimed
+	}
 	profile, err := c.resolveAndValidateProfile(ctx, reminder)
 	if err != nil {
 		if autoReleaseErrorCategoryOf(err) == autoReleaseErrorTerminal {
@@ -821,12 +854,13 @@ func (c *AutoReleaseCoordinator) blockPendingCompletion(reminder ReleaseReminder
 
 func releaseReminderCycleFromReminder(reminder ReleaseReminder) ReleaseReminderCycle {
 	return ReleaseReminderCycle{
-		ProfileName:          reminder.ProfileName,
-		AutoReleaseAt:        reminder.AutoReleaseAt,
-		AutoReleaseStartedAt: reminder.AutoReleaseStartedAt,
-		HostID:               reminder.HostID,
-		AppleEmail:           reminder.AppleEmail,
-		OwnerEmail:           reminder.OwnerEmail,
+		ProfileName:           reminder.ProfileName,
+		AutoReleaseAt:         reminder.AutoReleaseAt,
+		AutoReleaseStartedAt:  reminder.AutoReleaseStartedAt,
+		AutoReleaseAcceptedAt: reminder.AutoReleaseAcceptedAt,
+		HostID:                reminder.HostID,
+		AppleEmail:            reminder.AppleEmail,
+		OwnerEmail:            reminder.OwnerEmail,
 	}
 }
 

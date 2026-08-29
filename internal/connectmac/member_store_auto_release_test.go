@@ -140,6 +140,96 @@ func TestMySQLMarksAutoReleaseConvergenceAcceptedAtomically(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseStalledMarkerAndStatusClaimPersistAtomically(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "members.json")
+	store := MemberStore{Path: path, Now: func() time.Time { return now }}
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-24 * time.Hour).Format(time.RFC3339)
+	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatal(err)
+	}
+	marked, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), "")
+	if err != nil || !transitioned || marked.AutoReleaseStalledNotifiedAt != now.Format(time.RFC3339) {
+		t.Fatalf("marked=%+v transitioned=%t err=%v", marked, transitioned, err)
+	}
+	claimed, claimedOK, err := store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycle(reminder), "", AutoReleaseStalledStatusInterval)
+	if err != nil || !claimedOK || claimed.AutoReleaseLastAttemptAt != now.Format(time.RFC3339) {
+		t.Fatalf("claimed=%+v ok=%t err=%v", claimed, claimedOK, err)
+	}
+	reloaded, ok, err := store.ReleaseReminder(reminder.ProfileName)
+	if err != nil || !ok || reloaded.AutoReleaseStalledNotifiedAt == "" || reloaded.AutoReleaseLastAttemptAt == "" {
+		t.Fatalf("reloaded=%+v ok=%t err=%v", reloaded, ok, err)
+	}
+	if _, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), now.Add(time.Minute).Format(time.RFC3339)); err != nil || transitioned {
+		t.Fatalf("repeat transition=%t err=%v", transitioned, err)
+	}
+	if _, claimedOK, err := store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycle(reminder), now.Add(time.Minute).Format(time.RFC3339), AutoReleaseStalledStatusInterval); err != nil || claimedOK {
+		t.Fatalf("repeat claim=%t err=%v", claimedOK, err)
+	}
+}
+
+func TestAutoReleaseAcceptedStoreOperationsRejectInvalidCycleState(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		mutate func(*ReleaseReminder, *ReleaseReminderCycle)
+	}{
+		{name: "stale cycle", mutate: func(_ *ReleaseReminder, cycle *ReleaseReminderCycle) { cycle.HostID = "stale" }},
+		{name: "stale accepted at", mutate: func(_ *ReleaseReminder, cycle *ReleaseReminderCycle) {
+			cycle.AutoReleaseAcceptedAt = "2026-08-20T08:59:59Z"
+		}},
+		{name: "disabled", mutate: func(reminder *ReleaseReminder, _ *ReleaseReminderCycle) { reminder.AutoReleaseEnabled = false }},
+		{name: "non-running", mutate: func(reminder *ReleaseReminder, _ *ReleaseReminderCycle) {
+			reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "members.json")
+			store := MemberStore{Path: path, Now: func() time.Time { return now }}
+			reminder := runningAutoReleaseReminder("owner@example.com")
+			reminder.AutoReleaseAcceptedAt = now.Add(-24 * time.Hour).Format(time.RFC3339)
+			cycle := releaseReminderCycle(reminder)
+			test.mutate(&reminder, &cycle)
+			if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := store.MarkAutoReleaseStalledNotified(cycle, ""); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+				t.Fatalf("marker err=%v", err)
+			}
+			if _, _, err := store.ClaimAutoReleaseConvergenceStatusCheck(cycle, "", AutoReleaseStalledStatusInterval); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+				t.Fatalf("claim err=%v", err)
+			}
+		})
+	}
+}
+
+func TestMySQLMarksAutoReleaseStalledNotificationAtomically(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-24 * time.Hour).Format(time.RFC3339)
+	want := reminder
+	want.AutoReleaseStalledNotifiedAt = now.Format(time.RFC3339)
+	want.UpdatedAt = now.Format(time.RFC3339)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := mysqlAutoReleaseTestStore(db, now)
+	mock.ExpectBegin()
+	expectMySQLAutoReleaseLockedReminder(mock, reminder)
+	expectMySQLAutoReleaseReminderUpdate(mock, want)
+	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).WithArgs(mysqlStoreLockName).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	got, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), "")
+	if err != nil || !transitioned || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%+v transitioned=%t err=%v", got, transitioned, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMySQLConvergenceAcceptanceIsIdempotentAndRejectsStaleCycle(t *testing.T) {
 	now := time.Date(2026, 8, 20, 9, 5, 0, 0, time.UTC)
 	reminder := runningAutoReleaseReminder("owner@example.com")
@@ -923,12 +1013,13 @@ func runningAutoReleaseReminder(ownerEmail string) ReleaseReminder {
 
 func releaseReminderCycle(reminder ReleaseReminder) ReleaseReminderCycle {
 	return ReleaseReminderCycle{
-		ProfileName:          reminder.ProfileName,
-		AutoReleaseAt:        reminder.AutoReleaseAt,
-		AutoReleaseStartedAt: reminder.AutoReleaseStartedAt,
-		HostID:               reminder.HostID,
-		AppleEmail:           reminder.AppleEmail,
-		OwnerEmail:           reminder.OwnerEmail,
+		ProfileName:           reminder.ProfileName,
+		AutoReleaseAt:         reminder.AutoReleaseAt,
+		AutoReleaseStartedAt:  reminder.AutoReleaseStartedAt,
+		AutoReleaseAcceptedAt: reminder.AutoReleaseAcceptedAt,
+		HostID:                reminder.HostID,
+		AppleEmail:            reminder.AppleEmail,
+		OwnerEmail:            reminder.OwnerEmail,
 	}
 }
 

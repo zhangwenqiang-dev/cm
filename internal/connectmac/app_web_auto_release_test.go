@@ -2022,6 +2022,59 @@ func TestAppAutoReleaseSuccessNotificationUsesWechatWebhook(t *testing.T) {
 	}
 }
 
+func TestWechatAutoReleaseStalledMappingIsExact(t *testing.T) {
+	var markdown string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Markdown struct {
+				Content string `json:"content"`
+			} `json:"markdown"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		markdown = payload.Markdown.Content
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+	t.Setenv(envWechatWebhookURL, server.URL)
+	app := newWebAutoReleaseTestApp(t)
+	coordinator := app.newAutoReleaseCoordinator("")
+	reminder := ReleaseReminder{ProfileName: "xcode-vnc", AppleEmail: "user@example.com", HostID: "h-1"}
+	if err := coordinator.Notify(AutoReleaseNotification{Kind: AutoReleaseNotificationStalled, Reminder: reminder, CycleID: "cycle-1"}); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	want := "Host 释放状态超过 24 小时仍未完成，系统将继续检查，不会重复提交释放。"
+	if !strings.HasPrefix(markdown, "## "+want+"\n") {
+		t.Fatalf("markdown=%q", markdown)
+	}
+	events, err := app.MemberStore.RecentEvents("", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, event := range events {
+		if event.Action == "wechat.sent" && strings.Contains(event.Message, "notification_event=auto-release-stalled") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("sent audit count=%d events=%+v", count, events)
+	}
+}
+
+func TestAppWebAutoReleaseResetClearsAcceptedAndStalledMarkers(t *testing.T) {
+	reminder := ReleaseReminder{
+		AutoReleaseAt: "at", AutoReleaseStartedAt: "started", AutoReleaseLastAttemptAt: "attempt",
+		AutoReleaseAcceptedAt: "accepted", AutoReleaseStalledNotifiedAt: "stalled", AutoReleaseNotifiedAt: "notified",
+		AutoReleaseAttempts: 2, AutoReleaseLastError: "error", AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled,
+	}
+	got := clearReleaseReminderAutoCycle(reminder)
+	if got.AutoReleaseAcceptedAt != "" || got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseAt != "" || got.AutoReleaseState != "" {
+		t.Fatalf("reset=%+v", got)
+	}
+}
+
 func TestAppWebReleaseReminderExtendBoundaryAndCycleReset(t *testing.T) {
 	serverNow := time.Date(2026, 7, 1, 12, 30, 45, 0, time.UTC)
 	for _, test := range []struct {
