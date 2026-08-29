@@ -14,7 +14,7 @@ import (
 
 func TestAcceptedReleaseConvergence(t *testing.T) {
 	baseReminder := ReleaseReminder{HostID: "h-1"}
-	baseJob := Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-1"}}
+	baseJob := Job{Status: JobStatusSuccess, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-1"}}
 	baseStatus := AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "pending"}}}
 
 	tests := []struct {
@@ -25,9 +25,11 @@ func TestAcceptedReleaseConvergence(t *testing.T) {
 		want     bool
 	}{
 		{name: "structured success", reminder: baseReminder, job: baseJob, status: baseStatus, want: true},
-		{name: "structured deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleasedHosts: []string{"h-other", "h-1"}}, status: baseStatus, want: true},
+		{name: "structured deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-other", "h-1"}}, status: baseStatus, want: true},
 		{name: "legacy success", reminder: baseReminder, job: Job{Status: JobStatusSuccess}, status: baseStatus, want: true},
 		{name: "legacy deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred}, status: baseStatus, want: true},
+		{name: "modern success without accepted host", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleaseEvidenceRecorded: true}, status: baseStatus},
+		{name: "modern deferred host transition without accepted host", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleaseEvidenceRecorded: true}, status: baseStatus},
 		{name: "retained unassociated EIP", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, ElasticIP: ElasticIP{AllocationID: "eipalloc-retained", PublicIP: "203.0.113.10"}}, want: true},
 		{name: "remaining instance", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, Instances: []InstanceStatus{{InstanceID: "i-1"}}}},
 		{name: "no host", reminder: baseReminder, job: baseJob, status: AWSStatus{}},
@@ -38,12 +40,15 @@ func TestAcceptedReleaseConvergence(t *testing.T) {
 		{name: "blank host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1"}}}},
 		{name: "unknown host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "unknown"}}}},
 		{name: "released host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "released"}}}},
+		{name: "padded host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: " pending "}}}},
 		{name: "blank reminder host", reminder: ReleaseReminder{}, job: baseJob, status: baseStatus},
+		{name: "padded reminder host", reminder: ReleaseReminder{HostID: " h-1 "}, job: baseJob, status: baseStatus},
 		{name: "blank status host", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{State: "pending"}}}},
+		{name: "padded status host", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: " h-1 ", State: "pending"}}}},
 		{name: "mismatched host", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-2", State: "pending"}}}},
 		{name: "failed job", reminder: baseReminder, job: Job{Status: JobStatusFailed, ReleasedHosts: []string{"h-1"}}, status: baseStatus},
 		{name: "running job", reminder: baseReminder, job: Job{Status: JobStatusRunning, ReleasedHosts: []string{"h-1"}}, status: baseStatus},
-		{name: "structured release excludes host", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-other"}}, status: baseStatus},
+		{name: "structured release excludes host", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-other"}}, status: baseStatus},
 	}
 
 	for _, test := range tests {

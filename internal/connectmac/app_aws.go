@@ -381,6 +381,7 @@ func (a App) runAWSDestroy(ctx context.Context, profile Profile, plan MacPlan, c
 	_, result, err := service.Destroy(ctx, profile)
 	if err != nil {
 		outcome := autoReleaseJobOutcome(err, true, "destroy")
+		outcome.ReleaseEvidenceRecorded = true
 		outcome.ReleasedHosts = append([]string(nil), result.ReleasedHosts...)
 		_ = writeCurrentJobOutcome(outcome)
 		var partial AWSDestroyPartialError
@@ -397,9 +398,9 @@ func (a App) runAWSDestroy(ctx context.Context, profile Profile, plan MacPlan, c
 	a.printAWSDestroyFinalStatus(ctx, profile)
 	if len(result.DeferredHosts) > 0 {
 		reason := fmt.Sprintf("AWS destroy deferred for %d dedicated host transition(s)", len(result.DeferredHosts))
-		_ = writeCurrentJobOutcome(JobOutcome{ErrorCategory: JobErrorCategoryRecoverable, ErrorCode: "host_transition", Reason: reason, Deferred: true, ReleasedHosts: append([]string(nil), result.ReleasedHosts...)})
+		_ = writeCurrentJobOutcome(JobOutcome{ErrorCategory: JobErrorCategoryRecoverable, ErrorCode: "host_transition", Reason: reason, Deferred: true, ReleaseEvidenceRecorded: true, ReleasedHosts: append([]string(nil), result.ReleasedHosts...)})
 	} else {
-		_ = writeCurrentJobOutcome(JobOutcome{ReleasedHosts: append([]string(nil), result.ReleasedHosts...)})
+		_ = writeCurrentJobOutcome(JobOutcome{ReleaseEvidenceRecorded: true, ReleasedHosts: append([]string(nil), result.ReleasedHosts...)})
 	}
 	return 0
 }

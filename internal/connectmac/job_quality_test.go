@@ -870,10 +870,10 @@ func TestJobManagerPersistsStructuredChildOutcome(t *testing.T) {
 	}
 }
 
-func TestJobOutcomeRoundTripsReleasedHosts(t *testing.T) {
+func TestJobOutcomeRoundTripsReleaseEvidence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outcome.json")
 	t.Setenv(jobOutcomePathEnv, path)
-	want := JobOutcome{ReleasedHosts: []string{"h-accepted-1", "h-accepted-2"}}
+	want := JobOutcome{ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-accepted-1", "h-accepted-2"}}
 	if err := writeCurrentJobOutcome(want); err != nil {
 		t.Fatalf("write outcome: %v", err)
 	}
@@ -881,8 +881,8 @@ func TestJobOutcomeRoundTripsReleasedHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read outcome: %v", err)
 	}
-	if strings.Join(got.ReleasedHosts, ",") != strings.Join(want.ReleasedHosts, ",") {
-		t.Fatalf("released hosts = %v, want %v", got.ReleasedHosts, want.ReleasedHosts)
+	if !got.ReleaseEvidenceRecorded || strings.Join(got.ReleasedHosts, ",") != strings.Join(want.ReleasedHosts, ",") {
+		t.Fatalf("release evidence = %+v, want %+v", got, want)
 	}
 }
 
@@ -902,24 +902,36 @@ func TestJobManagerFinishRunJobPersistsReleasedHostsWithoutAliasing(t *testing.T
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	outcome := &JobOutcome{ReleasedHosts: []string{"h-accepted"}}
+	outcome := &JobOutcome{ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-accepted"}}
 	completed, err := manager.finishRunJob(job.ID, JobStatusSuccess, nil, nil, outcome)
 	if err != nil {
 		t.Fatalf("finish job: %v", err)
 	}
 	outcome.ReleasedHosts[0] = "h-mutated"
-	if strings.Join(completed.ReleasedHosts, ",") != "h-accepted" {
+	if !completed.ReleaseEvidenceRecorded || strings.Join(completed.ReleasedHosts, ",") != "h-accepted" {
 		t.Fatalf("completed released hosts aliased outcome: %v", completed.ReleasedHosts)
 	}
 	persisted, err := manager.loadRaw(job.ID)
 	if err != nil {
 		t.Fatalf("load completed job: %v", err)
 	}
-	if strings.Join(persisted.ReleasedHosts, ",") != "h-accepted" || persisted.OutcomePath != "" {
+	if !persisted.ReleaseEvidenceRecorded || strings.Join(persisted.ReleasedHosts, ",") != "h-accepted" || persisted.OutcomePath != "" {
 		t.Fatalf("persisted job = %+v", persisted)
 	}
 	if _, err := os.Stat(outcomePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("outcome file still exists: %v", err)
+	}
+}
+
+func TestJobManagerApplyPersistedOutcomeIngestsReleaseEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(path, []byte(`{"release_evidence_recorded":true,"released_hosts":["h-accepted"]}`), 0o600); err != nil {
+		t.Fatalf("write outcome: %v", err)
+	}
+	job := Job{OutcomePath: path}
+	NewJobManager(t.TempDir()).applyPersistedOutcome(&job)
+	if !job.ReleaseEvidenceRecorded || strings.Join(job.ReleasedHosts, ",") != "h-accepted" {
+		t.Fatalf("ingested job = %+v", job)
 	}
 }
 
@@ -928,12 +940,19 @@ func TestDestroyJobPersistsAcceptedReleaseHosts(t *testing.T) {
 		name         string
 		fake         *fakeAWSClient
 		wantDeferred bool
+		wantHosts    string
 	}{
 		{
 			name: "complete",
 			fake: &fakeAWSClient{status: AWSStatus{
 				Hosts: []DedicatedHostStatus{{HostID: "h-complete", State: "available", Tags: managedTestTags()}},
 			}},
+			wantHosts: "h-complete",
+		},
+		{
+			name:      "complete without host",
+			fake:      &fakeAWSClient{},
+			wantHosts: "",
 		},
 		{
 			name: "deferred after accepted release",
@@ -944,6 +963,7 @@ func TestDestroyJobPersistsAcceptedReleaseHosts(t *testing.T) {
 				},
 			}, releaseErrs: []error{nil}, releaseErr: errors.New("host transition is still in progress")},
 			wantDeferred: true,
+			wantHosts:    "h-accepted",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -966,7 +986,7 @@ func TestDestroyJobPersistsAcceptedReleaseHosts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read outcome: %v", err)
 			}
-			if strings.Join(outcome.ReleasedHosts, ",") != map[bool]string{false: "h-complete", true: "h-accepted"}[test.wantDeferred] || outcome.Deferred != test.wantDeferred {
+			if !outcome.ReleaseEvidenceRecorded || strings.Join(outcome.ReleasedHosts, ",") != test.wantHosts || outcome.Deferred != test.wantDeferred {
 				t.Fatalf("outcome = %+v", outcome)
 			}
 		})
@@ -998,7 +1018,7 @@ func TestDestroyJobPersistsAcceptedReleaseHostsOnPartialError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read outcome: %v", err)
 	}
-	if strings.Join(outcome.ReleasedHosts, ",") != "h-accepted" {
+	if !outcome.ReleaseEvidenceRecorded || strings.Join(outcome.ReleasedHosts, ",") != "h-accepted" {
 		t.Fatalf("released hosts = %v, want accepted host", outcome.ReleasedHosts)
 	}
 	if outcome.ErrorCategory != JobErrorCategoryRecoverable || outcome.ErrorCode != "destroy" || outcome.Deferred {

@@ -63,11 +63,12 @@ const (
 )
 
 type JobOutcome struct {
-	ErrorCategory JobErrorCategory `json:"error_category,omitempty"`
-	ErrorCode     string           `json:"error_code,omitempty"`
-	Reason        string           `json:"reason,omitempty"`
-	Deferred      bool             `json:"deferred,omitempty"`
-	ReleasedHosts []string         `json:"released_hosts,omitempty"`
+	ErrorCategory           JobErrorCategory `json:"error_category,omitempty"`
+	ErrorCode               string           `json:"error_code,omitempty"`
+	Reason                  string           `json:"reason,omitempty"`
+	Deferred                bool             `json:"deferred,omitempty"`
+	ReleaseEvidenceRecorded bool             `json:"release_evidence_recorded,omitempty"`
+	ReleasedHosts           []string         `json:"released_hosts,omitempty"`
 }
 
 type Job struct {
@@ -92,6 +93,7 @@ type Job struct {
 	LastError                        string            `json:"last_error,omitempty"`
 	ErrorCategory                    JobErrorCategory  `json:"error_category,omitempty"`
 	ErrorCode                        string            `json:"error_code,omitempty"`
+	ReleaseEvidenceRecorded          bool              `json:"release_evidence_recorded,omitempty"`
 	ReleasedHosts                    []string          `json:"released_hosts,omitempty"`
 	OutcomePath                      string            `json:"outcome_path,omitempty"`
 	CleanupPaths                     []string          `json:"cleanup_paths,omitempty"`
@@ -865,6 +867,7 @@ func (m JobManager) finishRunJob(id string, status JobStatus, exitCode *int, run
 		if outcome != nil {
 			job.ErrorCategory = outcome.ErrorCategory
 			job.ErrorCode = outcome.ErrorCode
+			job.ReleaseEvidenceRecorded = outcome.ReleaseEvidenceRecorded
 			job.ReleasedHosts = append([]string(nil), outcome.ReleasedHosts...)
 			if outcome.Reason != "" {
 				job.LastError = outcome.Reason
@@ -969,6 +972,7 @@ func (m JobManager) applyPersistedOutcome(job *Job) {
 	}
 	job.ErrorCategory = outcome.ErrorCategory
 	job.ErrorCode = outcome.ErrorCode
+	job.ReleaseEvidenceRecorded = outcome.ReleaseEvidenceRecorded
 	job.ReleasedHosts = append([]string(nil), outcome.ReleasedHosts...)
 	if outcome.Reason != "" {
 		job.LastError = outcome.Reason
