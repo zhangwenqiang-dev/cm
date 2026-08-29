@@ -177,6 +177,41 @@ func TestAutoReleaseAcceptedConvergenceIsReadOnlyAcrossRestartAndCompletesOnce(t
 	}
 }
 
+func TestAutoReleaseLegacyConvergenceEvidenceIsInvalidatedWithoutMutation(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	reminder := runningAutoRelease(now.Add(-time.Hour))
+	reminder.AutoReleaseAcceptedAt = now.Add(-30 * time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifyClaimedAt = now.Add(-20 * time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifiedAt = now.Add(-10 * time.Minute).Format(time.RFC3339)
+	store := newAutoReleaseTestStore(reminder)
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = &autoReleaseTestJobs{jobs: []Job{{
+		ID: "legacy-success", Type: "aws-destroy", Profile: reminder.ProfileName, AppleEmail: reminder.AppleEmail,
+		Status: JobStatusSuccess, StartedAt: now.Add(-time.Hour), ReleasedHosts: []string{reminder.HostID},
+	}}}
+	statusCalls := 0
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		statusCalls++
+		return AWSStatus{}, nil
+	}
+	events := []AutoReleaseEvent{}
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	got := store.get(reminder.ProfileName)
+	if got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || got.AutoReleaseAt != now.Format(time.RFC3339) || got.AutoReleaseAcceptedAt != "" || got.AutoReleaseStalledNotifyClaimedAt != "" || got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseNotifiedAt != "" {
+		t.Fatalf("reminder = %+v", got)
+	}
+	if statusCalls != 0 || len(*notifications) != 0 || len(*starts) != 0 {
+		t.Fatalf("statusCalls=%d notifications=%+v starts=%d", statusCalls, *notifications, len(*starts))
+	}
+	if len(events) != 1 || events[0].Action != "convergence-evidence-invalidated" {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
 func TestAutoReleaseAcceptedConvergenceStatusErrorKeepsMutationLock(t *testing.T) {
 	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	reminder := runningAutoRelease(now.Add(-2 * time.Hour))
@@ -2091,6 +2126,27 @@ func (s *autoReleaseTestStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseR
 	return reminder, true, nil
 }
 
+func (s *autoReleaseTestStore) ResetLegacyAutoReleaseConvergence(cycle ReleaseReminderCycle, retryAt, reason string) (ReleaseReminder, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reminder, ok := s.reminders[cycle.ProfileName]
+	if !ok {
+		return ReleaseReminder{}, false, fmt.Errorf("missing reminder %s", cycle.ProfileName)
+	}
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.Status != ReleaseReminderStatusDueNotified || !reminder.AutoReleaseEnabled || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || reminder.AutoReleaseAcceptedAt == "" || reminder.AutoReleaseAcceptedAt != cycle.AutoReleaseAcceptedAt {
+		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
+	}
+	reminder.AutoReleaseAt = retryAt
+	reminder.AutoReleaseAcceptedAt = ""
+	reminder.AutoReleaseStalledNotifyClaimedAt = ""
+	reminder.AutoReleaseStalledNotifiedAt = ""
+	reminder.AutoReleaseNotifiedAt = ""
+	reminder.AutoReleaseLastError = strings.TrimSpace(reason)
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+	s.reminders[cycle.ProfileName] = reminder
+	return reminder, true, nil
+}
+
 func (s *autoReleaseTestStore) ClaimAutoReleaseStalledNotification(cycle ReleaseReminderCycle, claimedAt string, leaseDuration time.Duration) (ReleaseReminder, bool, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2205,8 +2261,11 @@ func (j *autoReleasePanicJobs) Active() ([]Job, error) {
 }
 
 func (j *autoReleasePanicJobs) List() ([]Job, error) {
-	j.t.Fatal("List called while observing accepted convergence")
-	return nil, nil
+	return []Job{{
+		ID: "destroy-accepted", Type: "aws-destroy", Profile: "mac", AppleEmail: "apple@example.com",
+		Status: JobStatusSuccess, StartedAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
+		ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-1"},
+	}}, nil
 }
 
 func (j *autoReleaseTestJobs) Active() ([]Job, error) {

@@ -54,6 +54,7 @@ type AutoReleaseStore interface {
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error)
+	ResetLegacyAutoReleaseConvergence(cycle ReleaseReminderCycle, retryAt, reason string) (ReleaseReminder, bool, error)
 	ClaimAutoReleaseStalledNotification(cycle ReleaseReminderCycle, claimedAt string, leaseDuration time.Duration) (ReleaseReminder, bool, bool, error)
 	MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, claimToken, notifiedAt string) (ReleaseReminder, bool, error)
 	ReleaseAutoReleaseStalledNotificationClaim(cycle ReleaseReminderCycle, claimToken string) (ReleaseReminder, bool, error)
@@ -416,6 +417,22 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 }
 
 func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	jobs, err := c.Jobs.List()
+	if err != nil {
+		return c.recordConvergenceReadFailure(reminder, fmt.Errorf("list destroy jobs for convergence evidence: %w", err))
+	}
+	job, found := latestDestroyJobForCompletionChecks(jobs, reminder)
+	if !found || !structuredReleaseEvidenceMatches(reminder, job) {
+		reason := "accepted host release evidence is missing or not structured"
+		updated, transitioned, err := c.Store.ResetLegacyAutoReleaseConvergence(releaseReminderCycleFromReminder(reminder), now.UTC().Format(time.RFC3339), reason)
+		if err != nil {
+			return err
+		}
+		if transitioned {
+			c.emit("convergence-evidence-invalidated", updated, updated.AutoReleaseAttempts, reason)
+		}
+		return nil
+	}
 	acceptedAt, err := parseAutoReleaseTime(reminder.AutoReleaseAcceptedAt)
 	if err != nil {
 		return c.recordConvergenceReadFailure(reminder, fmt.Errorf("invalid automatic release acceptance time: %w", err))
@@ -996,9 +1013,15 @@ func autoReleaseResourcesClean(status AWSStatus) bool {
 }
 
 func acceptedReleaseConverging(reminder ReleaseReminder, job Job, status AWSStatus) bool {
-	if !job.ReleaseEvidenceRecorded ||
-		!autoReleaseJobSupportsCompletionChecks(job) ||
+	if !structuredReleaseEvidenceMatches(reminder, job) ||
 		!acceptedHostReleaseTopology(reminder, status) {
+		return false
+	}
+	return true
+}
+
+func structuredReleaseEvidenceMatches(reminder ReleaseReminder, job Job) bool {
+	if !job.ReleaseEvidenceRecorded || !autoReleaseJobSupportsCompletionChecks(job) {
 		return false
 	}
 	for _, releasedHostID := range job.ReleasedHosts {

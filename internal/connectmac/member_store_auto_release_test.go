@@ -109,6 +109,77 @@ func TestMemberStoreMarksRetryingConvergenceAndRejectsStaleCycle(t *testing.T) {
 	}
 }
 
+func TestMemberStoreResetLegacyAutoReleaseConvergence(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	store := NewMemberStore(filepath.Join(t.TempDir(), "members.json"))
+	store.Now = func() time.Time { return now }
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-time.Hour).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifyClaimedAt = now.Add(-30 * time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifiedAt = now.Add(-20 * time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseLastError = "legacy convergence"
+	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatalf("upsert reminder: %v", err)
+	}
+
+	retryAt := now.Format(time.RFC3339)
+	reset, transitioned, err := store.ResetLegacyAutoReleaseConvergence(releaseReminderCycle(reminder), retryAt, "release evidence is not structured")
+	if err != nil {
+		t.Fatalf("reset legacy convergence: %v", err)
+	}
+	if !transitioned || reset.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || reset.AutoReleaseAt != retryAt || reset.AutoReleaseAcceptedAt != "" || reset.AutoReleaseStalledNotifyClaimedAt != "" || reset.AutoReleaseStalledNotifiedAt != "" || reset.AutoReleaseNotifiedAt != "" || reset.AutoReleaseLastError != "release evidence is not structured" {
+		t.Fatalf("reset reminder = %+v transitioned=%t", reset, transitioned)
+	}
+	if reset.HostID != reminder.HostID || reset.OwnerEmail != reminder.OwnerEmail || reset.AutoReleaseAttempts != reminder.AutoReleaseAttempts || reset.AutoReleaseStartedAt != reminder.AutoReleaseStartedAt {
+		t.Fatalf("workflow identity changed: before=%+v after=%+v", reminder, reset)
+	}
+
+	stale := releaseReminderCycle(reminder)
+	stale.HostID = "h-stale"
+	if _, transitioned, err := store.ResetLegacyAutoReleaseConvergence(stale, retryAt, "stale"); !errors.Is(err, ErrReleaseReminderCycleChanged) || transitioned {
+		t.Fatalf("stale reset transitioned=%t err=%v", transitioned, err)
+	}
+}
+
+func TestMySQLResetLegacyAutoReleaseConvergence(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-time.Hour).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifyClaimedAt = now.Add(-30 * time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifiedAt = now.Add(-20 * time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseLastError = "legacy convergence"
+	reminder.CreatedAt = now.Add(-2 * time.Hour).Format(time.RFC3339)
+	reminder.UpdatedAt = now.Add(-time.Hour).Format(time.RFC3339)
+	want := reminder
+	want.AutoReleaseAt = now.Format(time.RFC3339)
+	want.AutoReleaseAcceptedAt = ""
+	want.AutoReleaseStalledNotifyClaimedAt = ""
+	want.AutoReleaseStalledNotifiedAt = ""
+	want.AutoReleaseNotifiedAt = ""
+	want.AutoReleaseLastError = "release evidence is not structured"
+	want.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+	want.UpdatedAt = now.Format(time.RFC3339)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	store := mysqlAutoReleaseTestStore(db, now)
+	mock.ExpectBegin()
+	expectMySQLAutoReleaseLockedReminder(mock, reminder)
+	expectMySQLAutoReleaseReminderUpdate(mock, want)
+	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).WithArgs(mysqlStoreLockName).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	got, transitioned, err := store.ResetLegacyAutoReleaseConvergence(releaseReminderCycle(reminder), "", "release evidence is not structured")
+	if err != nil || !transitioned || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%+v transitioned=%t err=%v want=%+v", got, transitioned, err, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMySQLMarksAutoReleaseConvergenceAcceptedAtomically(t *testing.T) {
 	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	reminder := runningAutoReleaseReminder("owner@example.com")

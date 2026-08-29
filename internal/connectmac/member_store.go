@@ -81,6 +81,7 @@ type MemberRepository interface {
 	CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error)
 	CleanupProfileRecordsAndRecordEvent(profileName, releasedAt, reason string, event OperationEvent) (ReleaseReminder, bool, error)
 	MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error)
+	ResetLegacyAutoReleaseConvergence(cycle ReleaseReminderCycle, retryAt, reason string) (ReleaseReminder, bool, error)
 	ClaimAutoReleaseStalledNotification(cycle ReleaseReminderCycle, claimedAt string, leaseDuration time.Duration) (ReleaseReminder, bool, bool, error)
 	MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, claimToken, notifiedAt string) (ReleaseReminder, bool, error)
 	ReleaseAutoReleaseStalledNotificationClaim(cycle ReleaseReminderCycle, claimToken string) (ReleaseReminder, bool, error)
@@ -1226,6 +1227,23 @@ func (s MemberStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCyc
 		return current, true, nil
 	}
 	return ReleaseReminder{}, false, releaseReminderNotFoundError(cycle.ProfileName)
+}
+
+func (s MemberStore) ResetLegacyAutoReleaseConvergence(cycle ReleaseReminderCycle, retryAt, reason string) (ReleaseReminder, bool, error) {
+	return s.updateAcceptedConvergence(cycle, func(current ReleaseReminder, now time.Time) (ReleaseReminder, bool, error) {
+		value, err := resolveAutoReleaseNotifiedAt(retryAt, now)
+		if err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		current.AutoReleaseAt = value
+		current.AutoReleaseAcceptedAt = ""
+		current.AutoReleaseStalledNotifyClaimedAt = ""
+		current.AutoReleaseStalledNotifiedAt = ""
+		current.AutoReleaseNotifiedAt = ""
+		current.AutoReleaseLastError = strings.TrimSpace(reason)
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+		return current, true, nil
+	})
 }
 
 func (s MemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {

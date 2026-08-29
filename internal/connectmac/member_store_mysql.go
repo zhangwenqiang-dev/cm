@@ -1103,6 +1103,24 @@ func (s MySQLMemberStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseRemind
 	return markAutoReleaseConvergenceAcceptedInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, cycle, acceptedAt, now)
 }
 
+func (s MySQLMemberStore) ResetLegacyAutoReleaseConvergence(cycle ReleaseReminderCycle, retryAt, reason string) (ReleaseReminder, bool, error) {
+	now := s.currentTime()
+	retryAt, err := resolveAutoReleaseNotifiedAt(retryAt, now)
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	return s.updateAcceptedConvergence(cycle, func(current ReleaseReminder) (ReleaseReminder, bool, error) {
+		current.AutoReleaseAt = retryAt
+		current.AutoReleaseAcceptedAt = ""
+		current.AutoReleaseStalledNotifyClaimedAt = ""
+		current.AutoReleaseStalledNotifiedAt = ""
+		current.AutoReleaseNotifiedAt = ""
+		current.AutoReleaseLastError = strings.TrimSpace(reason)
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+		return current, true, nil
+	})
+}
+
 func (s MySQLMemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {
 	defer s.lockMutation()()
 	now := s.currentTime()
