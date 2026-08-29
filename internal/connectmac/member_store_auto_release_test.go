@@ -204,6 +204,48 @@ func TestAutoReleaseAcceptedStoreOperationsRejectInvalidCycleState(t *testing.T)
 	}
 }
 
+func TestAutoReleaseFileStoreConvergenceStatusClaimHasSingleConcurrentWinner(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "members.json")
+	seed := MemberStore{Path: path, Now: func() time.Time { return now }}
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-AutoReleaseConvergenceWindow).Format(time.RFC3339)
+	if _, err := seed.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatal(err)
+	}
+	cycle := releaseReminderCycle(reminder)
+	start := make(chan struct{})
+	results := make(chan struct {
+		claimed bool
+		err     error
+	}, 2)
+	for range 2 {
+		go func() {
+			<-start
+			store := MemberStore{Path: path, Now: func() time.Time { return now }}
+			_, claimed, err := store.ClaimAutoReleaseConvergenceStatusCheck(cycle, "", AutoReleaseStalledStatusInterval)
+			results <- struct {
+				claimed bool
+				err     error
+			}{claimed: claimed, err: err}
+		}()
+	}
+	close(start)
+	winners := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.claimed {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners=%d, want 1", winners)
+	}
+}
+
 func TestMySQLMarksAutoReleaseStalledNotificationAtomically(t *testing.T) {
 	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
 	reminder := runningAutoReleaseReminder("owner@example.com")
@@ -313,6 +355,40 @@ func TestMySQLAutoReleaseConvergenceStatusClaimRejectsInvalidCycleState(t *testi
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestMySQLAutoReleaseConvergenceStatusClaimUpdateFailureRollsBack(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-AutoReleaseConvergenceWindow).Format(time.RFC3339)
+	want := reminder
+	want.AutoReleaseLastAttemptAt = now.Format(time.RFC3339)
+	want.UpdatedAt = now.Format(time.RFC3339)
+	wantErr := errors.New("update failed")
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := mysqlAutoReleaseTestStore(db, now)
+	mock.ExpectBegin()
+	expectMySQLAutoReleaseLockedReminder(mock, reminder)
+	mock.ExpectExec(regexp.QuoteMeta(mysqlReleaseReminderUpdateQuery)).WithArgs(
+		want.AppleEmail, want.HostID, want.HostArchitecture, want.HostCreatedAt, want.ReleaseDueAt,
+		want.OwnerEmail, want.OwnerName, want.LastExtendedByEmail, want.LastExtendedByName,
+		want.LastExtendedAt, want.LastNotifiedAt, want.ReleasedAt, want.Status,
+		want.AutoReleaseEnabled, want.AutoReleaseAt, want.AutoReleaseStartedAt,
+		want.AutoReleaseLastAttemptAt, want.AutoReleaseAcceptedAt, want.AutoReleaseStalledNotifiedAt,
+		want.AutoReleaseNotifiedAt, want.AutoReleaseAttempts,
+		want.AutoReleaseLastError, want.AutoReleaseState, want.UpdatedAt, want.ProfileName,
+	).WillReturnError(wantErr)
+	mock.ExpectRollback()
+	got, claimed, err := store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycle(reminder), "", AutoReleaseStalledStatusInterval)
+	if !errors.Is(err, wantErr) || claimed || !reflect.DeepEqual(got, ReleaseReminder{}) {
+		t.Fatalf("got=%+v claimed=%t err=%v", got, claimed, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

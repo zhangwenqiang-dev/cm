@@ -417,28 +417,36 @@ func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminde
 		return c.recordConvergenceReadFailure(reminder, fmt.Errorf("invalid automatic release acceptance time: %w", err))
 	}
 	stalled := !now.Before(acceptedAt.Add(AutoReleaseConvergenceWindow))
+	var warningErr error
 	if stalled && reminder.AutoReleaseStalledNotifiedAt == "" {
 		if c.Notify != nil {
 			if err := c.Notify(AutoReleaseNotification{
 				Kind: AutoReleaseNotificationStalled, Reminder: reminder,
 				Attempt: reminder.AutoReleaseAttempts, CycleID: autoReleaseCycleID(reminder),
 			}); err != nil {
-				return sanitizeOperationalError(err)
+				warningErr = sanitizeOperationalError(err)
 			}
 		}
-		marked, transitioned, err := c.Store.MarkAutoReleaseStalledNotified(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339))
-		if err != nil {
-			return err
-		}
-		reminder = marked
-		if transitioned {
-			c.emit("convergence-stalled", reminder, reminder.AutoReleaseAttempts, "accepted host release remains incomplete after 24 hours")
+		if warningErr == nil {
+			marked, transitioned, err := c.Store.MarkAutoReleaseStalledNotified(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339))
+			if err != nil {
+				warningErr = sanitizeOperationalError(fmt.Errorf("stalled convergence warning was accepted but marker persistence is ambiguous; notification may be duplicated on retry: %w", err))
+				c.emit("convergence-stalled-persistence-ambiguous", reminder, reminder.AutoReleaseAttempts, warningErr.Error())
+			} else {
+				reminder = marked
+				if transitioned {
+					c.emit("convergence-stalled", reminder, reminder.AutoReleaseAttempts, "accepted host release remains incomplete after 24 hours")
+				}
+			}
 		}
 	}
 	if stalled {
 		claimed, ok, err := c.Store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339), AutoReleaseStalledStatusInterval)
-		if err != nil || !ok {
-			return err
+		if err != nil {
+			return errors.Join(warningErr, err)
+		}
+		if !ok {
+			return warningErr
 		}
 		reminder = claimed
 	}
@@ -451,18 +459,19 @@ func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminde
 	}
 	status, err := c.Status(ctx, profile)
 	if err != nil {
-		return c.recordConvergenceReadFailure(reminder, err)
+		recordErr := c.recordConvergenceReadFailure(reminder, err)
+		return errors.Join(warningErr, sanitizeOperationalError(err), recordErr)
 	}
 	if err := validateAutoReleaseOwnership(reminder, profile, status); err != nil {
-		return c.finishFailure(reminder, now, TerminalAutoReleaseError(err))
+		return errors.Join(warningErr, sanitizeOperationalError(err), c.finishFailure(reminder, now, TerminalAutoReleaseError(err)))
 	}
 	if autoReleaseResourcesClean(status) {
 		return c.completeRelease(reminder, profile, now)
 	}
 	if acceptedReleaseConverging(reminder, Job{Status: JobStatusSuccess}, status) {
-		return nil
+		return warningErr
 	}
-	return c.finishFailure(reminder, now, TerminalAutoReleaseError(errors.New("managed resources no longer match the accepted host release")))
+	return errors.Join(warningErr, c.finishFailure(reminder, now, TerminalAutoReleaseError(errors.New("managed resources no longer match the accepted host release"))))
 }
 
 func (c *AutoReleaseCoordinator) recordConvergenceReadFailure(reminder ReleaseReminder, cause error) error {

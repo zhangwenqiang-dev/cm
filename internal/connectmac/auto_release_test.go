@@ -188,8 +188,8 @@ func TestAutoReleaseAcceptedConvergenceStatusErrorKeepsMutationLock(t *testing.T
 		return AWSStatus{}, errors.New("status token=secret unavailable")
 	}
 
-	if err := coordinator.Scan(context.Background()); err != nil {
-		t.Fatalf("Scan: %v", err)
+	if err := coordinator.Scan(context.Background()); err == nil || !strings.Contains(err.Error(), "status token=[REDACTED] unavailable") {
+		t.Fatalf("Scan error = %v", err)
 	}
 	got := store.get("mac")
 	if got.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || got.AutoReleaseAcceptedAt != reminder.AutoReleaseAcceptedAt || got.AutoReleaseLastError == "" || len(*notifications) != 0 || len(*starts) != 0 {
@@ -252,24 +252,123 @@ func TestAutoReleaseConvergenceStalledNotificationFailureRetriesWithoutMarker(t 
 	reminder.AutoReleaseAcceptedAt = accepted.Format(time.RFC3339)
 	store := newAutoReleaseTestStore(reminder)
 	attempts := 0
+	statusCalls := 0
 	coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
 	coordinator.Jobs = &autoReleasePanicJobs{t: t}
 	coordinator.Notify = func(notification AutoReleaseNotification) error { attempts++; return errors.New("webhook unavailable") }
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		statusCalls++
+		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
+	}
 	if err := coordinator.Scan(context.Background()); err == nil {
 		t.Fatal("warning failure should be visible")
 	}
-	if got := store.get("mac"); got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseLastAttemptAt != reminder.AutoReleaseLastAttemptAt {
+	if got := store.get("mac"); got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseLastAttemptAt != now.Format(time.RFC3339) || statusCalls != 1 {
 		t.Fatalf("failed warning mutated reminder: %+v", got)
 	}
 	coordinator.Notify = func(notification AutoReleaseNotification) error { attempts++; return nil }
-	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
-		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
-	}
+	coordinator.Now = func() time.Time { return now.Add(time.Minute) }
 	if err := coordinator.Scan(context.Background()); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if attempts != 2 || store.get("mac").AutoReleaseStalledNotifiedAt == "" {
-		t.Fatalf("attempts=%d reminder=%+v", attempts, store.get("mac"))
+	if attempts != 2 || statusCalls != 1 || store.get("mac").AutoReleaseStalledNotifiedAt == "" {
+		t.Fatalf("attempts=%d statusCalls=%d reminder=%+v", attempts, statusCalls, store.get("mac"))
+	}
+}
+
+func TestAutoReleaseConvergenceFailedStalledWarningDoesNotBlockCleanCompletion(t *testing.T) {
+	accepted := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	now := accepted.Add(AutoReleaseConvergenceWindow)
+	reminder := runningAutoRelease(accepted.Add(-time.Hour))
+	reminder.AutoReleaseAcceptedAt = accepted.Format(time.RFC3339)
+	store := newAutoReleaseTestStore(reminder)
+	coordinator, notifications, _ := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = &autoReleasePanicJobs{t: t}
+	statusCalls := 0
+	coordinator.Notify = func(notification AutoReleaseNotification) error {
+		*notifications = append(*notifications, notification)
+		if notification.Kind == AutoReleaseNotificationStalled {
+			return errors.New("webhook unavailable")
+		}
+		return nil
+	}
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		statusCalls++
+		return AWSStatus{ElasticIP: ElasticIP{AllocationID: "retained"}}, nil
+	}
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if statusCalls != 1 || store.cleanupCalls != 1 || store.get("mac").Status != ReleaseReminderStatusReleased {
+		t.Fatalf("statusCalls=%d cleanup=%d reminder=%+v", statusCalls, store.cleanupCalls, store.get("mac"))
+	}
+}
+
+func TestAutoReleaseConvergenceStalledMarkerPersistenceAmbiguityStillChecksStatus(t *testing.T) {
+	accepted := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	now := accepted.Add(AutoReleaseConvergenceWindow)
+	reminder := runningAutoRelease(accepted.Add(-time.Hour))
+	reminder.AutoReleaseAcceptedAt = accepted.Format(time.RFC3339)
+	store := newAutoReleaseTestStore(reminder)
+	store.stalledMarkErrors = []error{errors.New("database unavailable")}
+	coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = &autoReleasePanicJobs{t: t}
+	statusCalls := 0
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		statusCalls++
+		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
+	}
+	events := []AutoReleaseEvent{}
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+	err := coordinator.Scan(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "marker persistence is ambiguous") || !strings.Contains(err.Error(), "may be duplicated") || statusCalls != 1 {
+		t.Fatalf("err=%v statusCalls=%d", err, statusCalls)
+	}
+	if got := store.get("mac"); got.AutoReleaseStalledNotifiedAt != "" {
+		t.Fatalf("marker persisted: %+v", got)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "convergence-stalled-persistence-ambiguous" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestAutoReleaseConvergenceFailedStatusReadConsumesStalledPollSlot(t *testing.T) {
+	accepted := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	now := accepted.Add(AutoReleaseConvergenceWindow)
+	reminder := runningAutoRelease(accepted.Add(-time.Hour))
+	reminder.AutoReleaseAcceptedAt = accepted.Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifiedAt = now.Format(time.RFC3339)
+	store := newAutoReleaseTestStore(reminder)
+	statusCalls := 0
+	scan := func(at time.Time) error {
+		coordinator, _, _ := newAutoReleaseTestCoordinator(at, store)
+		coordinator.Jobs = &autoReleasePanicJobs{t: t}
+		coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+			statusCalls++
+			return AWSStatus{}, errors.New("status unavailable")
+		}
+		return coordinator.Scan(context.Background())
+	}
+	if err := scan(now); err == nil {
+		t.Fatal("first status read error should surface")
+	}
+	if err := scan(now.Add(time.Minute)); err != nil {
+		t.Fatalf("gated scan: %v", err)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("statusCalls=%d before interval", statusCalls)
+	}
+	if err := scan(now.Add(AutoReleaseStalledStatusInterval)); err == nil {
+		t.Fatal("boundary status read error should surface")
+	}
+	if statusCalls != 2 {
+		t.Fatalf("statusCalls=%d at interval", statusCalls)
 	}
 }
 
@@ -311,8 +410,10 @@ func TestAutoReleaseAcceptedConvergenceRejectsUnsafeHostStatus(t *testing.T) {
 			coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
 			coordinator.Jobs = &autoReleasePanicJobs{t: t}
 			coordinator.Status = func(context.Context, Profile) (AWSStatus, error) { return status, nil }
-			if err := coordinator.Scan(context.Background()); err != nil {
-				t.Fatalf("Scan: %v", err)
+			err := coordinator.Scan(context.Background())
+			ownershipError := name == "mismatch" || name == "multiple"
+			if ownershipError != (err != nil) {
+				t.Fatalf("Scan error = %v, ownershipError=%t", err, ownershipError)
 			}
 			if got := store.get("mac"); got.AutoReleaseState != ReleaseReminderAutoReleaseStateFailed || got.AutoReleaseAcceptedAt != reminder.AutoReleaseAcceptedAt || got.AutoReleaseLastError == "" || len(*starts) != 0 || len(*notifications) != 1 {
 				t.Fatalf("reminder=%+v starts=%d notifications=%+v", got, len(*starts), *notifications)
@@ -1761,14 +1862,15 @@ func autoReleaseTestInstance(state string) InstanceStatus {
 }
 
 type autoReleaseTestStore struct {
-	mu             sync.Mutex
-	reminders      map[string]ReleaseReminder
-	beforeUpdate   func(*ReleaseReminder)
-	cleanupCalls   int
-	completeCycles []ReleaseReminderCycle
-	cleanupErrors  []error
-	markCalls      int
-	markErrors     []error
+	mu                sync.Mutex
+	reminders         map[string]ReleaseReminder
+	beforeUpdate      func(*ReleaseReminder)
+	cleanupCalls      int
+	completeCycles    []ReleaseReminderCycle
+	cleanupErrors     []error
+	markCalls         int
+	markErrors        []error
+	stalledMarkErrors []error
 }
 
 func newAutoReleaseTestStore(reminders ...ReleaseReminder) *autoReleaseTestStore {
@@ -1888,6 +1990,13 @@ func (s *autoReleaseTestStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseR
 func (s *autoReleaseTestStore) MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.stalledMarkErrors) > 0 {
+		err := s.stalledMarkErrors[0]
+		s.stalledMarkErrors = s.stalledMarkErrors[1:]
+		if err != nil {
+			return ReleaseReminder{}, false, err
+		}
+	}
 	reminder := s.reminders[cycle.ProfileName]
 	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.Status != ReleaseReminderStatusDueNotified || !reminder.AutoReleaseEnabled || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || reminder.AutoReleaseAcceptedAt == "" || reminder.AutoReleaseAcceptedAt != cycle.AutoReleaseAcceptedAt {
 		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged

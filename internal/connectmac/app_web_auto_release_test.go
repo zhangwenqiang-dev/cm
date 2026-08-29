@@ -2054,7 +2054,7 @@ func TestWechatAutoReleaseStalledMappingIsExact(t *testing.T) {
 	}
 	count := 0
 	for _, event := range events {
-		if event.Action == "wechat.sent" && strings.Contains(event.Message, "notification_event=auto-release-stalled") {
+		if event.Action == "wechat.sent" && strings.Contains(event.Message, "notification_event=auto-release-stalled") && strings.Contains(event.Message, "delivery_key=cycle-1:stalled") {
 			count++
 		}
 	}

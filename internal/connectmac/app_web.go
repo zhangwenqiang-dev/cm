@@ -531,17 +531,22 @@ func (a App) newAutoReleaseCoordinator(configPath string) *AutoReleaseCoordinato
 			case AutoReleaseNotificationStalled:
 				event, description = "auto-release-stalled", "Host 释放状态超过 24 小时仍未完成，系统将继续检查，不会重复提交释放。"
 			}
+			deliveryKey := ""
+			if notification.Kind == AutoReleaseNotificationStalled {
+				deliveryKey = notification.CycleID + ":" + string(notification.Kind)
+			}
 			return a.notifyReleaseReminderWithDelivery(event, notification.Reminder, "", description, wechatDeliveryContext{
-				Attempt:    notification.Attempt,
-				Retrying:   notification.Retrying,
-				RetryError: notification.Error,
-				CycleID:    notification.CycleID,
+				Attempt:     notification.Attempt,
+				Retrying:    notification.Retrying,
+				RetryError:  notification.Error,
+				CycleID:     notification.CycleID,
+				DeliveryKey: deliveryKey,
 			})
 		},
 		Emit: func(event AutoReleaseEvent) {
 			level := "info"
 			errorCode := ""
-			if event.Action == "retrying" || event.Action == "failed" || event.Action == "notification-retrying" || event.Action == "cleanup-retrying" || event.Action == "convergence-read-error" {
+			if event.Action == "retrying" || event.Action == "failed" || event.Action == "notification-retrying" || event.Action == "cleanup-retrying" || event.Action == "convergence-read-error" || event.Action == "convergence-stalled-persistence-ambiguous" {
 				level = "error"
 				errorCode = classifyOperationalError(errors.New(event.Message)).Code
 			}
@@ -2618,14 +2623,17 @@ func (a App) recordWechatDeliveryState(context wechatDeliveryContext, phase stri
 		Phase:       phase,
 		ErrorCode:   errorCode,
 		Status:      status,
-		Message:     wechatAuditMessageForEvent(result, cause, context.Attempt, context.Event),
+		Message:     wechatAuditMessageForEvent(result, cause, context.Attempt, context.Event, context.DeliveryKey),
 	}))
 }
 
-func wechatAuditMessageForEvent(result WechatNotifyResult, cause error, attempt int, event string) string {
+func wechatAuditMessageForEvent(result WechatNotifyResult, cause error, attempt int, event, deliveryKey string) string {
 	parts := []string{fmt.Sprintf("attempt=%d", attempt)}
 	if strings.TrimSpace(event) != "" {
 		parts = append(parts, "notification_event="+strings.TrimSpace(event))
+	}
+	if strings.TrimSpace(deliveryKey) != "" {
+		parts = append(parts, "delivery_key="+strings.TrimSpace(deliveryKey))
 	}
 	if result.HTTPStatus != 0 {
 		parts = append(parts, fmt.Sprintf("http_status=%d", result.HTTPStatus))
