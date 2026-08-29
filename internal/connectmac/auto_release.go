@@ -230,6 +230,17 @@ func (c *AutoReleaseCoordinator) advancePending(ctx context.Context, reminder Re
 	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateScheduled && now.Before(autoAt) {
 		return nil
 	}
+	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateRetrying && legacyRecoveryWindowNeedsRepair(reminder) {
+		_, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+			if !sameAutoReleaseCycle(current, reminder) || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || current.AutoReleaseStartedAt != reminder.AutoReleaseStartedAt || current.AutoReleaseAt != reminder.AutoReleaseAt {
+				return current, errAutoReleaseCycleChanged
+			}
+			current.AutoReleaseStartedAt = current.AutoReleaseAt
+			current.AutoReleaseLastError = "legacy host recovery window repaired"
+			return current, nil
+		})
+		return err
+	}
 	retryWindowExpired := false
 	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateRetrying {
 		retryWindowExpired, err = autoReleaseRetryWindowExpired(reminder, now)
@@ -303,6 +314,13 @@ func (c *AutoReleaseCoordinator) advancePending(ctx context.Context, reminder Re
 	}
 	c.emit("started", claimed, claimed.AutoReleaseAttempts, job.ID)
 	return nil
+}
+
+func legacyRecoveryWindowNeedsRepair(reminder ReleaseReminder) bool {
+	retryAt, retryErr := parseAutoReleaseTime(reminder.AutoReleaseAt)
+	startedAt, startedErr := parseAutoReleaseTime(reminder.AutoReleaseStartedAt)
+	lastAttemptAt, attemptErr := parseAutoReleaseTime(reminder.AutoReleaseLastAttemptAt)
+	return retryErr == nil && startedErr == nil && attemptErr == nil && retryAt.After(startedAt) && retryAt.After(lastAttemptAt)
 }
 
 func (c *AutoReleaseCoordinator) recheckBeforeDestroy(claimed ReleaseReminder, profile Profile) (ReleaseReminder, error) {

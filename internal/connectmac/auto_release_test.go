@@ -221,6 +221,35 @@ func TestAutoReleaseLegacyConvergenceEvidenceIsInvalidatedWithoutMutation(t *tes
 	}
 }
 
+func TestAutoReleaseRepairsLegacyRecoveryWindowBeforeRetry(t *testing.T) {
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	reminder := runningAutoRelease(now.Add(-3 * time.Hour))
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+	reminder.AutoReleaseAt = now.Add(-time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseLastAttemptAt = now.Add(-2 * time.Hour).Format(time.RFC3339)
+	reminder.AutoReleaseLastError = "automatic release retry window expired"
+	store := newAutoReleaseTestStore(reminder)
+
+	coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = &autoReleaseTestJobs{}
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("repair Scan: %v", err)
+	}
+	got := store.get(reminder.ProfileName)
+	if got.AutoReleaseStartedAt != reminder.AutoReleaseAt || got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || len(*starts) != 0 || len(*notifications) != 0 {
+		t.Fatalf("reminder=%+v starts=%d notifications=%+v", got, len(*starts), *notifications)
+	}
+
+	coordinator, notifications, starts = newAutoReleaseTestCoordinator(now.Add(time.Minute), store)
+	coordinator.Jobs = &autoReleaseTestJobs{}
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry Scan: %v", err)
+	}
+	if len(*starts) != 1 || len(*notifications) != 0 {
+		t.Fatalf("starts=%d notifications=%+v", len(*starts), *notifications)
+	}
+}
+
 func TestAutoReleaseAcceptedConvergenceStatusErrorKeepsMutationLock(t *testing.T) {
 	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	reminder := runningAutoRelease(now.Add(-2 * time.Hour))
