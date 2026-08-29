@@ -469,15 +469,15 @@ func (c *AutoReleaseCoordinator) adoptRetryingConvergence(ctx context.Context, r
 		return true, c.finishFailure(reminder, now, TerminalAutoReleaseError(err))
 	}
 	if autoReleaseResourcesClean(status) {
-		resumed, err := c.resumeRetryingCompletion(reminder, now, false)
+		resumed, _, err := c.resumeRetryingCompletion(reminder, now, false)
 		if err != nil {
 			return true, err
 		}
 		return true, c.completeRelease(resumed, profile, now)
 	}
 	if acceptedReleaseConverging(reminder, job, status) {
-		updated, err := c.resumeRetryingCompletion(reminder, now, true)
-		if err == nil {
+		updated, transitioned, err := c.resumeRetryingCompletion(reminder, now, true)
+		if err == nil && transitioned {
 			c.emitConvergenceWaiting(updated, job)
 		}
 		return true, err
@@ -485,8 +485,9 @@ func (c *AutoReleaseCoordinator) adoptRetryingConvergence(ctx context.Context, r
 	return false, nil
 }
 
-func (c *AutoReleaseCoordinator) resumeRetryingCompletion(reminder ReleaseReminder, now time.Time, accepted bool) (ReleaseReminder, error) {
-	return c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+func (c *AutoReleaseCoordinator) resumeRetryingCompletion(reminder ReleaseReminder, now time.Time, accepted bool) (ReleaseReminder, bool, error) {
+	transitioned := false
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying {
 			return current, errAutoReleaseCycleChanged
 		}
@@ -494,18 +495,22 @@ func (c *AutoReleaseCoordinator) resumeRetryingCompletion(reminder ReleaseRemind
 		current.AutoReleaseLastError = ""
 		if accepted && current.AutoReleaseAcceptedAt == "" {
 			current.AutoReleaseAcceptedAt = now.UTC().Format(time.RFC3339)
+			transitioned = true
 		}
 		return current, nil
 	})
+	return updated, transitioned, err
 }
 
 func (c *AutoReleaseCoordinator) acceptConvergence(reminder ReleaseReminder, now time.Time, job Job) error {
+	transitioned := false
 	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
 		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
 			return current, errAutoReleaseCycleChanged
 		}
 		if current.AutoReleaseAcceptedAt == "" {
 			current.AutoReleaseAcceptedAt = now.UTC().Format(time.RFC3339)
+			transitioned = true
 		}
 		current.AutoReleaseLastError = ""
 		return current, nil
@@ -513,7 +518,9 @@ func (c *AutoReleaseCoordinator) acceptConvergence(reminder ReleaseReminder, now
 	if err != nil {
 		return err
 	}
-	c.emitConvergenceWaiting(updated, job)
+	if transitioned {
+		c.emitConvergenceWaiting(updated, job)
+	}
 	return nil
 }
 

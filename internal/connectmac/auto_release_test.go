@@ -116,6 +116,29 @@ func TestAutoReleaseRunningAdoptsConvergence(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseStaleRunningScanDoesNotEmitConvergenceTransitionTwice(t *testing.T) {
+	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	stale := runningAutoRelease(now.Add(-time.Minute))
+	acceptedAt := now.Add(-time.Second).Format(time.RFC3339)
+	current := stale
+	current.AutoReleaseAcceptedAt = acceptedAt
+	store := newAutoReleaseTestStore(current)
+	coordinator, _, _ := newAutoReleaseTestCoordinator(now, store)
+	events := []AutoReleaseEvent{}
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+	job := Job{ID: "destroy-accepted", RequestID: "request-accepted"}
+
+	if err := coordinator.acceptConvergence(stale, now, job); err != nil {
+		t.Fatalf("acceptConvergence: %v", err)
+	}
+	if got := store.get("mac"); got.AutoReleaseAcceptedAt != acceptedAt {
+		t.Fatalf("accepted timestamp changed: got %q want %q", got.AutoReleaseAcceptedAt, acceptedAt)
+	}
+	if len(events) != 0 {
+		t.Fatalf("duplicate convergence events = %+v", events)
+	}
+}
+
 func TestAutoReleaseAcceptedConvergenceIsReadOnlyAcrossRestartAndCompletesOnce(t *testing.T) {
 	now := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
 	reminder := runningAutoRelease(now.Add(-time.Minute))
@@ -229,6 +252,38 @@ func TestAutoReleaseRetryingAdoptsConvergenceBeforeAndAfterMutationRetryDeadline
 				t.Fatalf("reminder=%+v starts=%d notifications=%+v", got, len(*starts), *notifications)
 			}
 		})
+	}
+}
+
+func TestAutoReleaseRetryingResumeDoesNotEmitExistingConvergenceTransition(t *testing.T) {
+	started := time.Date(2026, 8, 20, 8, 0, 0, 0, time.UTC)
+	now := started.Add(30 * time.Minute)
+	reminder := runningAutoRelease(started)
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+	reminder.AutoReleaseAcceptedAt = started.Add(time.Minute).Format(time.RFC3339)
+	store := newAutoReleaseTestStore(reminder)
+	coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
+	coordinator.Jobs = &autoReleaseTestJobs{jobs: []Job{{
+		ID: "legacy-success", Type: "aws-destroy", Profile: "mac", AppleEmail: reminder.AppleEmail,
+		Status: JobStatusSuccess, StartedAt: started,
+	}}}
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
+	}
+	events := []AutoReleaseEvent{}
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	got := store.get("mac")
+	if got.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || got.AutoReleaseAcceptedAt != reminder.AutoReleaseAcceptedAt || len(*starts) != 0 {
+		t.Fatalf("reminder=%+v starts=%d", got, len(*starts))
+	}
+	for _, event := range events {
+		if event.Action == "convergence-waiting" {
+			t.Fatalf("duplicate convergence event = %+v", event)
+		}
 	}
 }
 
