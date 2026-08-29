@@ -230,6 +230,92 @@ func TestMySQLMarksAutoReleaseStalledNotificationAtomically(t *testing.T) {
 	}
 }
 
+func TestMySQLClaimsAutoReleaseConvergenceStatusCheckAtInterval(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name        string
+		lastAttempt string
+		wantClaimed bool
+	}{
+		{name: "first claim", wantClaimed: true},
+		{name: "repeat before interval", lastAttempt: now.Add(-AutoReleaseStalledStatusInterval + time.Second).Format(time.RFC3339)},
+		{name: "exact interval boundary", lastAttempt: now.Add(-AutoReleaseStalledStatusInterval).Format(time.RFC3339), wantClaimed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reminder := runningAutoReleaseReminder("owner@example.com")
+			reminder.AutoReleaseAcceptedAt = now.Add(-AutoReleaseConvergenceWindow).Format(time.RFC3339)
+			reminder.AutoReleaseLastAttemptAt = test.lastAttempt
+			want := reminder
+			if test.wantClaimed {
+				want.AutoReleaseLastAttemptAt = now.Format(time.RFC3339)
+				want.UpdatedAt = now.Format(time.RFC3339)
+			}
+
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := mysqlAutoReleaseTestStore(db, now)
+			mock.ExpectBegin()
+			expectMySQLAutoReleaseLockedReminder(mock, reminder)
+			if test.wantClaimed {
+				expectMySQLAutoReleaseReminderUpdate(mock, want)
+				mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).WithArgs(mysqlStoreLockName).WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+			mock.ExpectCommit()
+
+			got, claimed, err := store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycle(reminder), "", AutoReleaseStalledStatusInterval)
+			if err != nil || claimed != test.wantClaimed || !reflect.DeepEqual(got, want) {
+				t.Fatalf("got=%+v claimed=%t err=%v want=%+v", got, claimed, err, want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestMySQLAutoReleaseConvergenceStatusClaimRejectsInvalidCycleState(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name   string
+		mutate func(*ReleaseReminder, *ReleaseReminderCycle)
+	}{
+		{name: "stale cycle", mutate: func(_ *ReleaseReminder, cycle *ReleaseReminderCycle) { cycle.HostID = "h-stale" }},
+		{name: "disabled", mutate: func(reminder *ReleaseReminder, _ *ReleaseReminderCycle) { reminder.AutoReleaseEnabled = false }},
+		{name: "non-running", mutate: func(reminder *ReleaseReminder, _ *ReleaseReminderCycle) {
+			reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
+		}},
+		{name: "accepted at mismatch", mutate: func(_ *ReleaseReminder, cycle *ReleaseReminderCycle) {
+			cycle.AutoReleaseAcceptedAt = now.Add(-AutoReleaseConvergenceWindow - time.Second).Format(time.RFC3339)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reminder := runningAutoReleaseReminder("owner@example.com")
+			reminder.AutoReleaseAcceptedAt = now.Add(-AutoReleaseConvergenceWindow).Format(time.RFC3339)
+			cycle := releaseReminderCycle(reminder)
+			test.mutate(&reminder, &cycle)
+
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := mysqlAutoReleaseTestStore(db, now)
+			mock.ExpectBegin()
+			expectMySQLAutoReleaseLockedReminder(mock, reminder)
+			mock.ExpectRollback()
+
+			got, claimed, err := store.ClaimAutoReleaseConvergenceStatusCheck(cycle, "", AutoReleaseStalledStatusInterval)
+			if !errors.Is(err, ErrReleaseReminderCycleChanged) || claimed || !reflect.DeepEqual(got, ReleaseReminder{}) {
+				t.Fatalf("got=%+v claimed=%t err=%v", got, claimed, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestMySQLConvergenceAcceptanceIsIdempotentAndRejectsStaleCycle(t *testing.T) {
 	now := time.Date(2026, 8, 20, 9, 5, 0, 0, time.UTC)
 	reminder := runningAutoReleaseReminder("owner@example.com")
