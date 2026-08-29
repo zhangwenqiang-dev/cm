@@ -1767,6 +1767,29 @@ func (s *autoReleaseTestStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycl
 	return reminder, nil
 }
 
+func (s *autoReleaseTestStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reminder, ok := s.reminders[cycle.ProfileName]
+	if !ok {
+		return ReleaseReminder{}, false, fmt.Errorf("missing reminder %s", cycle.ProfileName)
+	}
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.Status != ReleaseReminderStatusDueNotified || !reminder.AutoReleaseEnabled || (reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying) {
+		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
+	}
+	if reminder.AutoReleaseAcceptedAt != "" {
+		reminder.AutoReleaseLastError = ""
+		reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+		s.reminders[cycle.ProfileName] = reminder
+		return reminder, false, nil
+	}
+	reminder.AutoReleaseAcceptedAt = acceptedAt
+	reminder.AutoReleaseLastError = ""
+	reminder.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+	s.reminders[cycle.ProfileName] = reminder
+	return reminder, true, nil
+}
+
 func (s *autoReleaseTestStore) mutate(profile string, mutate func(*ReleaseReminder)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

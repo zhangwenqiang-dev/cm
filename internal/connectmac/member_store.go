@@ -80,6 +80,7 @@ type MemberRepository interface {
 	UpdateReleaseReminderAndRecordEvent(profileName string, update func(ReleaseReminder) (ReleaseReminder, error), event OperationEvent) (ReleaseReminder, error)
 	CleanupProfileRecords(profileName, releasedAt, reason string) (ReleaseReminder, bool, error)
 	CleanupProfileRecordsAndRecordEvent(profileName, releasedAt, reason string, event OperationEvent) (ReleaseReminder, bool, error)
+	MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error)
 	MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
 	MarkReleaseReminderDue(profileName, notifiedAt string) (ReleaseReminder, error)
@@ -1169,6 +1170,55 @@ func (s MemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt 
 		return ReleaseReminder{}, err
 	}
 	return completed, nil
+}
+
+func (s MemberStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error) {
+	unlock, err := s.lockMutation()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	defer unlock()
+	s = s.normalize()
+	now := s.currentTime()
+	acceptedAt, err = resolveAutoReleaseNotifiedAt(acceptedAt, now)
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	db, err := s.Load()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	for i := range db.Reminders {
+		current := db.Reminders[i]
+		if current.ProfileName != cycle.ProfileName {
+			continue
+		}
+		if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || (current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && current.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying) {
+			return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
+		}
+		if current.AutoReleaseAcceptedAt != "" {
+			if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRetrying || current.AutoReleaseLastError != "" {
+				current.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+				current.AutoReleaseLastError = ""
+				current.UpdatedAt = now.Format(time.RFC3339)
+				db.Reminders[i] = current
+				if err := s.saveUnlocked(db); err != nil {
+					return ReleaseReminder{}, false, err
+				}
+			}
+			return current, false, nil
+		}
+		current.AutoReleaseAcceptedAt = acceptedAt
+		current.AutoReleaseLastError = ""
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+		current.UpdatedAt = now.Format(time.RFC3339)
+		db.Reminders[i] = current
+		if err := s.saveUnlocked(db); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		return current, true, nil
+	}
+	return ReleaseReminder{}, false, releaseReminderNotFoundError(cycle.ProfileName)
 }
 
 func (s MemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {

@@ -1079,6 +1079,28 @@ func (s MySQLMemberStore) CompleteAutoRelease(cycle ReleaseReminderCycle, releas
 	return completeAutoReleaseInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, cycle, releasedTime)
 }
 
+func (s MySQLMemberStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error) {
+	defer s.lockMutation()()
+	now := s.currentTime()
+	acceptedAt, err := resolveAutoReleaseNotifiedAt(acceptedAt, now)
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	if err := s.EnsureSchema(); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	db, err := s.open()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	return markAutoReleaseConvergenceAcceptedInMySQLTransaction(sqlMySQLReleaseReminderTransaction{tx: tx}, cycle, acceptedAt, now)
+}
+
 func (s MySQLMemberStore) MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error) {
 	defer s.lockMutation()()
 	now := s.currentTime()
@@ -1772,6 +1794,64 @@ func markAutoReleaseNotifiedInMySQLTransaction(tx mysqlReleaseReminderTransactio
 	}
 	committed = true
 	return current, nil
+}
+
+func markAutoReleaseConvergenceAcceptedInMySQLTransaction(tx mysqlReleaseReminderTransaction, cycle ReleaseReminderCycle, acceptedAt string, now time.Time) (updated ReleaseReminder, transitioned bool, err error) {
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(); err == nil && rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+	if _, err = lockMySQLStore(tx); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	var current ReleaseReminder
+	if err = scanMySQLReleaseReminder(tx.QueryRow(mysqlReleaseReminderSelectForUpdate, cycle.ProfileName), &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ReleaseReminder{}, false, releaseReminderNotFoundError(cycle.ProfileName)
+		}
+		return ReleaseReminder{}, false, err
+	}
+	if !releaseReminderMatchesCycle(current, cycle) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || (current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning && current.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying) {
+		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
+	}
+	if current.AutoReleaseAcceptedAt != "" {
+		if current.AutoReleaseState == ReleaseReminderAutoReleaseStateRetrying || current.AutoReleaseLastError != "" {
+			current.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+			current.AutoReleaseLastError = ""
+			current.UpdatedAt = now.Format(time.RFC3339)
+			if err = updateMySQLReleaseReminder(tx, cycle.ProfileName, current); err != nil {
+				return ReleaseReminder{}, false, err
+			}
+			if err = advanceMySQLStoreLock(tx); err != nil {
+				return ReleaseReminder{}, false, err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return ReleaseReminder{}, false, err
+		}
+		committed = true
+		return current, false, nil
+	}
+	current.AutoReleaseAcceptedAt = acceptedAt
+	current.AutoReleaseLastError = ""
+	current.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+	current.UpdatedAt = now.Format(time.RFC3339)
+	if err = updateMySQLReleaseReminder(tx, cycle.ProfileName, current); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	if err = advanceMySQLStoreLock(tx); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return ReleaseReminder{}, false, err
+	}
+	committed = true
+	return current, true, nil
 }
 
 func completeAutoReleaseInMySQLTransaction(tx mysqlReleaseReminderTransaction, cycle ReleaseReminderCycle, releasedAt time.Time) (updated ReleaseReminder, err error) {
