@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	AutoReleaseGracePeriod   = 10 * time.Minute
-	AutoReleaseRetryInterval = 5 * time.Minute
-	AutoReleaseRetryWindow   = time.Hour
+	AutoReleaseGracePeriod           = 10 * time.Minute
+	AutoReleaseRetryInterval         = 5 * time.Minute
+	AutoReleaseRetryWindow           = time.Hour
+	AutoReleaseConvergenceWindow     = 24 * time.Hour
+	AutoReleaseStalledStatusInterval = 15 * time.Minute
 )
 
 type AutoReleaseNotificationKind string
@@ -792,6 +794,31 @@ func latestDestroyJobForCompletionChecks(jobs []Job, reminder ReleaseReminder) (
 
 func autoReleaseResourcesClean(status AWSStatus) bool {
 	return len(status.Hosts) == 0 && len(status.Instances) == 0 && strings.TrimSpace(status.ElasticIP.AssociationID) == "" && strings.TrimSpace(status.ElasticIP.InstanceID) == ""
+}
+
+func acceptedReleaseConverging(reminder ReleaseReminder, job Job, status AWSStatus) bool {
+	if !autoReleaseJobSupportsCompletionChecks(job) ||
+		len(status.Instances) != 0 ||
+		len(status.Hosts) != 1 ||
+		strings.TrimSpace(status.ElasticIP.AssociationID) != "" ||
+		strings.TrimSpace(status.ElasticIP.InstanceID) != "" {
+		return false
+	}
+
+	hostID := reminder.HostID
+	host := status.Hosts[0]
+	if strings.TrimSpace(hostID) == "" || host.State != "pending" || host.HostID != hostID {
+		return false
+	}
+	if len(job.ReleasedHosts) == 0 {
+		return true
+	}
+	for _, releasedHostID := range job.ReleasedHosts {
+		if releasedHostID == hostID {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAutoReleaseOwnership(reminder ReleaseReminder, profile Profile, status AWSStatus) error {

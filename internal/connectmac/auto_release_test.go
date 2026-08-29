@@ -12,6 +12,58 @@ import (
 	"time"
 )
 
+func TestAcceptedReleaseConvergence(t *testing.T) {
+	baseReminder := ReleaseReminder{HostID: "h-1"}
+	baseJob := Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-1"}}
+	baseStatus := AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "pending"}}}
+
+	tests := []struct {
+		name     string
+		reminder ReleaseReminder
+		job      Job
+		status   AWSStatus
+		want     bool
+	}{
+		{name: "structured success", reminder: baseReminder, job: baseJob, status: baseStatus, want: true},
+		{name: "structured deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleasedHosts: []string{"h-other", "h-1"}}, status: baseStatus, want: true},
+		{name: "legacy success", reminder: baseReminder, job: Job{Status: JobStatusSuccess}, status: baseStatus, want: true},
+		{name: "legacy deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred}, status: baseStatus, want: true},
+		{name: "retained unassociated EIP", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, ElasticIP: ElasticIP{AllocationID: "eipalloc-retained", PublicIP: "203.0.113.10"}}, want: true},
+		{name: "remaining instance", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, Instances: []InstanceStatus{{InstanceID: "i-1"}}}},
+		{name: "no host", reminder: baseReminder, job: baseJob, status: AWSStatus{}},
+		{name: "multiple hosts", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "pending"}, {HostID: "h-2", State: "pending"}}}},
+		{name: "associated EIP", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, ElasticIP: ElasticIP{AllocationID: "eipalloc-1", AssociationID: "eipassoc-1"}}},
+		{name: "EIP instance remains", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, ElasticIP: ElasticIP{AllocationID: "eipalloc-1", InstanceID: "i-1"}}},
+		{name: "available host", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "available"}}}},
+		{name: "blank host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1"}}}},
+		{name: "unknown host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "unknown"}}}},
+		{name: "released host state", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "released"}}}},
+		{name: "blank reminder host", reminder: ReleaseReminder{}, job: baseJob, status: baseStatus},
+		{name: "blank status host", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{State: "pending"}}}},
+		{name: "mismatched host", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-2", State: "pending"}}}},
+		{name: "failed job", reminder: baseReminder, job: Job{Status: JobStatusFailed, ReleasedHosts: []string{"h-1"}}, status: baseStatus},
+		{name: "running job", reminder: baseReminder, job: Job{Status: JobStatusRunning, ReleasedHosts: []string{"h-1"}}, status: baseStatus},
+		{name: "structured release excludes host", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-other"}}, status: baseStatus},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := acceptedReleaseConverging(test.reminder, test.job, test.status); got != test.want {
+				t.Fatalf("acceptedReleaseConverging() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAcceptedReleaseConvergenceConstants(t *testing.T) {
+	if AutoReleaseConvergenceWindow != 24*time.Hour {
+		t.Fatalf("AutoReleaseConvergenceWindow = %s, want 24h", AutoReleaseConvergenceWindow)
+	}
+	if AutoReleaseStalledStatusInterval != 15*time.Minute {
+		t.Fatalf("AutoReleaseStalledStatusInterval = %s, want 15m", AutoReleaseStalledStatusInterval)
+	}
+}
+
 func TestAutoReleaseDueFlowSchedulesOnlyWhenEnabled(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
 	for _, test := range []struct {
