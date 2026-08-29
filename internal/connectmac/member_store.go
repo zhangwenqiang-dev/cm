@@ -214,30 +214,32 @@ const (
 )
 
 type ReleaseReminder struct {
-	ProfileName              string `json:"profile_name"`
-	AppleEmail               string `json:"apple_email,omitempty"`
-	HostID                   string `json:"host_id,omitempty"`
-	HostArchitecture         string `json:"host_architecture,omitempty"`
-	HostCreatedAt            string `json:"host_created_at,omitempty"`
-	ReleaseDueAt             string `json:"release_due_at,omitempty"`
-	OwnerEmail               string `json:"owner_email,omitempty"`
-	OwnerName                string `json:"owner_name,omitempty"`
-	LastExtendedByEmail      string `json:"last_extended_by_email,omitempty"`
-	LastExtendedByName       string `json:"last_extended_by_name,omitempty"`
-	LastExtendedAt           string `json:"last_extended_at,omitempty"`
-	LastNotifiedAt           string `json:"last_notified_at,omitempty"`
-	ReleasedAt               string `json:"released_at,omitempty"`
-	Status                   string `json:"status"`
-	AutoReleaseEnabled       bool   `json:"auto_release_enabled"`
-	AutoReleaseAt            string `json:"auto_release_at,omitempty"`
-	AutoReleaseStartedAt     string `json:"auto_release_started_at,omitempty"`
-	AutoReleaseLastAttemptAt string `json:"auto_release_last_attempt_at,omitempty"`
-	AutoReleaseNotifiedAt    string `json:"auto_release_notified_at,omitempty"`
-	AutoReleaseAttempts      int    `json:"auto_release_attempts,omitempty"`
-	AutoReleaseLastError     string `json:"auto_release_last_error,omitempty"`
-	AutoReleaseState         string `json:"auto_release_state,omitempty"`
-	CreatedAt                string `json:"created_at"`
-	UpdatedAt                string `json:"updated_at"`
+	ProfileName                  string `json:"profile_name"`
+	AppleEmail                   string `json:"apple_email,omitempty"`
+	HostID                       string `json:"host_id,omitempty"`
+	HostArchitecture             string `json:"host_architecture,omitempty"`
+	HostCreatedAt                string `json:"host_created_at,omitempty"`
+	ReleaseDueAt                 string `json:"release_due_at,omitempty"`
+	OwnerEmail                   string `json:"owner_email,omitempty"`
+	OwnerName                    string `json:"owner_name,omitempty"`
+	LastExtendedByEmail          string `json:"last_extended_by_email,omitempty"`
+	LastExtendedByName           string `json:"last_extended_by_name,omitempty"`
+	LastExtendedAt               string `json:"last_extended_at,omitempty"`
+	LastNotifiedAt               string `json:"last_notified_at,omitempty"`
+	ReleasedAt                   string `json:"released_at,omitempty"`
+	Status                       string `json:"status"`
+	AutoReleaseEnabled           bool   `json:"auto_release_enabled"`
+	AutoReleaseAt                string `json:"auto_release_at,omitempty"`
+	AutoReleaseStartedAt         string `json:"auto_release_started_at,omitempty"`
+	AutoReleaseLastAttemptAt     string `json:"auto_release_last_attempt_at,omitempty"`
+	AutoReleaseAcceptedAt        string `json:"auto_release_accepted_at,omitempty"`
+	AutoReleaseStalledNotifiedAt string `json:"auto_release_stalled_notified_at,omitempty"`
+	AutoReleaseNotifiedAt        string `json:"auto_release_notified_at,omitempty"`
+	AutoReleaseAttempts          int    `json:"auto_release_attempts,omitempty"`
+	AutoReleaseLastError         string `json:"auto_release_last_error,omitempty"`
+	AutoReleaseState             string `json:"auto_release_state,omitempty"`
+	CreatedAt                    string `json:"created_at"`
+	UpdatedAt                    string `json:"updated_at"`
 }
 
 type ReleaseReminderCycle struct {
@@ -2602,8 +2604,12 @@ func normalizeReleaseReminderCallback(current, updated ReleaseReminder, now stri
 		AppleEmail:           updated.AppleEmail,
 		OwnerEmail:           updated.OwnerEmail,
 	}) {
+		updated.AutoReleaseAcceptedAt = current.AutoReleaseAcceptedAt
+		updated.AutoReleaseStalledNotifiedAt = current.AutoReleaseStalledNotifiedAt
 		updated.AutoReleaseNotifiedAt = current.AutoReleaseNotifiedAt
 	} else {
+		updated.AutoReleaseAcceptedAt = ""
+		updated.AutoReleaseStalledNotifiedAt = ""
 		updated.AutoReleaseNotifiedAt = ""
 	}
 	updated.UpdatedAt = now
@@ -2622,6 +2628,8 @@ func mergeReleaseReminderUpsert(current, updated ReleaseReminder, now string) Re
 	updated.AutoReleaseAt = current.AutoReleaseAt
 	updated.AutoReleaseStartedAt = current.AutoReleaseStartedAt
 	updated.AutoReleaseLastAttemptAt = current.AutoReleaseLastAttemptAt
+	updated.AutoReleaseAcceptedAt = current.AutoReleaseAcceptedAt
+	updated.AutoReleaseStalledNotifiedAt = current.AutoReleaseStalledNotifiedAt
 	updated.AutoReleaseNotifiedAt = current.AutoReleaseNotifiedAt
 	updated.AutoReleaseAttempts = current.AutoReleaseAttempts
 	updated.AutoReleaseLastError = current.AutoReleaseLastError
@@ -2634,6 +2642,8 @@ func resetAutoReleaseForNewCycle(reminder ReleaseReminder) ReleaseReminder {
 	reminder.AutoReleaseAt = ""
 	reminder.AutoReleaseStartedAt = ""
 	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseAcceptedAt = ""
+	reminder.AutoReleaseStalledNotifiedAt = ""
 	reminder.AutoReleaseNotifiedAt = ""
 	reminder.AutoReleaseAttempts = 0
 	reminder.AutoReleaseLastError = ""
