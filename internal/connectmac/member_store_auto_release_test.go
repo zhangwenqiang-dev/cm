@@ -662,6 +662,8 @@ func TestAutoReleaseNotificationMarkerPreservedOnUnrelatedUpdates(t *testing.T) 
 	old := runningAutoReleaseReminder("owner@example.com")
 	old.AutoReleaseState = ReleaseReminderAutoReleaseStateRetrying
 	old.AutoReleaseLastError = "host is pending"
+	old.AutoReleaseAcceptedAt = "2026-07-13T08:30:00Z"
+	old.AutoReleaseStalledNotifiedAt = "2026-07-13T08:45:00Z"
 	old.AutoReleaseNotifiedAt = "2026-07-13T09:00:00Z"
 	if _, err := store.UpsertReleaseReminder(old); err != nil {
 		t.Fatalf("upsert old reminder: %v", err)
@@ -670,6 +672,8 @@ func TestAutoReleaseNotificationMarkerPreservedOnUnrelatedUpdates(t *testing.T) 
 	updated := old
 	updated.HostCreatedAt = "2026-07-13T08:00:00Z"
 	updated.OwnerName = "Updated Owner"
+	updated.AutoReleaseAcceptedAt = ""
+	updated.AutoReleaseStalledNotifiedAt = ""
 	updated.AutoReleaseNotifiedAt = ""
 	got, err := store.UpsertReleaseReminder(updated)
 	if err != nil {
@@ -678,7 +682,7 @@ func TestAutoReleaseNotificationMarkerPreservedOnUnrelatedUpdates(t *testing.T) 
 	if got.HostID != old.HostID || got.AppleEmail != old.AppleEmail || got.OwnerEmail != old.OwnerEmail || got.OwnerName != updated.OwnerName || got.Status != old.Status {
 		t.Fatalf("same-cycle fields not updated: %+v", got)
 	}
-	if !got.AutoReleaseEnabled || got.AutoReleaseAt != old.AutoReleaseAt || got.AutoReleaseStartedAt != old.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != old.AutoReleaseLastAttemptAt || got.AutoReleaseNotifiedAt != old.AutoReleaseNotifiedAt || got.AutoReleaseAttempts != old.AutoReleaseAttempts || got.AutoReleaseLastError != old.AutoReleaseLastError || got.AutoReleaseState != old.AutoReleaseState {
+	if !got.AutoReleaseEnabled || got.AutoReleaseAt != old.AutoReleaseAt || got.AutoReleaseStartedAt != old.AutoReleaseStartedAt || got.AutoReleaseLastAttemptAt != old.AutoReleaseLastAttemptAt || got.AutoReleaseAcceptedAt != old.AutoReleaseAcceptedAt || got.AutoReleaseStalledNotifiedAt != old.AutoReleaseStalledNotifiedAt || got.AutoReleaseNotifiedAt != old.AutoReleaseNotifiedAt || got.AutoReleaseAttempts != old.AutoReleaseAttempts || got.AutoReleaseLastError != old.AutoReleaseLastError || got.AutoReleaseState != old.AutoReleaseState {
 		t.Fatalf("same-cycle auto-release state was not preserved: %+v", got)
 	}
 
@@ -689,7 +693,7 @@ func TestAutoReleaseNotificationMarkerPreservedOnUnrelatedUpdates(t *testing.T) 
 	if err != nil {
 		t.Fatalf("update unrelated reminder field: %v", err)
 	}
-	if got.ReleaseDueAt != "2026-07-15T08:00:00Z" || got.AutoReleaseNotifiedAt != old.AutoReleaseNotifiedAt {
+	if got.ReleaseDueAt != "2026-07-15T08:00:00Z" || got.AutoReleaseAcceptedAt != old.AutoReleaseAcceptedAt || got.AutoReleaseStalledNotifiedAt != old.AutoReleaseStalledNotifiedAt || got.AutoReleaseNotifiedAt != old.AutoReleaseNotifiedAt {
 		t.Fatalf("unrelated callback update changed marker: %+v", got)
 	}
 }
