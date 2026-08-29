@@ -488,7 +488,7 @@ func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminde
 	if autoReleaseResourcesClean(status) {
 		return c.completeRelease(reminder, profile, now)
 	}
-	if acceptedReleaseConverging(reminder, Job{Status: JobStatusSuccess}, status) {
+	if acceptedHostReleaseTopology(reminder, status) {
 		return warningErr
 	}
 	return errors.Join(warningErr, c.finishFailure(reminder, now, TerminalAutoReleaseError(errors.New("managed resources no longer match the accepted host release"))))
@@ -996,8 +996,21 @@ func autoReleaseResourcesClean(status AWSStatus) bool {
 }
 
 func acceptedReleaseConverging(reminder ReleaseReminder, job Job, status AWSStatus) bool {
-	if !autoReleaseJobSupportsCompletionChecks(job) ||
-		len(status.Instances) != 0 ||
+	if !job.ReleaseEvidenceRecorded ||
+		!autoReleaseJobSupportsCompletionChecks(job) ||
+		!acceptedHostReleaseTopology(reminder, status) {
+		return false
+	}
+	for _, releasedHostID := range job.ReleasedHosts {
+		if releasedHostID == reminder.HostID {
+			return true
+		}
+	}
+	return false
+}
+
+func acceptedHostReleaseTopology(reminder ReleaseReminder, status AWSStatus) bool {
+	if len(status.Instances) != 0 ||
 		len(status.Hosts) != 1 ||
 		strings.TrimSpace(status.ElasticIP.AssociationID) != "" ||
 		strings.TrimSpace(status.ElasticIP.InstanceID) != "" {
@@ -1009,15 +1022,7 @@ func acceptedReleaseConverging(reminder ReleaseReminder, job Job, status AWSStat
 	if strings.TrimSpace(hostID) == "" || host.State != "pending" || host.HostID != hostID {
 		return false
 	}
-	if len(job.ReleasedHosts) == 0 {
-		return !job.ReleaseEvidenceRecorded
-	}
-	for _, releasedHostID := range job.ReleasedHosts {
-		if releasedHostID == hostID {
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 func validateAutoReleaseOwnership(reminder ReleaseReminder, profile Profile, status AWSStatus) error {

@@ -27,10 +27,10 @@ func TestAcceptedReleaseConvergence(t *testing.T) {
 	}{
 		{name: "structured success", reminder: baseReminder, job: baseJob, status: baseStatus, want: true},
 		{name: "structured deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-other", "h-1"}}, status: baseStatus, want: true},
-		{name: "pre-marker structured match", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-1"}}, status: baseStatus, want: true},
+		{name: "pre-marker structured match", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-1"}}, status: baseStatus},
 		{name: "pre-marker structured mismatch", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleasedHosts: []string{"h-other"}}, status: baseStatus},
-		{name: "legacy success", reminder: baseReminder, job: Job{Status: JobStatusSuccess}, status: baseStatus, want: true},
-		{name: "legacy deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred}, status: baseStatus, want: true},
+		{name: "legacy success", reminder: baseReminder, job: Job{Status: JobStatusSuccess}, status: baseStatus},
+		{name: "legacy deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred}, status: baseStatus},
 		{name: "modern success without accepted host", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleaseEvidenceRecorded: true}, status: baseStatus},
 		{name: "modern deferred host transition without accepted host", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleaseEvidenceRecorded: true}, status: baseStatus},
 		{name: "retained unassociated EIP", reminder: baseReminder, job: baseJob, status: AWSStatus{Hosts: baseStatus.Hosts, ElasticIP: ElasticIP{AllocationID: "eipalloc-retained", PublicIP: "203.0.113.10"}}, want: true},
@@ -78,8 +78,7 @@ func TestAutoReleaseRunningAdoptsConvergence(t *testing.T) {
 		name string
 		job  Job
 	}{
-		{name: "modern", job: Job{ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-1"}}},
-		{name: "legacy", job: Job{}},
+		{name: "structured", job: Job{ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-1"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reminder := runningAutoRelease(now.Add(-time.Minute))
@@ -538,7 +537,7 @@ func TestAutoReleaseRetryingAdoptsConvergenceBeforeAndAfterMutationRetryDeadline
 			coordinator, notifications, starts := newAutoReleaseTestCoordinator(now, store)
 			coordinator.Jobs = &autoReleaseTestJobs{jobs: []Job{{
 				ID: "legacy-success", Type: "aws-destroy", Profile: "mac", AppleEmail: reminder.AppleEmail,
-				Status: JobStatusSuccess, StartedAt: started,
+				Status: JobStatusSuccess, StartedAt: started, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-1"},
 			}}}
 			coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
 				return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
@@ -565,7 +564,7 @@ func TestAutoReleaseRetryingResumeDoesNotEmitExistingConvergenceTransition(t *te
 	coordinator, _, starts := newAutoReleaseTestCoordinator(now, store)
 	coordinator.Jobs = &autoReleaseTestJobs{jobs: []Job{{
 		ID: "legacy-success", Type: "aws-destroy", Profile: "mac", AppleEmail: reminder.AppleEmail,
-		Status: JobStatusSuccess, StartedAt: started,
+		Status: JobStatusSuccess, StartedAt: started, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-1"},
 	}}}
 	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
 		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
