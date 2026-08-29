@@ -2,7 +2,9 @@ package connectmac
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -395,11 +397,53 @@ func (c RealAWSClient) TerminateInstance(ctx context.Context, instanceID string)
 }
 
 func (c RealAWSClient) ReleaseHost(ctx context.Context, hostID string) error {
-	_, err := c.ec2.ReleaseHosts(ctx, &ec2.ReleaseHostsInput{
+	out, err := c.ec2.ReleaseHosts(ctx, &ec2.ReleaseHostsInput{
 		HostIds: []string{hostID},
 	})
 	if err != nil {
 		return fmt.Errorf("release host %s: %w", hostID, err)
+	}
+	if err := validateReleaseHostOutput(hostID, out); err != nil {
+		return fmt.Errorf("release host %s: %w", hostID, err)
+	}
+	return nil
+}
+
+func validateReleaseHostOutput(hostID string, out *ec2.ReleaseHostsOutput) error {
+	if out == nil {
+		return errors.New("AWS did not confirm host release")
+	}
+	successful := false
+	for _, releasedHostID := range out.Successful {
+		if releasedHostID == hostID {
+			successful = true
+			break
+		}
+	}
+	var unsuccessful *ec2types.UnsuccessfulItem
+	for i := range out.Unsuccessful {
+		if aws.ToString(out.Unsuccessful[i].ResourceId) == hostID {
+			unsuccessful = &out.Unsuccessful[i]
+			break
+		}
+	}
+	if successful && unsuccessful != nil {
+		return errors.New("AWS returned contradictory host release results")
+	}
+	if unsuccessful != nil {
+		code, message := "unknown error", "host release was unsuccessful"
+		if unsuccessful.Error != nil {
+			if value := strings.TrimSpace(aws.ToString(unsuccessful.Error.Code)); value != "" {
+				code = value
+			}
+			if value := strings.TrimSpace(aws.ToString(unsuccessful.Error.Message)); value != "" {
+				message = value
+			}
+		}
+		return fmt.Errorf("%s: %s", code, message)
+	}
+	if !successful {
+		return errors.New("AWS did not confirm host release")
 	}
 	return nil
 }
