@@ -2549,14 +2549,22 @@ cm local-agent start</pre>
       return false;
     }
 
+    function autoReleaseConvergenceActive(reminder) {
+      return reminder?.auto_release_state === "running" && !!reminder?.auto_release_accepted_at;
+    }
+
+    function autoReleaseErrorVisible(reminder) {
+      return !autoReleaseConvergenceActive(reminder) && !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");
+    }
+
     function autoReleaseStateText(reminder, profile) {
       if (!reminder) return "未开启自动释放";
       if (reminder.status === "released" || reminder.auto_release_state === "released") {
         return profile && profileReady(profile.name) ? "Mac 已运行，可重新设置自动释放" : "已释放";
       }
       if (!reminder.auto_release_enabled) return "未开启自动释放";
-      if (reminder.auto_release_accepted_at && !reminder.auto_release_stalled_notified_at) return "正在释放，等待 AWS 完成";
-      if (reminder.auto_release_accepted_at && reminder.auto_release_stalled_notified_at) return "AWS Host 释放时间较长，系统仍在检查";
+      if (autoReleaseConvergenceActive(reminder) && !reminder.auto_release_stalled_notified_at) return "正在释放，等待 AWS 完成";
+      if (autoReleaseConvergenceActive(reminder) && reminder.auto_release_stalled_notified_at) return "AWS Host 释放时间较长，系统仍在检查";
       if (reminder.auto_release_state === "scheduled" && reminder.auto_release_at) return `将在 ${formatTime(reminder.auto_release_at)} 自动释放`;
       if (reminder.auto_release_state === "running") return "正在自动释放";
       if (reminder.auto_release_state === "retrying") {
@@ -2579,7 +2587,7 @@ cm local-agent start</pre>
       $("autoReleaseSummary").textContent = autoReleaseStateText(reminder, profile);
       $("autoReleaseTime").textContent = reminder?.auto_release_at ? "自动释放时间：" + formatTime(reminder.auto_release_at) : "";
       $("autoReleaseTime").classList.toggle("hidden", !reminder?.auto_release_at || reminder?.auto_release_state === "scheduled");
-      const showError = !reminder?.auto_release_accepted_at && !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");
+      const showError = autoReleaseErrorVisible(reminder);
       $("autoReleaseError").textContent = showError ? "上次错误：" + reminder.auto_release_last_error : "";
       $("autoReleaseError").classList.toggle("hidden", !showError);
       $("autoReleaseToggleBtn").textContent = enabled ? "关闭自动释放" : "开启自动释放";

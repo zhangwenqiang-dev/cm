@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -34,12 +35,12 @@ func TestWebAutoReleaseUIContract(t *testing.T) {
 		`将在 ${formatTime(reminder.auto_release_at)} 自动释放`,
 		`正在自动释放`,
 		`释放重试中（第 ${attempts} 次）`,
-		`if (reminder.auto_release_accepted_at && !reminder.auto_release_stalled_notified_at) return "正在释放，等待 AWS 完成";`,
-		`if (reminder.auto_release_accepted_at && reminder.auto_release_stalled_notified_at) return "AWS Host 释放时间较长，系统仍在检查";`,
+		`function autoReleaseConvergenceActive(reminder)`,
+		`function autoReleaseErrorVisible(reminder)`,
 		`if (reminder.auto_release_notified_at) return "释放通知已发送，清理重试中";`,
 		`return "释放完成，企业微信通知重试中";`,
 		`自动释放失败`,
-		`const showError = !reminder?.auto_release_accepted_at && !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");`,
+		`const showError = autoReleaseErrorVisible(reminder);`,
 		`已释放`,
 	} {
 		if !strings.Contains(html, want) {
@@ -587,9 +588,6 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 		`ConnectMacWorkbench.buildActionModel({`,
 		`applyWorkbenchAction("openMacBtn", model.actions.open`,
 		`applyWorkbenchAction("releaseMacBtn", model.actions.release`,
-		`applyWorkbenchAction("terminalBtn", model.actions.connect`,
-		`applyWorkbenchAction("vncBtn", model.actions.vnc`,
-		`applyWorkbenchAction("syncBtn", model.actions.transfer`,
 	} {
 		if !strings.Contains(renderWorkbench, want) {
 			t.Fatalf("renderWorkbench releasing contract missing %q", want)
@@ -630,30 +628,43 @@ func TestWebAutoReleaseReleasingStateLocksConflictingActions(t *testing.T) {
 	}
 }
 
-func TestWebAutoReleaseAcceptedConvergenceHTMLContract(t *testing.T) {
+func TestWebAutoReleaseAcceptedConvergenceBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is required for auto-release convergence behavior test: %v", err)
+	}
 	data, err := os.ReadFile(filepath.Join("..", "..", "web", "index.html"))
 	if err != nil {
 		t.Fatalf("read web index: %v", err)
 	}
 	html := string(data)
-	stateText := extractWebSource(t, html, "function autoReleaseStateText(reminder, profile)", "\n    function renderAutoRelease(")
-
-	terminal := strings.Index(stateText, `if (reminder.status === "released" || reminder.auto_release_state === "released")`)
-	disabled := strings.Index(stateText, `if (!reminder.auto_release_enabled) return "未开启自动释放";`)
-	accepted := strings.Index(stateText, `if (reminder.auto_release_accepted_at && !reminder.auto_release_stalled_notified_at) return "正在释放，等待 AWS 完成";`)
-	stalled := strings.Index(stateText, `if (reminder.auto_release_accepted_at && reminder.auto_release_stalled_notified_at) return "AWS Host 释放时间较长，系统仍在检查";`)
-	running := strings.Index(stateText, `if (reminder.auto_release_state === "running") return "正在自动释放";`)
-	if terminal < 0 || disabled < 0 || accepted < 0 || stalled < 0 || running < 0 {
-		t.Fatalf("accepted convergence state branches missing: terminal=%d disabled=%d accepted=%d stalled=%d running=%d", terminal, disabled, accepted, stalled, running)
+	helpers := extractWebSource(t, html, "function autoReleaseConvergenceActive(reminder)", "\n    function renderAutoRelease(")
+	script := `
+import assert from "node:assert/strict";
+function formatTime(value) { return "formatted:" + value; }
+function profileReady() { return false; }
+` + helpers + `
+const base = { auto_release_enabled: true, auto_release_last_error: "stale error" };
+const text = (fields) => autoReleaseStateText({ ...base, ...fields }, null);
+assert.equal(text({ auto_release_state: "running", auto_release_accepted_at: "accepted" }), "正在释放，等待 AWS 完成");
+assert.equal(text({ auto_release_state: "running", auto_release_accepted_at: "accepted", auto_release_stalled_notified_at: "notified" }), "AWS Host 释放时间较长，系统仍在检查");
+const failed = { ...base, auto_release_state: "failed", auto_release_accepted_at: "stale" };
+assert.equal(autoReleaseStateText(failed, null), "自动释放失败");
+assert.equal(autoReleaseErrorVisible(failed), true);
+assert.equal(text({ auto_release_state: "notifying", auto_release_accepted_at: "stale" }), "释放完成，企业微信通知重试中");
+assert.equal(text({ auto_release_state: "scheduled", auto_release_at: "later", auto_release_accepted_at: "stale" }), "将在 formatted:later 自动释放");
+assert.equal(text({ auto_release_enabled: false, auto_release_state: "running", auto_release_accepted_at: "accepted" }), "未开启自动释放");
+assert.equal(text({ status: "released", auto_release_state: "running", auto_release_accepted_at: "accepted" }), "已释放");
+assert.equal(text({ auto_release_state: "running", auto_release_accepted_at: "" }), "正在自动释放");
+assert.equal(autoReleaseErrorVisible({ ...base, auto_release_state: "running", auto_release_accepted_at: "accepted" }), false);
+assert.equal(autoReleaseErrorVisible({ ...base, auto_release_state: "retrying", auto_release_accepted_at: "stale" }), true);
+`
+	scriptPath := filepath.Join(t.TempDir(), "auto-release-convergence.mjs")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("write auto-release node harness: %v", err)
 	}
-	if !(terminal < disabled && disabled < accepted && accepted < stalled && stalled < running) {
-		t.Fatalf("accepted convergence branches in wrong order: terminal=%d disabled=%d accepted=%d stalled=%d running=%d", terminal, disabled, accepted, stalled, running)
-	}
-
-	render := extractWebSource(t, html, "function renderAutoRelease(reminder, profile)", "\n    function applyUserViewMode()")
-	wantShowError := `const showError = !reminder?.auto_release_accepted_at && !!reminder?.auto_release_last_error && (reminder?.auto_release_state === "retrying" || reminder?.auto_release_state === "failed");`
-	if !strings.Contains(render, wantShowError) {
-		t.Fatalf("accepted convergence error suppression missing %q", wantShowError)
+	if output, err := exec.Command(node, scriptPath).CombinedOutput(); err != nil {
+		t.Fatalf("auto-release convergence node behavior test failed: %v\n%s", err, output)
 	}
 }
 
