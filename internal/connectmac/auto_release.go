@@ -117,6 +117,8 @@ func applyReleaseReminderExtension(reminder ReleaseReminder, dueAt, now time.Tim
 	reminder.AutoReleaseAt = ""
 	reminder.AutoReleaseStartedAt = ""
 	reminder.AutoReleaseLastAttemptAt = ""
+	reminder.AutoReleaseAcceptedAt = ""
+	reminder.AutoReleaseStalledNotifiedAt = ""
 	reminder.AutoReleaseAttempts = 0
 	reminder.AutoReleaseLastError = ""
 	reminder.AutoReleaseState = ""
@@ -239,6 +241,12 @@ func (c *AutoReleaseCoordinator) advancePending(ctx context.Context, reminder Re
 	if hasActiveDestroyJob(active, reminder.ProfileName) {
 		return nil
 	}
+	if reminder.AutoReleaseState == ReleaseReminderAutoReleaseStateRetrying {
+		handled, err := c.adoptRetryingConvergence(ctx, reminder, now)
+		if err != nil || handled {
+			return err
+		}
+	}
 	if retryWindowExpired {
 		jobs, err := c.Jobs.List()
 		if err != nil {
@@ -325,6 +333,9 @@ func (c *AutoReleaseCoordinator) claim(reminder ReleaseReminder, now time.Time) 
 }
 
 func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	if reminder.AutoReleaseAcceptedAt != "" {
+		return c.observeConvergence(ctx, reminder, now)
+	}
 	active, err := c.Jobs.Active()
 	if err != nil {
 		return err
@@ -348,15 +359,18 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 		return c.markRetrying(reminder, now, errors.New("automatic release was running but no active destroy job remains"))
 	}
 	c.emitObservedJob(reminder, job)
-	if retryWindowExpired {
-		return c.inspectAtMutationDeadline(ctx, reminder, now, autoReleaseJobSupportsCompletionChecks(job))
-	}
 	profile, err := c.resolveAndValidateProfile(ctx, reminder)
 	if err != nil {
+		if retryWindowExpired {
+			return c.recordMutationDeadlineReadFailure(reminder, now, err, autoReleaseJobSupportsCompletionChecks(job))
+		}
 		return c.recordAttemptFailure(reminder, now, err, false)
 	}
 	status, err := c.Status(ctx, profile)
 	if err != nil {
+		if retryWindowExpired {
+			return c.recordMutationDeadlineReadFailure(reminder, now, err, autoReleaseJobSupportsCompletionChecks(job))
+		}
 		return c.recordAttemptFailure(reminder, now, err, false)
 	}
 	if err := validateAutoReleaseOwnership(reminder, profile, status); err != nil {
@@ -364,6 +378,16 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 	}
 	if autoReleaseResourcesClean(status) {
 		return c.completeRelease(reminder, profile, now)
+	}
+	if acceptedReleaseConverging(reminder, job, status) {
+		return c.acceptConvergence(reminder, now, job)
+	}
+	if retryWindowExpired {
+		cause := fmt.Errorf("automatic release retry window of %s expired while managed resources remain", AutoReleaseRetryWindow)
+		if autoReleaseJobSupportsCompletionChecks(job) {
+			return c.markRetrying(reminder, now, cause)
+		}
+		return c.finishFailure(reminder, now, cause)
 	}
 	detail := strings.TrimSpace(job.LastError)
 	if detail == "" {
@@ -381,6 +405,127 @@ func (c *AutoReleaseCoordinator) observeRunning(ctx context.Context, reminder Re
 		}
 	}
 	return c.recordAttemptFailure(reminder, now, cause, true)
+}
+
+func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminder ReleaseReminder, now time.Time) error {
+	profile, err := c.resolveAndValidateProfile(ctx, reminder)
+	if err != nil {
+		if autoReleaseErrorCategoryOf(err) == autoReleaseErrorTerminal {
+			return c.finishFailure(reminder, now, err)
+		}
+		return c.recordConvergenceReadFailure(reminder, err)
+	}
+	status, err := c.Status(ctx, profile)
+	if err != nil {
+		return c.recordConvergenceReadFailure(reminder, err)
+	}
+	if err := validateAutoReleaseOwnership(reminder, profile, status); err != nil {
+		return c.finishFailure(reminder, now, TerminalAutoReleaseError(err))
+	}
+	if autoReleaseResourcesClean(status) {
+		return c.completeRelease(reminder, profile, now)
+	}
+	if acceptedReleaseConverging(reminder, Job{Status: JobStatusSuccess}, status) {
+		return nil
+	}
+	return c.finishFailure(reminder, now, TerminalAutoReleaseError(errors.New("managed resources no longer match the accepted host release")))
+}
+
+func (c *AutoReleaseCoordinator) recordConvergenceReadFailure(reminder ReleaseReminder, cause error) error {
+	cause = sanitizeOperationalError(cause)
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || current.AutoReleaseAcceptedAt != reminder.AutoReleaseAcceptedAt || current.AutoReleaseAcceptedAt == "" {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.AutoReleaseLastError = cause.Error()
+		return current, nil
+	})
+	if err != nil {
+		return err
+	}
+	c.emit("convergence-read-error", updated, updated.AutoReleaseAttempts, cause.Error())
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) adoptRetryingConvergence(ctx context.Context, reminder ReleaseReminder, now time.Time) (bool, error) {
+	jobs, err := c.Jobs.List()
+	if err != nil {
+		return true, err
+	}
+	job, found := latestDestroyJobForCompletionChecks(jobs, reminder)
+	if !found {
+		return false, nil
+	}
+	c.emitObservedJob(reminder, job)
+	profile, err := c.resolveAndValidateProfile(ctx, reminder)
+	if err != nil {
+		return true, c.finishFailure(reminder, now, err)
+	}
+	status, err := c.Status(ctx, profile)
+	if err != nil {
+		return true, c.recordExpiredCompletionCheckFailure(reminder, err)
+	}
+	if err := validateAutoReleaseOwnership(reminder, profile, status); err != nil {
+		return true, c.finishFailure(reminder, now, TerminalAutoReleaseError(err))
+	}
+	if autoReleaseResourcesClean(status) {
+		resumed, err := c.resumeRetryingCompletion(reminder, now, false)
+		if err != nil {
+			return true, err
+		}
+		return true, c.completeRelease(resumed, profile, now)
+	}
+	if acceptedReleaseConverging(reminder, job, status) {
+		updated, err := c.resumeRetryingCompletion(reminder, now, true)
+		if err == nil {
+			c.emitConvergenceWaiting(updated, job)
+		}
+		return true, err
+	}
+	return false, nil
+}
+
+func (c *AutoReleaseCoordinator) resumeRetryingCompletion(reminder ReleaseReminder, now time.Time, accepted bool) (ReleaseReminder, error) {
+	return c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying {
+			return current, errAutoReleaseCycleChanged
+		}
+		current.AutoReleaseState = ReleaseReminderAutoReleaseStateRunning
+		current.AutoReleaseLastError = ""
+		if accepted && current.AutoReleaseAcceptedAt == "" {
+			current.AutoReleaseAcceptedAt = now.UTC().Format(time.RFC3339)
+		}
+		return current, nil
+	})
+}
+
+func (c *AutoReleaseCoordinator) acceptConvergence(reminder ReleaseReminder, now time.Time, job Job) error {
+	updated, err := c.Store.UpdateReleaseReminder(reminder.ProfileName, func(current ReleaseReminder) (ReleaseReminder, error) {
+		if !sameAutoReleaseClaim(current, reminder) || current.Status != ReleaseReminderStatusDueNotified || !current.AutoReleaseEnabled || current.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning {
+			return current, errAutoReleaseCycleChanged
+		}
+		if current.AutoReleaseAcceptedAt == "" {
+			current.AutoReleaseAcceptedAt = now.UTC().Format(time.RFC3339)
+		}
+		current.AutoReleaseLastError = ""
+		return current, nil
+	})
+	if err != nil {
+		return err
+	}
+	c.emitConvergenceWaiting(updated, job)
+	return nil
+}
+
+func (c *AutoReleaseCoordinator) emitConvergenceWaiting(reminder ReleaseReminder, job Job) {
+	if c.Emit == nil {
+		return
+	}
+	c.Emit(AutoReleaseEvent{
+		Action: "convergence-waiting", Reminder: reminder, Attempt: reminder.AutoReleaseAttempts,
+		RequestID: job.RequestID, JobID: job.ID, CycleID: autoReleaseCycleID(reminder),
+		Message: fmt.Sprintf("job_id=%s request_id=%s", job.ID, job.RequestID),
+	})
 }
 
 func (c *AutoReleaseCoordinator) inspectAtMutationDeadline(ctx context.Context, reminder ReleaseReminder, now time.Time, completionChecksContinue bool) error {
