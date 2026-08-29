@@ -201,7 +201,7 @@ func TestAutoReleaseLegacyConvergenceEvidenceIsInvalidatedWithoutMutation(t *tes
 		t.Fatalf("Scan: %v", err)
 	}
 	got := store.get(reminder.ProfileName)
-	if got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || got.AutoReleaseAt != now.Format(time.RFC3339) || got.AutoReleaseAcceptedAt != "" || got.AutoReleaseStalledNotifyClaimedAt != "" || got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseNotifiedAt != "" {
+	if got.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || got.AutoReleaseAt != now.Format(time.RFC3339) || got.AutoReleaseStartedAt != now.Format(time.RFC3339) || got.AutoReleaseAcceptedAt != "" || got.AutoReleaseStalledNotifyClaimedAt != "" || got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseNotifiedAt != "" {
 		t.Fatalf("reminder = %+v", got)
 	}
 	if statusCalls != 0 || len(*notifications) != 0 || len(*starts) != 0 {
@@ -209,6 +209,15 @@ func TestAutoReleaseLegacyConvergenceEvidenceIsInvalidatedWithoutMutation(t *tes
 	}
 	if len(events) != 1 || events[0].Action != "convergence-evidence-invalidated" {
 		t.Fatalf("events = %+v", events)
+	}
+
+	coordinator, notifications, starts = newAutoReleaseTestCoordinator(now.Add(time.Minute), store)
+	coordinator.Jobs = &autoReleaseTestJobs{}
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatalf("retry Scan: %v", err)
+	}
+	if len(*starts) != 1 || len(*notifications) != 0 {
+		t.Fatalf("starts=%d notifications=%+v", len(*starts), *notifications)
 	}
 }
 
@@ -2137,6 +2146,7 @@ func (s *autoReleaseTestStore) ResetLegacyAutoReleaseConvergence(cycle ReleaseRe
 		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
 	}
 	reminder.AutoReleaseAt = retryAt
+	reminder.AutoReleaseStartedAt = retryAt
 	reminder.AutoReleaseAcceptedAt = ""
 	reminder.AutoReleaseStalledNotifyClaimedAt = ""
 	reminder.AutoReleaseStalledNotifiedAt = ""

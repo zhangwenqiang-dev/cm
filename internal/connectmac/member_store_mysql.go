@@ -1111,6 +1111,7 @@ func (s MySQLMemberStore) ResetLegacyAutoReleaseConvergence(cycle ReleaseReminde
 	}
 	return s.updateAcceptedConvergence(cycle, func(current ReleaseReminder) (ReleaseReminder, bool, error) {
 		current.AutoReleaseAt = retryAt
+		current.AutoReleaseStartedAt = retryAt
 		current.AutoReleaseAcceptedAt = ""
 		current.AutoReleaseStalledNotifyClaimedAt = ""
 		current.AutoReleaseStalledNotifiedAt = ""

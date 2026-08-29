@@ -1236,6 +1236,7 @@ func (s MemberStore) ResetLegacyAutoReleaseConvergence(cycle ReleaseReminderCycl
 			return ReleaseReminder{}, false, err
 		}
 		current.AutoReleaseAt = value
+		current.AutoReleaseStartedAt = value
 		current.AutoReleaseAcceptedAt = ""
 		current.AutoReleaseStalledNotifyClaimedAt = ""
 		current.AutoReleaseStalledNotifiedAt = ""

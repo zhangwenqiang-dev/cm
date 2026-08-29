@@ -130,7 +130,7 @@ func TestMemberStoreResetLegacyAutoReleaseConvergence(t *testing.T) {
 	if !transitioned || reset.AutoReleaseState != ReleaseReminderAutoReleaseStateRetrying || reset.AutoReleaseAt != retryAt || reset.AutoReleaseAcceptedAt != "" || reset.AutoReleaseStalledNotifyClaimedAt != "" || reset.AutoReleaseStalledNotifiedAt != "" || reset.AutoReleaseNotifiedAt != "" || reset.AutoReleaseLastError != "release evidence is not structured" {
 		t.Fatalf("reset reminder = %+v transitioned=%t", reset, transitioned)
 	}
-	if reset.HostID != reminder.HostID || reset.OwnerEmail != reminder.OwnerEmail || reset.AutoReleaseAttempts != reminder.AutoReleaseAttempts || reset.AutoReleaseStartedAt != reminder.AutoReleaseStartedAt {
+	if reset.HostID != reminder.HostID || reset.OwnerEmail != reminder.OwnerEmail || reset.AutoReleaseAttempts != reminder.AutoReleaseAttempts || reset.AutoReleaseStartedAt != retryAt {
 		t.Fatalf("workflow identity changed: before=%+v after=%+v", reminder, reset)
 	}
 
@@ -152,6 +152,7 @@ func TestMySQLResetLegacyAutoReleaseConvergence(t *testing.T) {
 	reminder.UpdatedAt = now.Add(-time.Hour).Format(time.RFC3339)
 	want := reminder
 	want.AutoReleaseAt = now.Format(time.RFC3339)
+	want.AutoReleaseStartedAt = now.Format(time.RFC3339)
 	want.AutoReleaseAcceptedAt = ""
 	want.AutoReleaseStalledNotifyClaimedAt = ""
 	want.AutoReleaseStalledNotifiedAt = ""
