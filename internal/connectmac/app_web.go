@@ -1583,6 +1583,7 @@ func clearReleaseReminderAutoCycle(reminder ReleaseReminder) ReleaseReminder {
 	reminder.AutoReleaseStartedAt = ""
 	reminder.AutoReleaseLastAttemptAt = ""
 	reminder.AutoReleaseAcceptedAt = ""
+	reminder.AutoReleaseStalledNotifyClaimedAt = ""
 	reminder.AutoReleaseStalledNotifiedAt = ""
 	reminder.AutoReleaseAttempts = 0
 	reminder.AutoReleaseLastError = ""

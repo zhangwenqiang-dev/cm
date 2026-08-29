@@ -149,7 +149,11 @@ func TestAutoReleaseStalledMarkerAndStatusClaimPersistAtomically(t *testing.T) {
 	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
 		t.Fatal(err)
 	}
-	marked, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), "")
+	claimToken := now.Format(time.RFC3339)
+	if _, claimed, _, err := store.ClaimAutoReleaseStalledNotification(releaseReminderCycle(reminder), claimToken, AutoReleaseStalledNotificationLease); err != nil || !claimed {
+		t.Fatalf("delivery claim=%t err=%v", claimed, err)
+	}
+	marked, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), claimToken, "")
 	if err != nil || !transitioned || marked.AutoReleaseStalledNotifiedAt != now.Format(time.RFC3339) {
 		t.Fatalf("marked=%+v transitioned=%t err=%v", marked, transitioned, err)
 	}
@@ -161,7 +165,7 @@ func TestAutoReleaseStalledMarkerAndStatusClaimPersistAtomically(t *testing.T) {
 	if err != nil || !ok || reloaded.AutoReleaseStalledNotifiedAt == "" || reloaded.AutoReleaseLastAttemptAt == "" {
 		t.Fatalf("reloaded=%+v ok=%t err=%v", reloaded, ok, err)
 	}
-	if _, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), now.Add(time.Minute).Format(time.RFC3339)); err != nil || transitioned {
+	if _, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), claimToken, now.Add(time.Minute).Format(time.RFC3339)); err != nil || transitioned {
 		t.Fatalf("repeat transition=%t err=%v", transitioned, err)
 	}
 	if _, claimedOK, err := store.ClaimAutoReleaseConvergenceStatusCheck(releaseReminderCycle(reminder), now.Add(time.Minute).Format(time.RFC3339), AutoReleaseStalledStatusInterval); err != nil || claimedOK {
@@ -194,7 +198,7 @@ func TestAutoReleaseAcceptedStoreOperationsRejectInvalidCycleState(t *testing.T)
 			if _, err := store.UpsertReleaseReminder(reminder); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := store.MarkAutoReleaseStalledNotified(cycle, ""); !errors.Is(err, ErrReleaseReminderCycleChanged) {
+			if _, _, err := store.MarkAutoReleaseStalledNotified(cycle, now.Format(time.RFC3339), ""); !errors.Is(err, ErrReleaseReminderCycleChanged) {
 				t.Fatalf("marker err=%v", err)
 			}
 			if _, _, err := store.ClaimAutoReleaseConvergenceStatusCheck(cycle, "", AutoReleaseStalledStatusInterval); !errors.Is(err, ErrReleaseReminderCycleChanged) {
@@ -246,13 +250,47 @@ func TestAutoReleaseFileStoreConvergenceStatusClaimHasSingleConcurrentWinner(t *
 	}
 }
 
+func TestAutoReleaseStalledNotificationLeaseClaimReclaimAndTokens(t *testing.T) {
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	store := MemberStore{Path: filepath.Join(t.TempDir(), "members.json"), Now: func() time.Time { return now }}
+	reminder := runningAutoReleaseReminder("owner@example.com")
+	reminder.AutoReleaseAcceptedAt = now.Add(-AutoReleaseConvergenceWindow).Format(time.RFC3339)
+	if _, err := store.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatal(err)
+	}
+	cycle := releaseReminderCycle(reminder)
+	first := now.Format(time.RFC3339)
+	if got, claimed, reclaimed, err := store.ClaimAutoReleaseStalledNotification(cycle, first, AutoReleaseStalledNotificationLease); err != nil || !claimed || reclaimed || got.AutoReleaseStalledNotifyClaimedAt != first {
+		t.Fatalf("first claim got=%+v claimed=%t reclaimed=%t err=%v", got, claimed, reclaimed, err)
+	}
+	if _, claimed, reclaimed, err := store.ClaimAutoReleaseStalledNotification(cycle, now.Add(time.Minute).Format(time.RFC3339), AutoReleaseStalledNotificationLease); err != nil || claimed || reclaimed {
+		t.Fatalf("fresh repeat claimed=%t reclaimed=%t err=%v", claimed, reclaimed, err)
+	}
+	second := now.Add(AutoReleaseStalledNotificationLease).Format(time.RFC3339)
+	if _, claimed, reclaimed, err := store.ClaimAutoReleaseStalledNotification(cycle, second, AutoReleaseStalledNotificationLease); err != nil || !claimed || !reclaimed {
+		t.Fatalf("stale reclaim claimed=%t reclaimed=%t err=%v", claimed, reclaimed, err)
+	}
+	if _, transitioned, err := store.MarkAutoReleaseStalledNotified(cycle, first, second); !errors.Is(err, ErrReleaseReminderCycleChanged) || transitioned {
+		t.Fatalf("stale finalize transitioned=%t err=%v", transitioned, err)
+	}
+	if _, released, err := store.ReleaseAutoReleaseStalledNotificationClaim(cycle, first); err != nil || released {
+		t.Fatalf("stale release released=%t err=%v", released, err)
+	}
+	if got, transitioned, err := store.MarkAutoReleaseStalledNotified(cycle, second, second); err != nil || !transitioned || got.AutoReleaseStalledNotifyClaimedAt != "" || got.AutoReleaseStalledNotifiedAt != second {
+		t.Fatalf("finalize got=%+v transitioned=%t err=%v", got, transitioned, err)
+	}
+}
+
 func TestMySQLMarksAutoReleaseStalledNotificationAtomically(t *testing.T) {
 	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
 	reminder := runningAutoReleaseReminder("owner@example.com")
 	reminder.AutoReleaseAcceptedAt = now.Add(-24 * time.Hour).Format(time.RFC3339)
 	want := reminder
-	want.AutoReleaseStalledNotifiedAt = now.Format(time.RFC3339)
+	want.AutoReleaseStalledNotifyClaimedAt = now.Format(time.RFC3339)
 	want.UpdatedAt = now.Format(time.RFC3339)
+	final := want
+	final.AutoReleaseStalledNotifyClaimedAt = ""
+	final.AutoReleaseStalledNotifiedAt = now.Format(time.RFC3339)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -263,8 +301,25 @@ func TestMySQLMarksAutoReleaseStalledNotificationAtomically(t *testing.T) {
 	expectMySQLAutoReleaseReminderUpdate(mock, want)
 	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).WithArgs(mysqlStoreLockName).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	got, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), "")
-	if err != nil || !transitioned || !reflect.DeepEqual(got, want) {
+	got, claimed, reclaimed, err := store.ClaimAutoReleaseStalledNotification(releaseReminderCycle(reminder), "", AutoReleaseStalledNotificationLease)
+	if err != nil || !claimed || reclaimed || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%+v claimed=%t reclaimed=%t err=%v", got, claimed, reclaimed, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err = sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = mysqlAutoReleaseTestStore(db, now)
+	mock.ExpectBegin()
+	expectMySQLAutoReleaseLockedReminder(mock, want)
+	expectMySQLAutoReleaseReminderUpdate(mock, final)
+	mock.ExpectExec(regexp.QuoteMeta(mysqlStoreLockAdvanceQuery)).WithArgs(mysqlStoreLockName).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	got, transitioned, err := store.MarkAutoReleaseStalledNotified(releaseReminderCycle(reminder), now.Format(time.RFC3339), "")
+	if err != nil || !transitioned || !reflect.DeepEqual(got, final) {
 		t.Fatalf("got=%+v transitioned=%t err=%v", got, transitioned, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -378,7 +433,7 @@ func TestMySQLAutoReleaseConvergenceStatusClaimUpdateFailureRollsBack(t *testing
 		want.OwnerEmail, want.OwnerName, want.LastExtendedByEmail, want.LastExtendedByName,
 		want.LastExtendedAt, want.LastNotifiedAt, want.ReleasedAt, want.Status,
 		want.AutoReleaseEnabled, want.AutoReleaseAt, want.AutoReleaseStartedAt,
-		want.AutoReleaseLastAttemptAt, want.AutoReleaseAcceptedAt, want.AutoReleaseStalledNotifiedAt,
+		want.AutoReleaseLastAttemptAt, want.AutoReleaseAcceptedAt, want.AutoReleaseStalledNotifyClaimedAt, want.AutoReleaseStalledNotifiedAt,
 		want.AutoReleaseNotifiedAt, want.AutoReleaseAttempts,
 		want.AutoReleaseLastError, want.AutoReleaseState, want.UpdatedAt, want.ProfileName,
 	).WillReturnError(wantErr)
@@ -1188,6 +1243,7 @@ func releaseReminderCycle(reminder ReleaseReminder) ReleaseReminderCycle {
 func TestMySQLAutoReleaseNotificationMarkerSchemaAndLegacyEmptyValue(t *testing.T) {
 	for _, wantMigration := range []string{
 		`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_accepted_at VARCHAR(64) NULL`,
+		`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_stalled_notify_claimed_at VARCHAR(64) NULL`,
 		`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_stalled_notified_at VARCHAR(64) NULL`,
 		`ALTER TABLE cm_release_reminders ADD COLUMN auto_release_notified_at VARCHAR(64) NULL`,
 	} {
@@ -1196,12 +1252,12 @@ func TestMySQLAutoReleaseNotificationMarkerSchemaAndLegacyEmptyValue(t *testing.
 		}
 	}
 	joinedSchema := strings.Join(mysqlSchemaStatements(), "\n")
-	wantSchemaOrder := "auto_release_last_attempt_at VARCHAR(64) NULL,\n\t\t\tauto_release_accepted_at VARCHAR(64) NULL,\n\t\t\tauto_release_stalled_notified_at VARCHAR(64) NULL,\n\t\t\tauto_release_notified_at VARCHAR(64) NULL,\n\t\t\tauto_release_attempts INT NOT NULL DEFAULT 0"
+	wantSchemaOrder := "auto_release_last_attempt_at VARCHAR(64) NULL,\n\t\t\tauto_release_accepted_at VARCHAR(64) NULL,\n\t\t\tauto_release_stalled_notify_claimed_at VARCHAR(64) NULL,\n\t\t\tauto_release_stalled_notified_at VARCHAR(64) NULL,\n\t\t\tauto_release_notified_at VARCHAR(64) NULL,\n\t\t\tauto_release_attempts INT NOT NULL DEFAULT 0"
 	if !strings.Contains(joinedSchema, wantSchemaOrder) {
 		t.Fatalf("release reminder schema marker ordering missing from:\n%s", joinedSchema)
 	}
 
-	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_architecture, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_accepted_at, ''), COALESCE(auto_release_stalled_notified_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
+	wantColumns := `profile_name, COALESCE(apple_email, ''), COALESCE(host_id, ''), COALESCE(host_architecture, ''), COALESCE(host_created_at, ''), COALESCE(release_due_at, ''), COALESCE(owner_email, ''), COALESCE(owner_name, ''), COALESCE(last_extended_by_email, ''), COALESCE(last_extended_by_name, ''), COALESCE(last_extended_at, ''), COALESCE(last_notified_at, ''), COALESCE(released_at, ''), status, auto_release_enabled, COALESCE(auto_release_at, ''), COALESCE(auto_release_started_at, ''), COALESCE(auto_release_last_attempt_at, ''), COALESCE(auto_release_accepted_at, ''), COALESCE(auto_release_stalled_notify_claimed_at, ''), COALESCE(auto_release_stalled_notified_at, ''), COALESCE(auto_release_notified_at, ''), auto_release_attempts, COALESCE(auto_release_last_error, ''), COALESCE(auto_release_state, ''), created_at, updated_at`
 	if mysqlReleaseReminderSelectColumns != wantColumns {
 		t.Fatalf("release reminder SELECT columns = %q, want %q", mysqlReleaseReminderSelectColumns, wantColumns)
 	}
@@ -1244,13 +1300,13 @@ func TestMySQLAutoReleaseNotificationMarkerSQLColumnAndArgumentOrdering(t *testi
 	reminder.CreatedAt = "2026-07-13T08:00:00Z"
 	reminder.UpdatedAt = "2026-07-13T09:01:00Z"
 
-	wantInsertQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_architecture, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_accepted_at, auto_release_stalled_notified_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	wantInsertQuery := `INSERT INTO cm_release_reminders (profile_name, apple_email, host_id, host_architecture, host_created_at, release_due_at, owner_email, owner_name, last_extended_by_email, last_extended_by_name, last_extended_at, last_notified_at, released_at, status, auto_release_enabled, auto_release_at, auto_release_started_at, auto_release_last_attempt_at, auto_release_accepted_at, auto_release_stalled_notify_claimed_at, auto_release_stalled_notified_at, auto_release_notified_at, auto_release_attempts, auto_release_last_error, auto_release_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	wantInsertArgs := []any{
 		reminder.ProfileName, reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt,
 		reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName,
 		reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status,
 		reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt,
-		reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifiedAt,
+		reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifyClaimedAt, reminder.AutoReleaseStalledNotifiedAt,
 		reminder.AutoReleaseNotifiedAt, reminder.AutoReleaseAttempts,
 		reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt,
 	}
@@ -1262,13 +1318,13 @@ func TestMySQLAutoReleaseNotificationMarkerSQLColumnAndArgumentOrdering(t *testi
 		t.Fatalf("insert query/args = %q %#v, want %q %#v", insertRecorder.query, insertRecorder.args, wantInsertQuery, wantInsertArgs)
 	}
 
-	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_architecture = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_accepted_at = ?, auto_release_stalled_notified_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
+	wantUpdateQuery := `UPDATE cm_release_reminders SET apple_email = ?, host_id = ?, host_architecture = ?, host_created_at = ?, release_due_at = ?, owner_email = ?, owner_name = ?, last_extended_by_email = ?, last_extended_by_name = ?, last_extended_at = ?, last_notified_at = ?, released_at = ?, status = ?, auto_release_enabled = ?, auto_release_at = ?, auto_release_started_at = ?, auto_release_last_attempt_at = ?, auto_release_accepted_at = ?, auto_release_stalled_notify_claimed_at = ?, auto_release_stalled_notified_at = ?, auto_release_notified_at = ?, auto_release_attempts = ?, auto_release_last_error = ?, auto_release_state = ?, updated_at = ? WHERE profile_name = ?`
 	wantUpdateArgs := []any{
 		reminder.AppleEmail, reminder.HostID, reminder.HostArchitecture, reminder.HostCreatedAt, reminder.ReleaseDueAt, reminder.OwnerEmail,
 		reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName, reminder.LastExtendedAt,
 		reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status, reminder.AutoReleaseEnabled,
 		reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt, reminder.AutoReleaseLastAttemptAt,
-		reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifiedAt,
+		reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifyClaimedAt, reminder.AutoReleaseStalledNotifiedAt,
 		reminder.AutoReleaseNotifiedAt, reminder.AutoReleaseAttempts, reminder.AutoReleaseLastError,
 		reminder.AutoReleaseState, reminder.UpdatedAt, reminder.ProfileName,
 	}
@@ -1671,7 +1727,7 @@ var mysqlAutoReleaseReminderColumnNames = []string{
 	"profile_name", "apple_email", "host_id", "host_architecture", "host_created_at", "release_due_at", "owner_email", "owner_name",
 	"last_extended_by_email", "last_extended_by_name", "last_extended_at", "last_notified_at", "released_at", "status",
 	"auto_release_enabled", "auto_release_at", "auto_release_started_at", "auto_release_last_attempt_at", "auto_release_accepted_at",
-	"auto_release_stalled_notified_at", "auto_release_notified_at",
+	"auto_release_stalled_notify_claimed_at", "auto_release_stalled_notified_at", "auto_release_notified_at",
 	"auto_release_attempts", "auto_release_last_error", "auto_release_state", "created_at", "updated_at",
 }
 
@@ -1681,7 +1737,7 @@ func mysqlAutoReleaseReminderRows(reminder ReleaseReminder) *sqlmock.Rows {
 		reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName,
 		reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status,
 		reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt,
-		reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifiedAt,
+		reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifyClaimedAt, reminder.AutoReleaseStalledNotifiedAt,
 		reminder.AutoReleaseNotifiedAt, reminder.AutoReleaseAttempts,
 		reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.CreatedAt, reminder.UpdatedAt,
 	)
@@ -1712,7 +1768,7 @@ func expectMySQLAutoReleaseReminderUpdate(mock sqlmock.Sqlmock, reminder Release
 			reminder.OwnerEmail, reminder.OwnerName, reminder.LastExtendedByEmail, reminder.LastExtendedByName,
 			reminder.LastExtendedAt, reminder.LastNotifiedAt, reminder.ReleasedAt, reminder.Status,
 			reminder.AutoReleaseEnabled, reminder.AutoReleaseAt, reminder.AutoReleaseStartedAt,
-			reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifiedAt,
+			reminder.AutoReleaseLastAttemptAt, reminder.AutoReleaseAcceptedAt, reminder.AutoReleaseStalledNotifyClaimedAt, reminder.AutoReleaseStalledNotifiedAt,
 			reminder.AutoReleaseNotifiedAt, reminder.AutoReleaseAttempts,
 			reminder.AutoReleaseLastError, reminder.AutoReleaseState, reminder.UpdatedAt, reminder.ProfileName,
 		).

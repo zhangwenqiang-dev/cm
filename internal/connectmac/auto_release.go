@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	AutoReleaseGracePeriod           = 10 * time.Minute
-	AutoReleaseRetryInterval         = 5 * time.Minute
-	AutoReleaseRetryWindow           = time.Hour
-	AutoReleaseConvergenceWindow     = 24 * time.Hour
-	AutoReleaseStalledStatusInterval = 15 * time.Minute
+	AutoReleaseGracePeriod              = 10 * time.Minute
+	AutoReleaseRetryInterval            = 5 * time.Minute
+	AutoReleaseRetryWindow              = time.Hour
+	AutoReleaseConvergenceWindow        = 24 * time.Hour
+	AutoReleaseStalledStatusInterval    = 15 * time.Minute
+	AutoReleaseStalledNotificationLease = 5 * time.Minute
 )
 
 type AutoReleaseNotificationKind string
@@ -53,7 +54,9 @@ type AutoReleaseStore interface {
 	ReleaseReminder(profileName string) (ReleaseReminder, bool, error)
 	UpdateReleaseReminder(profileName string, update func(ReleaseReminder) (ReleaseReminder, error)) (ReleaseReminder, error)
 	MarkAutoReleaseConvergenceAccepted(cycle ReleaseReminderCycle, acceptedAt string) (ReleaseReminder, bool, error)
-	MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, bool, error)
+	ClaimAutoReleaseStalledNotification(cycle ReleaseReminderCycle, claimedAt string, leaseDuration time.Duration) (ReleaseReminder, bool, bool, error)
+	MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, claimToken, notifiedAt string) (ReleaseReminder, bool, error)
+	ReleaseAutoReleaseStalledNotificationClaim(cycle ReleaseReminderCycle, claimToken string) (ReleaseReminder, bool, error)
 	ClaimAutoReleaseConvergenceStatusCheck(cycle ReleaseReminderCycle, attemptedAt string, interval time.Duration) (ReleaseReminder, bool, error)
 	MarkAutoReleaseNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, error)
 	CompleteAutoRelease(cycle ReleaseReminderCycle, releasedAt string) (ReleaseReminder, error)
@@ -122,6 +125,7 @@ func applyReleaseReminderExtension(reminder ReleaseReminder, dueAt, now time.Tim
 	reminder.AutoReleaseStartedAt = ""
 	reminder.AutoReleaseLastAttemptAt = ""
 	reminder.AutoReleaseAcceptedAt = ""
+	reminder.AutoReleaseStalledNotifyClaimedAt = ""
 	reminder.AutoReleaseStalledNotifiedAt = ""
 	reminder.AutoReleaseAttempts = 0
 	reminder.AutoReleaseLastError = ""
@@ -419,23 +423,39 @@ func (c *AutoReleaseCoordinator) observeConvergence(ctx context.Context, reminde
 	stalled := !now.Before(acceptedAt.Add(AutoReleaseConvergenceWindow))
 	var warningErr error
 	if stalled && reminder.AutoReleaseStalledNotifiedAt == "" {
-		if c.Notify != nil {
-			if err := c.Notify(AutoReleaseNotification{
-				Kind: AutoReleaseNotificationStalled, Reminder: reminder,
-				Attempt: reminder.AutoReleaseAttempts, CycleID: autoReleaseCycleID(reminder),
-			}); err != nil {
-				warningErr = sanitizeOperationalError(err)
+		claimToken := now.Format(time.RFC3339)
+		claimedReminder, claimed, reclaimed, err := c.Store.ClaimAutoReleaseStalledNotification(releaseReminderCycleFromReminder(reminder), claimToken, AutoReleaseStalledNotificationLease)
+		if err != nil {
+			warningErr = sanitizeOperationalError(fmt.Errorf("stalled convergence warning delivery claim is ambiguous: %w", err))
+			c.emit("convergence-stalled-delivery-claim-ambiguous", reminder, reminder.AutoReleaseAttempts, warningErr.Error())
+		} else if claimed {
+			reminder = claimedReminder
+			if reclaimed {
+				c.emit("convergence-stalled-delivery-claim-expired-ambiguous", reminder, reminder.AutoReleaseAttempts, "expired warning delivery claim reclaimed; prior process may have delivered before stopping")
 			}
-		}
-		if warningErr == nil {
-			marked, transitioned, err := c.Store.MarkAutoReleaseStalledNotified(releaseReminderCycleFromReminder(reminder), now.Format(time.RFC3339))
-			if err != nil {
-				warningErr = sanitizeOperationalError(fmt.Errorf("stalled convergence warning was accepted but marker persistence is ambiguous; notification may be duplicated on retry: %w", err))
-				c.emit("convergence-stalled-persistence-ambiguous", reminder, reminder.AutoReleaseAttempts, warningErr.Error())
-			} else {
-				reminder = marked
-				if transitioned {
-					c.emit("convergence-stalled", reminder, reminder.AutoReleaseAttempts, "accepted host release remains incomplete after 24 hours")
+			if c.Notify != nil {
+				if err := c.Notify(AutoReleaseNotification{
+					Kind: AutoReleaseNotificationStalled, Reminder: reminder,
+					Attempt: reminder.AutoReleaseAttempts, CycleID: autoReleaseCycleID(reminder),
+				}); err != nil {
+					warningErr = sanitizeOperationalError(err)
+					if _, _, releaseErr := c.Store.ReleaseAutoReleaseStalledNotificationClaim(releaseReminderCycleFromReminder(reminder), claimToken); releaseErr != nil {
+						ambiguity := sanitizeOperationalError(fmt.Errorf("stalled warning failed and matching delivery claim release is ambiguous: %w", releaseErr))
+						c.emit("convergence-stalled-delivery-claim-release-ambiguous", reminder, reminder.AutoReleaseAttempts, ambiguity.Error())
+						warningErr = errors.Join(warningErr, ambiguity)
+					}
+				}
+			}
+			if warningErr == nil {
+				marked, transitioned, err := c.Store.MarkAutoReleaseStalledNotified(releaseReminderCycleFromReminder(reminder), claimToken, now.Format(time.RFC3339))
+				if err != nil {
+					warningErr = sanitizeOperationalError(fmt.Errorf("stalled convergence warning was accepted but marker persistence is ambiguous; notification may be duplicated after lease expiry: %w", err))
+					c.emit("convergence-stalled-persistence-ambiguous", reminder, reminder.AutoReleaseAttempts, warningErr.Error())
+				} else {
+					reminder = marked
+					if transitioned {
+						c.emit("convergence-stalled", reminder, reminder.AutoReleaseAttempts, "accepted host release remains incomplete after 24 hours")
+					}
 				}
 			}
 		}

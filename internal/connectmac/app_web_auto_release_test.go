@@ -2109,11 +2109,11 @@ func TestWechatAutoReleaseStalledMappingIsExact(t *testing.T) {
 func TestAppWebAutoReleaseResetClearsAcceptedAndStalledMarkers(t *testing.T) {
 	reminder := ReleaseReminder{
 		AutoReleaseAt: "at", AutoReleaseStartedAt: "started", AutoReleaseLastAttemptAt: "attempt",
-		AutoReleaseAcceptedAt: "accepted", AutoReleaseStalledNotifiedAt: "stalled", AutoReleaseNotifiedAt: "notified",
+		AutoReleaseAcceptedAt: "accepted", AutoReleaseStalledNotifyClaimedAt: "claimed", AutoReleaseStalledNotifiedAt: "stalled", AutoReleaseNotifiedAt: "notified",
 		AutoReleaseAttempts: 2, AutoReleaseLastError: "error", AutoReleaseState: ReleaseReminderAutoReleaseStateScheduled,
 	}
 	got := clearReleaseReminderAutoCycle(reminder)
-	if got.AutoReleaseAcceptedAt != "" || got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseAt != "" || got.AutoReleaseState != "" {
+	if got.AutoReleaseAcceptedAt != "" || got.AutoReleaseStalledNotifyClaimedAt != "" || got.AutoReleaseStalledNotifiedAt != "" || got.AutoReleaseAt != "" || got.AutoReleaseState != "" {
 		t.Fatalf("reset=%+v", got)
 	}
 }

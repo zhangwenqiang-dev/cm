@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -273,6 +274,109 @@ func TestAutoReleaseConvergenceStalledNotificationFailureRetriesWithoutMarker(t 
 	}
 	if attempts != 2 || statusCalls != 1 || store.get("mac").AutoReleaseStalledNotifiedAt == "" {
 		t.Fatalf("attempts=%d statusCalls=%d reminder=%+v", attempts, statusCalls, store.get("mac"))
+	}
+}
+
+func TestAutoReleaseConcurrentFileCoordinatorsLeaseStalledWarning(t *testing.T) {
+	accepted := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	now := accepted.Add(AutoReleaseConvergenceWindow)
+	path := filepath.Join(t.TempDir(), "members.json")
+	seed := MemberStore{Path: path, Now: func() time.Time { return now }}
+	reminder := runningAutoRelease(accepted.Add(-time.Hour))
+	reminder.AutoReleaseAcceptedAt = accepted.Format(time.RFC3339)
+	if _, err := seed.UpsertReleaseReminder(reminder); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var notifyCalls atomic.Int32
+	var statusCalls atomic.Int32
+	newCoordinator := func() *AutoReleaseCoordinator {
+		return &AutoReleaseCoordinator{
+			Now: func() time.Time { return now }, Store: MemberStore{Path: path, Now: func() time.Time { return now }}, Jobs: &autoReleasePanicJobs{t: t},
+			ResolveProfile: func(context.Context, ReleaseReminder) (Profile, error) { return autoReleaseTestProfile(), nil },
+			Status: func(context.Context, Profile) (AWSStatus, error) {
+				statusCalls.Add(1)
+				return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
+			},
+			StartDestroy: func(context.Context, Profile) (Job, error) { return Job{}, errors.New("unexpected destroy") },
+			Notify: func(notification AutoReleaseNotification) error {
+				if notification.Kind != AutoReleaseNotificationStalled {
+					t.Errorf("notification=%+v", notification)
+				}
+				if notifyCalls.Add(1) == 1 {
+					once.Do(func() { close(started) })
+					<-release
+				}
+				return nil
+			},
+		}
+	}
+	results := make(chan error, 2)
+	go func() { results <- newCoordinator().Scan(context.Background()) }()
+	select {
+	case <-started:
+	case err := <-results:
+		t.Fatalf("first coordinator exited before warning: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("first warning did not start")
+	}
+	go func() { results <- newCoordinator().Scan(context.Background()) }()
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nonclaimant blocked behind warning delivery")
+	}
+	close(release)
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := seed.ReleaseReminder(reminder.ProfileName)
+	if err != nil || !ok || got.AutoReleaseStalledNotifiedAt == "" || got.AutoReleaseStalledNotifyClaimedAt != "" || notifyCalls.Load() != 1 || statusCalls.Load() != 1 {
+		t.Fatalf("got=%+v ok=%t err=%v notify=%d status=%d", got, ok, err, notifyCalls.Load(), statusCalls.Load())
+	}
+}
+
+func TestAutoReleaseStalledWarningCrashLeaseAndReclaimAmbiguity(t *testing.T) {
+	accepted := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
+	claimedAt := accepted.Add(AutoReleaseConvergenceWindow).Format(time.RFC3339)
+	reminder := runningAutoRelease(accepted.Add(-time.Hour))
+	reminder.AutoReleaseAcceptedAt = accepted.Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifyClaimedAt = claimedAt
+	store := newAutoReleaseTestStore(reminder)
+	notifyCalls := 0
+	events := []AutoReleaseEvent{}
+	coordinator, _, _ := newAutoReleaseTestCoordinator(accepted.Add(AutoReleaseConvergenceWindow+time.Minute), store)
+	coordinator.Jobs = &autoReleasePanicJobs{t: t}
+	coordinator.Notify = func(AutoReleaseNotification) error { notifyCalls++; return nil }
+	coordinator.Status = func(context.Context, Profile) (AWSStatus, error) {
+		return AWSStatus{Hosts: []DedicatedHostStatus{autoReleaseTestHost("pending")}}, nil
+	}
+	coordinator.Emit = func(event AutoReleaseEvent) { events = append(events, event) }
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if notifyCalls != 0 || store.get("mac").AutoReleaseStalledNotifyClaimedAt != claimedAt {
+		t.Fatalf("fresh claim resent: calls=%d reminder=%+v", notifyCalls, store.get("mac"))
+	}
+	coordinator.Now = func() time.Time {
+		return accepted.Add(AutoReleaseConvergenceWindow + AutoReleaseStalledNotificationLease)
+	}
+	if err := coordinator.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "convergence-stalled-delivery-claim-expired-ambiguous" {
+			found = true
+		}
+	}
+	if notifyCalls != 1 || !found || store.get("mac").AutoReleaseStalledNotifiedAt == "" {
+		t.Fatalf("reclaim calls=%d events=%+v reminder=%+v", notifyCalls, events, store.get("mac"))
 	}
 }
 
@@ -669,13 +773,14 @@ func TestApplyReleaseReminderExtensionCancelsScheduledCycleAndRejectsProtectedSt
 	reminder.AutoReleaseAttempts = 2
 	reminder.AutoReleaseLastError = "temporary"
 	reminder.AutoReleaseAcceptedAt = now.Add(-time.Minute).Format(time.RFC3339)
+	reminder.AutoReleaseStalledNotifyClaimedAt = now.Format(time.RFC3339)
 	reminder.AutoReleaseStalledNotifiedAt = now.Format(time.RFC3339)
 
 	updated, err := applyReleaseReminderExtension(reminder, now.Add(AutoReleaseGracePeriod), now, "member@example.com", "Member")
 	if err != nil {
 		t.Fatalf("apply extension: %v", err)
 	}
-	if updated.Status != ReleaseReminderStatusActive || updated.AutoReleaseState != "" || updated.AutoReleaseAt != "" || updated.AutoReleaseStartedAt != "" || updated.AutoReleaseLastAttemptAt != "" || updated.AutoReleaseAcceptedAt != "" || updated.AutoReleaseStalledNotifiedAt != "" || updated.AutoReleaseAttempts != 0 || updated.AutoReleaseLastError != "" {
+	if updated.Status != ReleaseReminderStatusActive || updated.AutoReleaseState != "" || updated.AutoReleaseAt != "" || updated.AutoReleaseStartedAt != "" || updated.AutoReleaseLastAttemptAt != "" || updated.AutoReleaseAcceptedAt != "" || updated.AutoReleaseStalledNotifyClaimedAt != "" || updated.AutoReleaseStalledNotifiedAt != "" || updated.AutoReleaseAttempts != 0 || updated.AutoReleaseLastError != "" {
 		t.Fatalf("extension did not cancel cycle: %+v", updated)
 	}
 	if _, err := applyReleaseReminderExtension(reminder, now.Add(AutoReleaseGracePeriod-time.Second), now, "member@example.com", "Member"); err == nil {
@@ -1987,7 +2092,34 @@ func (s *autoReleaseTestStore) MarkAutoReleaseConvergenceAccepted(cycle ReleaseR
 	return reminder, true, nil
 }
 
-func (s *autoReleaseTestStore) MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, notifiedAt string) (ReleaseReminder, bool, error) {
+func (s *autoReleaseTestStore) ClaimAutoReleaseStalledNotification(cycle ReleaseReminderCycle, claimedAt string, leaseDuration time.Duration) (ReleaseReminder, bool, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reminder := s.reminders[cycle.ProfileName]
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.Status != ReleaseReminderStatusDueNotified || !reminder.AutoReleaseEnabled || reminder.AutoReleaseState != ReleaseReminderAutoReleaseStateRunning || reminder.AutoReleaseAcceptedAt == "" || reminder.AutoReleaseAcceptedAt != cycle.AutoReleaseAcceptedAt {
+		return ReleaseReminder{}, false, false, ErrReleaseReminderCycleChanged
+	}
+	if reminder.AutoReleaseStalledNotifiedAt != "" {
+		return reminder, false, false, nil
+	}
+	reclaimed := false
+	claimTime, _ := time.Parse(time.RFC3339, claimedAt)
+	if reminder.AutoReleaseStalledNotifyClaimedAt != "" {
+		previous, err := time.Parse(time.RFC3339, reminder.AutoReleaseStalledNotifyClaimedAt)
+		if err != nil {
+			return ReleaseReminder{}, false, false, err
+		}
+		if claimTime.Before(previous.Add(leaseDuration)) {
+			return reminder, false, false, nil
+		}
+		reclaimed = true
+	}
+	reminder.AutoReleaseStalledNotifyClaimedAt = claimedAt
+	s.reminders[cycle.ProfileName] = reminder
+	return reminder, true, reclaimed, nil
+}
+
+func (s *autoReleaseTestStore) MarkAutoReleaseStalledNotified(cycle ReleaseReminderCycle, claimToken, notifiedAt string) (ReleaseReminder, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.stalledMarkErrors) > 0 {
@@ -2004,7 +2136,26 @@ func (s *autoReleaseTestStore) MarkAutoReleaseStalledNotified(cycle ReleaseRemin
 	if reminder.AutoReleaseStalledNotifiedAt != "" {
 		return reminder, false, nil
 	}
+	if reminder.AutoReleaseStalledNotifyClaimedAt != claimToken || claimToken == "" {
+		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
+	}
 	reminder.AutoReleaseStalledNotifiedAt = notifiedAt
+	reminder.AutoReleaseStalledNotifyClaimedAt = ""
+	s.reminders[cycle.ProfileName] = reminder
+	return reminder, true, nil
+}
+
+func (s *autoReleaseTestStore) ReleaseAutoReleaseStalledNotificationClaim(cycle ReleaseReminderCycle, claimToken string) (ReleaseReminder, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reminder := s.reminders[cycle.ProfileName]
+	if !releaseReminderMatchesCycle(reminder, cycle) || reminder.AutoReleaseAcceptedAt != cycle.AutoReleaseAcceptedAt {
+		return ReleaseReminder{}, false, ErrReleaseReminderCycleChanged
+	}
+	if claimToken == "" || reminder.AutoReleaseStalledNotifyClaimedAt != claimToken {
+		return reminder, false, nil
+	}
+	reminder.AutoReleaseStalledNotifyClaimedAt = ""
 	s.reminders[cycle.ProfileName] = reminder
 	return reminder, true, nil
 }
