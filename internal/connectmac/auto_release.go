@@ -810,8 +810,8 @@ func acceptedReleaseConverging(reminder ReleaseReminder, job Job, status AWSStat
 	if strings.TrimSpace(hostID) == "" || host.State != "pending" || host.HostID != hostID {
 		return false
 	}
-	if !job.ReleaseEvidenceRecorded {
-		return true
+	if len(job.ReleasedHosts) == 0 {
+		return !job.ReleaseEvidenceRecorded
 	}
 	for _, releasedHostID := range job.ReleasedHosts {
 		if releasedHostID == hostID {

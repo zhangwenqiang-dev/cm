@@ -26,6 +26,8 @@ func TestAcceptedReleaseConvergence(t *testing.T) {
 	}{
 		{name: "structured success", reminder: baseReminder, job: baseJob, status: baseStatus, want: true},
 		{name: "structured deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleaseEvidenceRecorded: true, ReleasedHosts: []string{"h-other", "h-1"}}, status: baseStatus, want: true},
+		{name: "pre-marker structured match", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleasedHosts: []string{"h-1"}}, status: baseStatus, want: true},
+		{name: "pre-marker structured mismatch", reminder: baseReminder, job: Job{Status: JobStatusDeferred, ReleasedHosts: []string{"h-other"}}, status: baseStatus},
 		{name: "legacy success", reminder: baseReminder, job: Job{Status: JobStatusSuccess}, status: baseStatus, want: true},
 		{name: "legacy deferred", reminder: baseReminder, job: Job{Status: JobStatusDeferred}, status: baseStatus, want: true},
 		{name: "modern success without accepted host", reminder: baseReminder, job: Job{Status: JobStatusSuccess, ReleaseEvidenceRecorded: true}, status: baseStatus},
