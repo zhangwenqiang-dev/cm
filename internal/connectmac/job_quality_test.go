@@ -870,6 +870,109 @@ func TestJobManagerPersistsStructuredChildOutcome(t *testing.T) {
 	}
 }
 
+func TestJobOutcomeRoundTripsReleasedHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	t.Setenv(jobOutcomePathEnv, path)
+	want := JobOutcome{ReleasedHosts: []string{"h-accepted-1", "h-accepted-2"}}
+	if err := writeCurrentJobOutcome(want); err != nil {
+		t.Fatalf("write outcome: %v", err)
+	}
+	got, err := readJobOutcome(path)
+	if err != nil {
+		t.Fatalf("read outcome: %v", err)
+	}
+	if strings.Join(got.ReleasedHosts, ",") != strings.Join(want.ReleasedHosts, ",") {
+		t.Fatalf("released hosts = %v, want %v", got.ReleasedHosts, want.ReleasedHosts)
+	}
+}
+
+func TestJobManagerFinishRunJobPersistsReleasedHostsWithoutAliasing(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
+	outcomePath := filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(outcomePath, []byte(`{"released_hosts":["h-accepted"]}`), 0o600); err != nil {
+		t.Fatalf("write outcome file: %v", err)
+	}
+	job, err := manager.Create(Job{
+		ID:          "accepted-host-outcome",
+		Type:        "aws-destroy",
+		Profile:     "mac",
+		Status:      JobStatusRunning,
+		OutcomePath: outcomePath,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	outcome := &JobOutcome{ReleasedHosts: []string{"h-accepted"}}
+	completed, err := manager.finishRunJob(job.ID, JobStatusSuccess, nil, nil, outcome)
+	if err != nil {
+		t.Fatalf("finish job: %v", err)
+	}
+	outcome.ReleasedHosts[0] = "h-mutated"
+	if strings.Join(completed.ReleasedHosts, ",") != "h-accepted" {
+		t.Fatalf("completed released hosts aliased outcome: %v", completed.ReleasedHosts)
+	}
+	persisted, err := manager.loadRaw(job.ID)
+	if err != nil {
+		t.Fatalf("load completed job: %v", err)
+	}
+	if strings.Join(persisted.ReleasedHosts, ",") != "h-accepted" || persisted.OutcomePath != "" {
+		t.Fatalf("persisted job = %+v", persisted)
+	}
+	if _, err := os.Stat(outcomePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outcome file still exists: %v", err)
+	}
+}
+
+func TestDestroyJobPersistsAcceptedReleaseHosts(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		fake         *fakeAWSClient
+		wantDeferred bool
+	}{
+		{
+			name: "complete",
+			fake: &fakeAWSClient{status: AWSStatus{
+				Hosts: []DedicatedHostStatus{{HostID: "h-complete", State: "available", Tags: managedTestTags()}},
+			}},
+		},
+		{
+			name: "deferred after accepted release",
+			fake: &fakeAWSClient{status: AWSStatus{
+				Hosts: []DedicatedHostStatus{
+					{HostID: "h-accepted", State: "available", Tags: managedTestTags()},
+					{HostID: "h-deferred", State: "pending", Tags: managedTestTags()},
+				},
+			}, releaseErrs: []error{nil}, releaseErr: errors.New("host transition is still in progress")},
+			wantDeferred: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, t.TempDir())
+			app.AWSService = testAWSService(test.fake)
+			app.AWSService.DestroyPollInterval = time.Millisecond
+			app.AWSService.DestroyTimeout = 3 * time.Millisecond
+			outcomePath := filepath.Join(t.TempDir(), "outcome.json")
+			t.Setenv(jobOutcomePathEnv, outcomePath)
+			profile := validAWSProfile()
+			plan, err := app.AWSService.Plan(profile)
+			if err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+			if code := app.runAWSDestroy(context.Background(), profile, plan, true); code != 0 {
+				t.Fatalf("destroy code = %d, stderr = %s", code, errOut.String())
+			}
+			outcome, err := readJobOutcome(outcomePath)
+			if err != nil {
+				t.Fatalf("read outcome: %v", err)
+			}
+			if strings.Join(outcome.ReleasedHosts, ",") != map[bool]string{false: "h-complete", true: "h-accepted"}[test.wantDeferred] || outcome.Deferred != test.wantDeferred {
+				t.Fatalf("outcome = %+v", outcome)
+			}
+		})
+	}
+}
+
 func TestTerminalDestroyChildOutcomeStopsAutoReleaseWithExactReason(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
