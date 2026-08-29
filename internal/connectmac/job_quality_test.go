@@ -973,6 +973,47 @@ func TestDestroyJobPersistsAcceptedReleaseHosts(t *testing.T) {
 	}
 }
 
+func TestDestroyJobPersistsAcceptedReleaseHostsOnPartialError(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	releaseErr := errors.New("dedicated host release rejected")
+	app.AWSService = testAWSService(&fakeAWSClient{
+		status: AWSStatus{Hosts: []DedicatedHostStatus{
+			{HostID: "h-accepted", State: "available", Tags: managedTestTags()},
+			{HostID: "h-failed", State: "available", Tags: managedTestTags()},
+		}},
+		releaseErrs: []error{nil, releaseErr},
+	})
+	outcomePath := filepath.Join(t.TempDir(), "outcome.json")
+	t.Setenv(jobOutcomePathEnv, outcomePath)
+	profile := validAWSProfile()
+	plan, err := app.AWSService.Plan(profile)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if code := app.runAWSDestroy(context.Background(), profile, plan, true); code != 1 {
+		t.Fatalf("destroy code = %d, want 1; stderr = %s", code, errOut.String())
+	}
+	outcome, err := readJobOutcome(outcomePath)
+	if err != nil {
+		t.Fatalf("read outcome: %v", err)
+	}
+	if strings.Join(outcome.ReleasedHosts, ",") != "h-accepted" {
+		t.Fatalf("released hosts = %v, want accepted host", outcome.ReleasedHosts)
+	}
+	if outcome.ErrorCategory != JobErrorCategoryRecoverable || outcome.ErrorCode != "destroy" || outcome.Deferred {
+		t.Fatalf("partial error metadata = %+v", outcome)
+	}
+	for _, want := range []string{"dedicated host release rejected", "partial destroy state recorded", "run the same destroy command again"} {
+		if !strings.Contains(outcome.Reason, want) {
+			t.Fatalf("partial error reason %q missing %q", outcome.Reason, want)
+		}
+	}
+	if !strings.Contains(errOut.String(), "aws destroy partially completed") {
+		t.Fatalf("stderr missing partial failure semantics: %s", errOut.String())
+	}
+}
+
 func TestTerminalDestroyChildOutcomeStopsAutoReleaseWithExactReason(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 10, 0, 0, time.UTC)
 	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs"))
