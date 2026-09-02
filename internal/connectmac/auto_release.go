@@ -1027,7 +1027,8 @@ func latestDestroyJobForCompletionChecks(jobs []Job, reminder ReleaseReminder) (
 }
 
 func autoReleaseResourcesClean(status AWSStatus) bool {
-	return len(status.Hosts) == 0 && len(status.Instances) == 0 && strings.TrimSpace(status.ElasticIP.AssociationID) == "" && strings.TrimSpace(status.ElasticIP.InstanceID) == ""
+	active := filterTerminalAWSStatus(status)
+	return len(active.Hosts) == 0 && len(active.Instances) == 0 && strings.TrimSpace(active.ElasticIP.AssociationID) == "" && strings.TrimSpace(active.ElasticIP.InstanceID) == ""
 }
 
 func acceptedReleaseConverging(reminder ReleaseReminder, job Job, status AWSStatus) bool {

@@ -63,6 +63,32 @@ func TestAcceptedReleaseConvergence(t *testing.T) {
 	}
 }
 
+func TestAutoReleaseResourcesCleanIgnoresTerminalResources(t *testing.T) {
+	tests := []struct {
+		name   string
+		status AWSStatus
+		want   bool
+	}{
+		{name: "empty", status: AWSStatus{}, want: true},
+		{name: "released host", status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "released"}}}, want: true},
+		{name: "permanent failure host", status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "released-permanent-failure"}}}, want: true},
+		{name: "terminated instance", status: AWSStatus{Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated"}}}, want: true},
+		{name: "retained unassociated eip", status: AWSStatus{ElasticIP: ElasticIP{AllocationID: "eipalloc-1"}}, want: true},
+		{name: "pending host", status: AWSStatus{Hosts: []DedicatedHostStatus{{HostID: "h-1", State: "pending"}}}},
+		{name: "running instance", status: AWSStatus{Instances: []InstanceStatus{{InstanceID: "i-1", State: "running"}}}},
+		{name: "associated eip", status: AWSStatus{ElasticIP: ElasticIP{AssociationID: "eipassoc-1"}}},
+		{name: "eip instance", status: AWSStatus{ElasticIP: ElasticIP{InstanceID: "i-1"}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := autoReleaseResourcesClean(test.status); got != test.want {
+				t.Fatalf("autoReleaseResourcesClean() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAcceptedReleaseConvergenceConstants(t *testing.T) {
 	if AutoReleaseConvergenceWindow != 24*time.Hour {
 		t.Fatalf("AutoReleaseConvergenceWindow = %s, want 24h", AutoReleaseConvergenceWindow)

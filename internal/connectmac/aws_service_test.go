@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -694,7 +695,7 @@ func TestAWSServiceDestroyDefersPendingHostReleaseFailure(t *testing.T) {
 			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
 			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
 		},
-		releaseErr: fmt.Errorf("host transition is still in progress"),
+		releaseErr: autoReleaseTestAPIError{code: "Client.InvalidHost.Occupied", message: "host transition is still in progress"},
 	}
 	service := testAWSService(fake)
 	service.DestroyPollInterval = time.Millisecond
@@ -732,7 +733,7 @@ func TestAWSServiceDestroyRetriesPendingHostReleaseUntilSuccess(t *testing.T) {
 			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
 			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
 		},
-		releaseErrs: []error{fmt.Errorf("host transition is still in progress"), nil},
+		releaseErrs: []error{autoReleaseTestAPIError{code: "Client.InvalidHost.Occupied", message: "host transition is still in progress"}, nil},
 	}
 	service := testAWSService(fake)
 	service.DestroyPollInterval = time.Millisecond
@@ -747,6 +748,93 @@ func TestAWSServiceDestroyRetriesPendingHostReleaseUntilSuccess(t *testing.T) {
 	}
 	if strings.Join(result.ReleasedHosts, ",") != "h-1" || len(result.DeferredHosts) != 0 {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestAWSServiceDestroyRetriesOccupiedAvailableHostUntilSuccess(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+			ElasticIP: ElasticIP{AllocationID: "<elastic-ip-allocation-id>"},
+		},
+		releaseErrs: []error{autoReleaseTestAPIError{code: "Client.InvalidHost.Occupied", message: "host is occupied"}, nil},
+	}
+	service := testAWSService(fake)
+	service.DestroyPollInterval = time.Millisecond
+	service.DestroyTimeout = time.Second
+	_, result, err := service.Destroy(context.Background(), validAWSProfile())
+	if err != nil {
+		t.Fatalf("Destroy returned error: %v", err)
+	}
+	want := []string{"status", "release:h-1", "release:h-1"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+	if strings.Join(result.ReleasedHosts, ",") != "h-1" || len(result.DeferredHosts) != 0 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestAWSServiceDestroyDoesNotRetryUnknownAvailableHostFailure(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "available", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+		},
+		releaseErr: errors.New("access denied"),
+	}
+	service := testAWSService(fake)
+	service.DestroyPollInterval = time.Millisecond
+	service.DestroyTimeout = time.Second
+	_, _, err := service.Destroy(context.Background(), validAWSProfile())
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("Destroy error = %v", err)
+	}
+	want := []string{"status", "release:h-1"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+func TestAWSServiceDestroyDoesNotRetryPendingHostAccessDenied(t *testing.T) {
+	fake := &fakeAWSClient{
+		status: AWSStatus{
+			Hosts:     []DedicatedHostStatus{{HostID: "h-1", State: "pending", Tags: managedTestTags()}},
+			Instances: []InstanceStatus{{InstanceID: "i-1", State: "terminated", Tags: managedTestTags()}},
+		},
+		releaseErr: autoReleaseTestAPIError{code: "UnauthorizedOperation", message: "access denied"},
+	}
+	service := testAWSService(fake)
+	service.DestroyPollInterval = time.Millisecond
+	service.DestroyTimeout = time.Second
+	_, _, err := service.Destroy(context.Background(), validAWSProfile())
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("Destroy error = %v", err)
+	}
+	want := []string{"status", "release:h-1"}
+	if strings.Join(fake.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", fake.calls, want)
+	}
+}
+
+func TestHostReleaseRetryIntervalBacksOff(t *testing.T) {
+	tests := []struct {
+		elapsed time.Duration
+		want    time.Duration
+	}{
+		{elapsed: 0, want: time.Minute},
+		{elapsed: 10*time.Minute - time.Second, want: time.Minute},
+		{elapsed: 10 * time.Minute, want: 3 * time.Minute},
+		{elapsed: 30 * time.Minute, want: 5 * time.Minute},
+	}
+	for _, test := range tests {
+		if got := hostReleaseRetryInterval(time.Minute, test.elapsed); got != test.want {
+			t.Fatalf("hostReleaseRetryInterval(1m, %s) = %s, want %s", test.elapsed, got, test.want)
+		}
+	}
+	if got := hostReleaseRetryInterval(time.Millisecond, time.Hour); got != time.Millisecond {
+		t.Fatalf("test interval changed to %s", got)
 	}
 }
 

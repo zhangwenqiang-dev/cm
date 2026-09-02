@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -117,13 +118,14 @@ func roundDuration(value time.Duration) time.Duration {
 	return value.Round(time.Second)
 }
 func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, host DedicatedHostStatus) (bool, string, error) {
+	startedAt := time.Now()
 	s.progress("Attempting to release Dedicated Host %s", host.HostID)
 	err := client.ReleaseHost(ctx, host.HostID)
 	if err == nil {
 		s.progress("Dedicated Host %s is released", host.HostID)
 		return true, "", nil
 	}
-	if emptyStatus(host.State) != "pending" {
+	if !hostReleaseTransitionInProgress(host, err) {
 		return false, "", err
 	}
 	timeout := s.DestroyTimeout
@@ -134,11 +136,13 @@ func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, 
 	if interval == 0 {
 		interval = time.Minute
 	}
-	deadline := time.Now().Add(timeout)
+	deadline := startedAt.Add(timeout)
 	lastErr := err
 	for time.Now().Before(deadline) {
-		s.progress("Dedicated Host %s is pending; retry release in %s", host.HostID, interval)
-		timer := time.NewTimer(interval)
+		elapsed := time.Since(startedAt)
+		retryInterval := hostReleaseRetryInterval(interval, elapsed)
+		s.progress("Dedicated Host cleanup is still in progress: host=%s state=%s elapsed=%s; retry release in %s", host.HostID, emptyStatus(host.State), roundDuration(elapsed), retryInterval)
+		timer := time.NewTimer(retryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -150,7 +154,34 @@ func (s AWSService) releaseHostWithRetry(ctx context.Context, client AWSClient, 
 			s.progress("Dedicated Host %s is released", host.HostID)
 			return true, "", nil
 		}
+		if !hostReleaseTransitionInProgress(host, err) {
+			return false, "", err
+		}
 		lastErr = err
 	}
 	return false, fmt.Sprintf("release was attempted after EC2 termination but AWS Mac host transition was still in progress after %s: %v", timeout, lastErr), nil
+}
+
+func hostReleaseTransitionInProgress(host DedicatedHostStatus, err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiError autoReleaseAPIError
+	if errors.As(err, &apiError) {
+		return apiError.ErrorCode() == "Client.InvalidHost.Occupied"
+	}
+	return emptyStatus(host.State) == "pending"
+}
+
+func hostReleaseRetryInterval(base, elapsed time.Duration) time.Duration {
+	if base < time.Second {
+		return base
+	}
+	if elapsed >= 30*time.Minute && base < 5*time.Minute {
+		return 5 * time.Minute
+	}
+	if elapsed >= 10*time.Minute && base < 3*time.Minute {
+		return 3 * time.Minute
+	}
+	return base
 }
