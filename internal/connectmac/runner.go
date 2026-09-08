@@ -3,7 +3,6 @@ package connectmac
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"time"
@@ -65,8 +64,8 @@ func (ExecRunner) RunRsyncCommandProgress(ctx context.Context, path string, args
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.MultiWriter(os.Stdout, outputCallbackWriter{onOutput: onOutput})
-	cmd.Stderr = io.MultiWriter(os.Stderr, outputCallbackWriter{onOutput: onOutput})
+	cmd.Stdout = outputCallbackWriter{onOutput: onOutput}
+	cmd.Stderr = outputCallbackWriter{onOutput: onOutput}
 	return cmd.Run()
 }
 
