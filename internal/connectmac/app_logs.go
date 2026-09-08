@@ -8,7 +8,7 @@ import (
 
 func (a App) runLogs(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(a.Err, "usage: cm logs <list|export|clean> [--output <zip>]")
+		fmt.Fprintln(a.Err, "usage: cm logs <list|export|clean> [--output <zip>] [--include-raw]")
 		return 2
 	}
 	switch args[0] {
@@ -36,12 +36,19 @@ func (a App) runLogs(args []string) int {
 		fmt.Fprintln(a.Out, "cleaned logs older than 30 days")
 		return 0
 	case "export":
-		output, err := parseLogsExportArgs(args[1:])
+		options, err := parseLogsExportArgs(args[1:])
 		if err != nil {
 			fmt.Fprintln(a.Err, err)
 			return 2
 		}
-		path, err := a.LogManager.Export(output, 30*24*time.Hour)
+		options.Retention = 30 * 24 * time.Hour
+		options.CMVersion = a.Version
+		jobRoot := a.JobManager.Dir
+		if strings.TrimSpace(jobRoot) == "" {
+			jobRoot = DefaultJobDir
+		}
+		options.JobRoots = []string{jobRoot}
+		path, err := a.LogManager.ExportWithOptions(options)
 		if err != nil {
 			fmt.Fprintf(a.Err, "logs export failed: %v\n", err)
 			return 1
@@ -54,21 +61,33 @@ func (a App) runLogs(args []string) int {
 	}
 }
 
-func parseLogsExportArgs(args []string) (string, error) {
-	output := ""
+func parseLogsExportArgs(args []string) (LogExportOptions, error) {
+	options := LogExportOptions{}
+	outputSeen := false
+	includeRawSeen := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--output", "-o":
-			i++
-			if i >= len(args) || args[i] == "" {
-				return "", fmt.Errorf("--output requires a value")
+			if outputSeen {
+				return LogExportOptions{}, fmt.Errorf("--output may only be specified once")
 			}
-			output = args[i]
+			outputSeen = true
+			i++
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "-") {
+				return LogExportOptions{}, fmt.Errorf("--output requires a value")
+			}
+			options.Destination = args[i]
+		case "--include-raw":
+			if includeRawSeen {
+				return LogExportOptions{}, fmt.Errorf("--include-raw may only be specified once")
+			}
+			includeRawSeen = true
+			options.IncludeRaw = true
 		default:
-			return "", fmt.Errorf("unknown logs export option %q", args[i])
+			return LogExportOptions{}, fmt.Errorf("unknown logs export option %q", args[i])
 		}
 	}
-	return output, nil
+	return options, nil
 }
 
 func FormatLogFiles(files []LogFile) string {

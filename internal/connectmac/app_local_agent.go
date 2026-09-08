@@ -1044,6 +1044,15 @@ func safeLocalAgentSecurityOutput(output []byte) string {
 }
 
 func (a App) startLocalAgentLaunchAgent(ctx context.Context) int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(a.Err, "resolve home: %v\n", err)
+		return 1
+	}
+	if err := rotateLocalAgentRawLogs(filepath.Join(home, ".connectmac", "logs")); err != nil {
+		fmt.Fprintf(a.Err, "rotate local-agent logs: %v\n", err)
+		return 1
+	}
 	path, err := ExpandPath(localAgentPlistPath)
 	if err != nil {
 		fmt.Fprintln(a.Err, err)

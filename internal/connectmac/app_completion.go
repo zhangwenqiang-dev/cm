@@ -316,7 +316,7 @@ _cm() {
       elif [[ "${words[3]}" == "export" && "${words[$((CURRENT - 1))]}" == "--output" ]]; then
         _files
       elif [[ "${words[3]}" == "export" ]]; then
-        _values 'logs option' --output --config
+		_values 'logs option' --output --include-raw --config
       fi
       ;;
     web)
@@ -463,7 +463,7 @@ func bashCompletionScript() string {
       elif [[ "${COMP_WORDS[2]}" == "export" && "$prev" == "--output" ]]; then
         COMPREPLY=( $(compgen -f -- "$cur") )
       elif [[ "${COMP_WORDS[2]}" == "export" ]]; then
-        COMPREPLY=( $(compgen -W "--output --config" -- "$cur") )
+		COMPREPLY=( $(compgen -W "--output --include-raw --config" -- "$cur") )
       fi
       ;;
     web)
@@ -520,7 +520,7 @@ complete -c cm -n "__fish_seen_subcommand_from job; and not __fish_seen_subcomma
 complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from active" -a "--json"
 complete -c cm -n "__fish_seen_subcommand_from job; and __fish_seen_subcommand_from wait-all" -a "--timeout --interval --drain"
 complete -c cm -n "__fish_seen_subcommand_from logs; and not __fish_seen_subcommand_from (cm completion logs-commands)" -a "(cm completion logs-commands)"
-complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_from export" -a "--output"
+complete -c cm -n "__fish_seen_subcommand_from logs; and __fish_seen_subcommand_from export" -a "--output --include-raw"
 complete -c cm -n "__fish_seen_subcommand_from web" -a "--host --port --open --web-dir --config"
 complete -c cm -n "__fish_seen_subcommand_from local-agent; and not __fish_seen_subcommand_from (cm completion local-agent-commands)" -a "(cm completion local-agent-commands)"
 complete -c cm -n "__fish_seen_subcommand_from local-agent" -a "--host --port"

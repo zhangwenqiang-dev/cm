@@ -9372,6 +9372,34 @@ func TestAppLogsCommands(t *testing.T) {
 	}
 }
 
+func TestParseLogsExportArgsSupportsIncludeRawInEitherOrder(t *testing.T) {
+	for _, args := range [][]string{
+		{"--include-raw", "--output", "logs.zip"},
+		{"--output", "logs.zip", "--include-raw"},
+	} {
+		options, err := parseLogsExportArgs(args)
+		if err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		if !options.IncludeRaw || options.Destination != "logs.zip" {
+			t.Fatalf("parse %v = %+v", args, options)
+		}
+	}
+}
+
+func TestParseLogsExportArgsRejectsMalformedAndDuplicateOptions(t *testing.T) {
+	for _, args := range [][]string{
+		{"--output", "--include-raw"},
+		{"--output", "-o"},
+		{"--output", "one.zip", "--output", "two.zip"},
+		{"--include-raw", "--include-raw"},
+	} {
+		if _, err := parseLogsExportArgs(args); err == nil {
+			t.Fatalf("parse %v unexpectedly succeeded", args)
+		}
+	}
+}
+
 func testApp(out, errOut *bytes.Buffer, stateDir string) App {
 	return App{
 		Out:       out,

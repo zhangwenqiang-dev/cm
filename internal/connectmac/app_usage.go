@@ -47,7 +47,7 @@ func (a App) printUsage() {
   cm member assign <apple-email> --member <member-email> [--relation owner]
   cm member unassign <apple-email> --member <member-email>
   cm logs list
-  cm logs export [--output <zip>]
+  cm logs export [--output <zip>] [--include-raw]
   cm logs clean
   cm aws plan <profile-or-apple-email> [--config <path>]
   cm aws capacity <profile-or-apple-email> [--config <path>]
