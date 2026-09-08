@@ -385,6 +385,7 @@ func assertLocalLifecycleEntries(
 
 func TestLocalAgentVNCEarlyFailureKeepsCorrelationAndDuration(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, dir)
 	req := httptest.NewRequest(http.MethodPost, "/start", strings.NewReader(
@@ -409,8 +410,53 @@ func TestLocalAgentVNCEarlyFailureKeepsCorrelationAndDuration(t *testing.T) {
 	if entry.Action != "local-agent.vnc" || entry.Outcome != "failure" ||
 		entry.RequestID != "vnc-early-123" || entry.Source != "web-local" ||
 		entry.Profile != "broken" || entry.DurationMS < 0 ||
-		len(entry.LocalPorts) != 1 || entry.LocalPorts[0] != 5907 {
+		len(entry.LocalPorts) != 1 || entry.LocalPorts[0] != 5907 ||
+		entry.FailureStage != "tunnel" {
 		t.Fatalf("entry=%+v", entry)
+	}
+}
+
+func TestLocalAgentVNCProfileLoadFailureStage(t *testing.T) {
+	dir := t.TempDir()
+	app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, dir)
+	ctx := withOperationContext(context.Background(), OperationContext{RequestID: "vnc-profile-load", Source: "web-local"})
+	response := app.localAgentRunVNC(ctx, "start", Profile{Name: "missing"}, filepath.Join(dir, "missing.yaml"))
+	if response.OK {
+		t.Fatalf("response=%+v", response)
+	}
+	entries := readTestLogEntries(t, app.LogManager)
+	if len(entries) != 1 || entries[0].FailureStage != "profile" || entries[0].ErrorCode == "" {
+		t.Fatalf("entries=%+v", entries)
+	}
+}
+
+func TestLocalAgentVNCConfigWriteFailureStage(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".connectmac"), []byte("blocks directory creation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, dir)
+	body, err := json.Marshal(localAgentRequest{Profile: "config-write", ProfileYAML: `profiles:
+  config-write:
+    user: ec2-user
+    host: mac.example.com
+    tunnels:
+      - local_port: 5900
+        remote_host: localhost
+        remote_port: 5900
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/start", bytes.NewReader(body))
+	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
+	rec := httptest.NewRecorder()
+	app.newLocalAgentHandler().ServeHTTP(rec, req)
+	entries := readTestLogEntries(t, app.LogManager)
+	if len(entries) != 1 || entries[0].FailureStage != "config-write" || entries[0].ErrorCode == "" {
+		t.Fatalf("entries=%+v response=%s", entries, rec.Body.String())
 	}
 }
 
@@ -610,6 +656,7 @@ func TestTerminalCloseLoggedExactlyOnceForNormalExitAndBrowserDisconnect(t *test
 	}{
 		{name: "normal exit"},
 		{name: "browser disconnect", err: &websocket.CloseError{Code: websocket.CloseNormalClosure}},
+		{name: "user disconnect", err: context.Canceled},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -642,6 +689,59 @@ func TestTerminalCloseLoggedExactlyOnceForNormalExitAndBrowserDisconnect(t *test
 			}
 		})
 	}
+}
+
+func TestLocalTerminalFailureUsesLocalClassifier(t *testing.T) {
+	dir := t.TempDir()
+	app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, dir)
+	ctx := withOperationContext(context.Background(), OperationContext{
+		RequestID: "terminal-failure-123",
+		Source:    "web-local",
+	})
+	err := errors.New("ssh session failed: exit status 255")
+	if got := app.observeLocalTerminalSession(ctx, Profile{Name: "terminal-profile"}, func() error { return err }); !errors.Is(got, err) {
+		t.Fatalf("error=%v", got)
+	}
+	entries := readTestLogEntries(t, app.LogManager)
+	for _, entry := range entries {
+		if entry.Action != "terminal.closed" {
+			continue
+		}
+		if entry.Outcome != "failure" || entry.ErrorCode != "ssh_exit_255" ||
+			entry.ExitCode != 255 || entry.FailureStage != "session" || entry.Level != "error" {
+			t.Fatalf("entry=%+v", entry)
+		}
+		if entry.ErrorCode == "aws_api_error" {
+			t.Fatalf("terminal error used AWS classifier: %+v", entry)
+		}
+		if !strings.Contains(entry.Message, "exit status 255") || entry.Message == "terminal.closed" {
+			t.Fatalf("message=%q", entry.Message)
+		}
+		return
+	}
+	t.Fatalf("terminal.closed not found: %+v", entries)
+}
+
+func TestLocalTerminalPreservesWarnLevelAndSanitizedMessage(t *testing.T) {
+	dir := t.TempDir()
+	app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, dir)
+	ctx := withOperationContext(context.Background(), OperationContext{RequestID: "terminal-timeout", Source: "web-local"})
+	err := fmt.Errorf("ssh operation timed out token=%s", "terminal-secret")
+	_ = app.observeLocalTerminalSession(ctx, Profile{Name: "terminal-profile"}, func() error { return err })
+	entries := readTestLogEntries(t, app.LogManager)
+	for _, entry := range entries {
+		if entry.Action != "terminal.closed" {
+			continue
+		}
+		if entry.Level != "warn" || entry.ErrorCode != "ssh_timeout" || entry.Outcome != "failure" {
+			t.Fatalf("entry=%+v", entry)
+		}
+		if entry.Message == "" || strings.Contains(entry.Message, "terminal-secret") {
+			t.Fatalf("message=%q", entry.Message)
+		}
+		return
+	}
+	t.Fatalf("terminal.closed not found: %+v", entries)
 }
 
 type terminalTestSocket struct {

@@ -333,17 +333,20 @@ func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
 		body        string
 		wantStatus  int
 		wantProfile string
+		wantStage   string
 	}{
 		{
 			name: "start decode", command: "start",
 			body:       `{"profile":"secret-profile","profile_yaml":"password=hunter2`,
 			wantStatus: http.StatusBadRequest,
+			wantStage:  "request",
 		},
 		{
 			name: "open-vnc config", command: "open-vnc",
 			body:        `{"profile":"malicious-profile-token","profile_yaml":"password=hunter2 token=session-token"}`,
 			wantStatus:  http.StatusOK,
 			wantProfile: "malicious-profile-token",
+			wantStage:   "request",
 		},
 	}
 	for _, tt := range tests {
@@ -365,7 +368,7 @@ func TestLocalAgentVNCEarlyFailuresLogGenericSecretSafeEntry(t *testing.T) {
 			}
 			entry := entries[0]
 			if entry.Action != "local-agent.vnc" || entry.Outcome != "failure" ||
-				entry.Message != "local VNC request failed" ||
+				entry.Message == "" || entry.ErrorCode == "" || entry.FailureStage != tt.wantStage ||
 				entry.Profile != tt.wantProfile || entry.TunnelAction != "" || entry.LaunchResult != "" {
 				t.Fatalf("entry = %+v", entry)
 			}

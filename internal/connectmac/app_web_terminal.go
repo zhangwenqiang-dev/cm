@@ -63,15 +63,15 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			op := a.operationContextForRequest(r)
-			classified := classifyOperationalError(err)
+			classified := classifyLocalOperationError(err)
 			a.writeRuntimeLog(LogEntry{
 				Level: classified.Level, Action: "terminal.failed", Operation: "terminal",
 				Profile: profile.Name, AppleEmail: profile.AWS.AccountEmail,
 				ActorMemberID: op.Actor.MemberID, ActorMemberEmail: op.Actor.MemberEmail,
 				ActorMemberName: op.Actor.MemberName, RequestID: op.RequestID,
 				SessionIDHash: op.SessionIDHash, Source: "web-server",
-				Phase: "upgrade", ErrorCode: classified.Code, Outcome: "failure",
-				Message: err.Error(),
+				Phase: "upgrade", FailureStage: "websocket", ErrorCode: classified.Code,
+				ExitCode: classified.ExitCode, Outcome: "failure", Message: classified.Detail,
 			})
 			return
 		}
@@ -94,13 +94,7 @@ func (a App) webTerminalWSHandler(configPath string) http.HandlerFunc {
 			DurationMS: positiveDurationMS(time.Since(startedAt)), Outcome: "success",
 			Message: "terminal.closed reason=normal",
 		}
-		if !normalTerminalClose(proxyErr) {
-			classified := classifyOperationalError(proxyErr)
-			entry.Level = classified.Level
-			entry.ErrorCode = classified.Code
-			entry.Outcome = "failure"
-			entry.Message = "terminal.closed reason=error"
-		}
+		entry = finalizeTerminalClosedEntry(entry, proxyErr)
 		a.writeRuntimeLog(entry)
 	}
 }

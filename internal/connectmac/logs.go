@@ -56,6 +56,8 @@ type LogEntry struct {
 	Source           string `json:"source,omitempty"`
 	Phase            string `json:"phase,omitempty"`
 	ErrorCode        string `json:"error_code,omitempty"`
+	ExitCode         int    `json:"exit_code,omitempty"`
+	FailureStage     string `json:"failure_stage,omitempty"`
 	Attempt          int    `json:"attempt,omitempty"`
 	HTTPStatus       int    `json:"http_status,omitempty"`
 	Message          string `json:"message"`
@@ -424,7 +426,7 @@ var (
 		`(?i)(^|[?&;,\s])((?:` + logSensitiveKeyPattern + `)(?:[ \t]*[:=][ \t]*|[ \t]+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
 	)
 	operationalSensitiveAssignmentPattern = regexp.MustCompile(
-		`(?i)(^|[?&;,\s])((?:` + operationalSensitiveKeyPattern + `)[ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
+		`(?i)(^|[?&;,\s"'])((?:` + operationalSensitiveKeyPattern + `)[ \t]*[:=][ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`,
 	)
 	operationalQuotedSensitiveAssignmentPattern = regexp.MustCompile(
 		`(?i)(["'](?:` + operationalSensitiveKeyPattern + `)["'][ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;\}\]]+)`,
@@ -483,6 +485,7 @@ func sanitizeLogEntry(entry LogEntry) LogEntry {
 	entry.Source = sanitizeLogText(entry.Source)
 	entry.Phase = sanitizeLogText(entry.Phase)
 	entry.ErrorCode = sanitizeLogText(entry.ErrorCode)
+	entry.FailureStage = sanitizeLogText(entry.FailureStage)
 	entry.Message = sanitizeLogText(entry.Message)
 	return entry
 }

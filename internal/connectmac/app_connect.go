@@ -444,9 +444,13 @@ func (a App) logLocalCommand(ctx context.Context, action string, profile Profile
 	extra.Source = op.Source
 	extra.DurationMS = elapsedDurationMS(startedAt)
 	extra.Outcome = outcomeForCode(code)
-	extra.Message = action
+	if extra.Message == "" {
+		extra.Message = action
+	}
 	if code != 0 {
-		extra.Level = "error"
+		if extra.Level == "" {
+			extra.Level = "error"
+		}
 		if extra.ErrorCode == "" {
 			extra.ErrorCode = "command_failed"
 		}

@@ -1909,7 +1909,7 @@ func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 		var req localAgentRequest
 		if err := decodeWebJSON(r, &req); err != nil {
 			ctx := a.localAgentFailureContext(r)
-			a.writeLocalAgentVNCEarlyFailure(ctx, command, Profile{}, startedAt, err)
+			a.writeLocalAgentVNCEarlyFailure(ctx, command, Profile{}, startedAt, "request", err)
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1917,14 +1917,14 @@ func (a App) localAgentCommandHandler(command string) http.HandlerFunc {
 		requestID, err := validatedLocalAgentRequestID(r, req.RequestID)
 		if err != nil {
 			ctx := a.localAgentFailureContext(r)
-			a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, err)
+			a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, "request", err)
 			writeWebError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		ctx := withOperationContext(r.Context(), OperationContext{RequestID: requestID, Source: "web-local"})
 		profileName, configPath, err := writeLocalAgentProfileConfig(req)
 		if err != nil {
-			a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, err)
+			a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, localAgentConfigFailureStage(err), err)
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
 		}
@@ -2135,10 +2135,9 @@ func (a App) observeLocalTerminalSession(ctx context.Context, profile Profile, r
 	a.logLocalCommand(ctx, "terminal.opened", profile, 0, startedAt, LogEntry{Phase: "opened"})
 	proxyErr := run()
 	code := 0
-	entry := LogEntry{Phase: "closed"}
+	entry := finalizeTerminalClosedEntry(LogEntry{Phase: "closed"}, proxyErr)
 	if !normalTerminalClose(proxyErr) {
 		code = 1
-		entry.ErrorCode = classifyOperationalError(proxyErr).Code
 	}
 	a.logLocalCommand(ctx, "terminal.closed", profile, code, startedAt, entry)
 	return proxyErr
@@ -2148,12 +2147,15 @@ func normalTerminalClose(err error) bool {
 	if err == nil {
 		return true
 	}
-	var closeErr *websocket.CloseError
-	if !errors.As(err, &closeErr) {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	closeErr, ok := err.(*websocket.CloseError)
+	if !ok {
 		return false
 	}
 	switch closeErr.Code {
-	case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived:
+	case websocket.CloseNormalClosure, websocket.CloseGoingAway:
 		return true
 	default:
 		return false
@@ -2259,12 +2261,11 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command string,
 	cfg, code := app.loadCommandConfig(ctx, configPath)
 	if code != 0 {
 		resp := webAPIResponse{OK: false, Code: code, Output: out.String(), Error: errOut.String()}
-		a.writeLocalAgentVNCLog(ctx, LogEntry{
-			Level: "error", Action: "local-agent.vnc", Profile: requestedProfile.Name,
+		entry := applyLocalOperationFailure(LogEntry{
+			Action: "local-agent.vnc", Profile: requestedProfile.Name,
 			LocalPorts: profileLocalPorts(requestedProfile), Outcome: "failure",
-			ErrorCode: classifyOperationalError(errors.New(errOut.String())).Code,
-			Message:   "load local VNC profile failed",
-		}, startedAt)
+		}, errors.New(errOut.String()), code, "profile")
+		a.writeLocalAgentVNCLog(ctx, entry, startedAt)
 		return resp
 	}
 	profile, _ := cfg.Profile(requestedProfile.Name)
@@ -2285,9 +2286,7 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command string,
 		entry.PID = result.PID
 		entry.Outcome = outcomeForCode(code)
 		if code != 0 {
-			entry.Level = "error"
-			entry.ErrorCode = "command_failed"
-			entry.Message = "local VNC tunnel start failed"
+			entry = applyLocalOperationFailure(entry, errors.New(errOut.String()), code, "tunnel")
 		} else {
 			entry.Message = "local VNC tunnel ready"
 		}
@@ -2306,16 +2305,14 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command string,
 		if err != nil {
 			fmt.Fprintf(app.Err, "lock open-vnc lifecycle: %v\n", err)
 			code = 1
-			entry.ErrorCode = classifyOperationalError(err).Code
+			entry = applyLocalOperationFailure(entry, err, code, "tunnel")
 		}
 		entry.Outcome = outcomeForCode(code)
 		entry.LaunchResult = entry.Outcome
 		if code != 0 {
-			entry.Level = "error"
 			if entry.ErrorCode == "" {
-				entry.ErrorCode = "command_failed"
+				entry = applyLocalOperationFailure(entry, errors.New(errOut.String()), code, "screen-sharing")
 			}
-			entry.Message = "local VNC launch failed"
 		} else {
 			entry.Message = "local VNC launched"
 		}
@@ -2323,7 +2320,7 @@ func (a App) localAgentRunVNCWithBeforeLock(ctx context.Context, command string,
 		return webAPIResponse{OK: code == 0, Code: code, Output: out.String(), Error: errOut.String()}
 	default:
 		err := errors.New("unsupported local VNC command")
-		a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, err)
+		a.writeLocalAgentVNCEarlyFailure(ctx, command, requestedProfile, startedAt, "request", err)
 		return webAPIResponse{OK: false, Code: 2, Error: err.Error()}
 	}
 }
@@ -2346,12 +2343,10 @@ func (a App) writeLocalAgentVNCLog(ctx context.Context, entry LogEntry, startedA
 	a.writeRuntimeLog(entry)
 }
 
-func (a App) writeLocalAgentVNCEarlyFailure(ctx context.Context, command string, profile Profile, startedAt time.Time, cause error) {
-	entry := LogEntry{
-		Level: "error", Action: "local-agent.vnc", Outcome: "failure", Profile: profile.Name,
-		LocalPorts: profileLocalPorts(profile), ErrorCode: classifyOperationalError(cause).Code,
-		Message: "local VNC request failed",
-	}
+func (a App) writeLocalAgentVNCEarlyFailure(ctx context.Context, command string, profile Profile, startedAt time.Time, stage string, cause error) {
+	entry := applyLocalOperationFailure(LogEntry{
+		Action: "local-agent.vnc", Profile: profile.Name, LocalPorts: profileLocalPorts(profile),
+	}, cause, 0, stage)
 	a.writeLocalAgentVNCLog(ctx, entry, startedAt)
 }
 
@@ -2390,25 +2385,41 @@ func (a App) verifiedTunnelPID(profile Profile) int {
 func writeLocalAgentProfileConfig(req localAgentRequest) (string, string, error) {
 	profileYAML := strings.TrimSpace(req.ProfileYAML)
 	if profileYAML == "" {
-		return "", "", fmt.Errorf("profile_yaml is required")
+		return "", "", localAgentConfigError{Stage: "request", Cause: fmt.Errorf("profile_yaml is required")}
 	}
 	profile, err := ParseSingleProfileYAML(profileYAML)
 	if err != nil {
-		return "", "", err
+		return "", "", localAgentConfigError{Stage: "request", Cause: err}
 	}
 	if strings.TrimSpace(req.Profile) != "" && req.Profile != profile.Name {
-		return "", "", fmt.Errorf("profile mismatch: request=%s yaml=%s", req.Profile, profile.Name)
+		return "", "", localAgentConfigError{Stage: "request", Cause: fmt.Errorf("profile mismatch: request=%s yaml=%s", req.Profile, profile.Name)}
 	}
 	profile = applyLocalAgentPrivateProfileFields(profile)
 	dir, err := localAgentProfileDir()
 	if err != nil {
-		return "", "", err
+		return "", "", localAgentConfigError{Stage: "config-write", Cause: err}
 	}
 	path := filepath.Join(dir, safeLocalAgentFileName(profile.Name)+".yaml")
 	if err := os.WriteFile(path, []byte(FormatProfileFile(profile)), 0o600); err != nil {
-		return "", "", err
+		return "", "", localAgentConfigError{Stage: "config-write", Cause: err}
 	}
 	return profile.Name, path, nil
+}
+
+type localAgentConfigError struct {
+	Stage string
+	Cause error
+}
+
+func (e localAgentConfigError) Error() string { return e.Cause.Error() }
+func (e localAgentConfigError) Unwrap() error { return e.Cause }
+
+func localAgentConfigFailureStage(err error) string {
+	var configErr localAgentConfigError
+	if errors.As(err, &configErr) && configErr.Stage != "" {
+		return configErr.Stage
+	}
+	return "config-write"
 }
 
 func applyLocalAgentPrivateProfileFields(profile Profile) Profile {
