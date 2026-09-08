@@ -534,6 +534,7 @@ function localAgentPayload(profileName, payload) { return {...payload, profile:p
 async function recordLocalIntent(profileName, operation) {
   return {data:{request_id:"server-" + operation + "-request"}};
 }
+async function ensureLocalHostKey() {}
 async function localAgentAPI() {
   return {data:{job:{
     id:"job-1", transfer_id:"transfer-1", profile:"shared", direction:"pull",

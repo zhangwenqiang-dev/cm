@@ -133,12 +133,9 @@ func (a App) prepareWebTerminal(r *http.Request, configPath, profileRef string) 
 	if !AWSStatusReady(status) {
 		return Profile{}, fmt.Errorf("aws mac is not ready: %s", AWSReadinessSummary(status))
 	}
-	check, err := a.fixHostKey(r.Context(), profile)
-	if err != nil {
+	ctx := withOperationContext(r.Context(), a.operationContextForRequest(r))
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
 		return Profile{}, err
-	}
-	if check.Status == HostKeyScanFailed {
-		return Profile{}, fmt.Errorf("ssh host key scan failed for %s: %s", profile.Host, check.Message)
 	}
 	return profile, nil
 }

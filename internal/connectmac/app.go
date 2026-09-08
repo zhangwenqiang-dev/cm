@@ -59,6 +59,9 @@ type App struct {
 	DiscoverInitPEMFiles      func(string) ([]string, error)
 	UserHomeDir               func() (string, error)
 	TerminalSessions          *terminalSessionRegistry
+	HostKeyChallenges         *hostKeyChallengeRegistry
+	HostKeyBlockedEvents      *hostKeyBlockedEventCache
+	WriteKnownHostsAtomic     func(string, []byte, os.FileMode) error
 	LocalAgentBrowserOrigins  map[string]struct{}
 }
 
@@ -81,6 +84,9 @@ func NewApp(out, err io.Writer) App {
 		DiscoverInitPEMFiles:     discoverInitPEMFiles,
 		UserHomeDir:              os.UserHomeDir,
 		TerminalSessions:         newTerminalSessionRegistry(256, 30*time.Second),
+		HostKeyChallenges:        newHostKeyChallengeRegistry(256, 60*time.Second),
+		HostKeyBlockedEvents:     newHostKeyBlockedEventCache(1024, time.Minute),
+		WriteKnownHostsAtomic:    writeFileAtomically,
 		KnownHosts:               "~/.ssh/known_hosts",
 		LoginConfigCleanup:       true,
 		Listen:                   net.Listen,

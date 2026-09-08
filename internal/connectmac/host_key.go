@@ -2,10 +2,16 @@ package connectmac
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type HostKeyStatus string
@@ -62,26 +68,77 @@ func (a App) checkHostKey(ctx context.Context, profile Profile) (HostKeyCheck, e
 	return result, nil
 }
 
-func (a App) fixHostKey(ctx context.Context, profile Profile) (HostKeyCheck, error) {
+func (a App) requireCurrentHostKey(ctx context.Context, profile Profile) (HostKeyCheck, error) {
 	check, err := a.checkHostKey(ctx, profile)
 	if err != nil {
-		return check, err
+		check.Status = HostKeyScanFailed
+		check.Message = "host key check failed"
+		return check, a.hostKeyBlocked(ctx, profile, check, "host_key_scan_failed",
+			"host key check failed; verify network access and try again")
+	}
+	if check.Status == HostKeyCurrent {
+		return check, nil
+	}
+
+	code := "host_key_scan_failed"
+	message := "host key scan failed; verify network access and try again"
+	switch check.Status {
+	case HostKeyStale:
+		code = "host_key_changed"
+		message = "host key changed; confirm the new fingerprint, then run cm host-key fix <profile>"
+	case HostKeyMissing:
+		code = "host_key_missing"
+		message = "host key is missing; confirm the fingerprint, then run cm host-key fix <profile>"
+	case HostKeyScanFailed:
+	default:
+		message = "host key status is unknown; verify network access and try again"
+	}
+	return check, a.hostKeyBlocked(ctx, profile, check, code, message)
+}
+
+func (a App) hostKeyBlocked(ctx context.Context, profile Profile, check HostKeyCheck, code, message string) error {
+	op := operationContextFrom(ctx)
+	if op.RequestID == "" {
+		op.RequestID, _ = newRequestID(time.Now(), rand.Reader)
+	}
+	source := op.Source
+	if source == "" {
+		source = "cli"
+	}
+	cache := a.HostKeyBlockedEvents
+	if cache == nil {
+		cache = defaultHostKeyBlockedEvents
+	}
+	if cache.First(op.RequestID + "\x00" + profile.Name + "\x00" + code) {
+		a.writeRuntimeLog(LogEntry{
+			Level: "error", Action: "host-key.blocked", Profile: profile.Name,
+			AppleEmail: profile.AWS.AccountEmail, RequestID: op.RequestID, Source: source,
+			Status: string(check.Status), Outcome: "failure", ErrorCode: code,
+			Message: message,
+		})
+	}
+	return LocalCodedError{Code: code, Cause: errors.New(message)}
+}
+
+func (a App) applyCheckedHostKey(ctx context.Context, check HostKeyCheck) (HostKeyCheck, error) {
+	if check.Host == "" {
+		return check, fmt.Errorf("host is required")
+	}
+	if check.Status != HostKeyCurrent && len(hostKeyPairs(check.Scanned)) == 0 {
+		return check, fmt.Errorf("validated scanned host key is required")
 	}
 	switch check.Status {
 	case HostKeyCurrent:
 		check.Message = "host key current, unchanged"
 		return check, nil
 	case HostKeyMissing:
-		if err := a.appendKnownHostKey(check.Scanned); err != nil {
+		if err := a.replaceKnownHostKeyAtomic(check); err != nil {
 			return check, err
 		}
 		check.Message = "host key missing, added current key"
 		return check, nil
 	case HostKeyStale:
-		if err := a.Runner.ForgetHost(ctx, profile.Host); err != nil {
-			return check, err
-		}
-		if err := a.appendKnownHostKey(check.Scanned); err != nil {
+		if err := a.replaceKnownHostKeyAtomic(check); err != nil {
 			return check, err
 		}
 		check.Message = "host key stale, replaced"
@@ -91,6 +148,44 @@ func (a App) fixHostKey(ctx context.Context, profile Profile) (HostKeyCheck, err
 	default:
 		return check, fmt.Errorf("unknown host key status %q", check.Status)
 	}
+}
+
+var defaultHostKeyBlockedEvents = newHostKeyBlockedEventCache(1024, time.Minute)
+
+func (a App) replaceKnownHostKeyAtomic(check HostKeyCheck) error {
+	knownHosts := a.KnownHosts
+	if knownHosts == "" {
+		knownHosts = "~/.ssh/known_hosts"
+	}
+	path, err := ExpandPath(knownHosts)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create known_hosts directory: %w", err)
+	}
+	path, err = normalizedKnownHostsPath(path)
+	if err != nil {
+		return fmt.Errorf("normalize known_hosts path: %w", err)
+	}
+	lock := normalizedKnownHostsPathLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	return withFileLock(path+".lock", func() error {
+		current, err := readKnownHosts(path)
+		if err != nil {
+			return err
+		}
+		updated, err := replaceKnownHostKeys(current, check.Host, check.Scanned)
+		if err != nil {
+			return err
+		}
+		write := a.WriteKnownHostsAtomic
+		if write == nil {
+			write = writeFileAtomically
+		}
+		return write(path, updated, knownHostsMode(path))
+	})
 }
 
 func hostKeyPairs(text string) map[string]bool {
@@ -120,6 +215,57 @@ func hasSharedHostKeyPair(a, b map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+func hostKeyFingerprints(text string) []string {
+	seen := map[string]bool{}
+	var fingerprints []string
+	for pair := range hostKeyPairs(text) {
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pair))
+		if err != nil {
+			continue
+		}
+		fingerprint := ssh.FingerprintSHA256(key)
+		if !seen[fingerprint] {
+			seen[fingerprint] = true
+			fingerprints = append(fingerprints, fingerprint)
+		}
+	}
+	sort.Strings(fingerprints)
+	return fingerprints
+}
+
+func confirmedHostKeyMaterial(text string, confirmed []string) (string, error) {
+	confirmed = normalizeFingerprintSet(confirmed)
+	if len(confirmed) == 0 {
+		return "", fmt.Errorf("confirmed host key fingerprints are required")
+	}
+	seen := map[string]bool{}
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(fields[1] + " " + fields[2]))
+		if err != nil {
+			continue
+		}
+		fingerprint := ssh.FingerprintSHA256(key)
+		if !seen[fingerprint] {
+			seen[fingerprint] = true
+			lines = append(lines, strings.Join(fields[:3], " "))
+		}
+	}
+	actual := make([]string, 0, len(seen))
+	for fingerprint := range seen {
+		actual = append(actual, fingerprint)
+	}
+	if fingerprintSetDigest(actual) != fingerprintSetDigest(confirmed) {
+		return "", fmt.Errorf("scanned host keys do not match the complete confirmed fingerprint set")
+	}
+	return strings.Join(lines, "\n") + "\n", nil
 }
 
 func (a App) appendKnownHostKey(scanned string) error {

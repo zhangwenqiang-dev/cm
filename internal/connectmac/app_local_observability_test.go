@@ -925,6 +925,7 @@ func TestBrowserLocalActionsRecordServerIntentBeforeLocalCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := string(data)
+	hostKeyGuard := extractWebSource(t, html, "async function ensureLocalHostKey(", "\n    async function loadClientConfig()")
 	startTunnel := extractWebSource(t, html, "async function startTunnel(profile)", "\n    async function openSync(profile)")
 	runSync := extractWebSource(t, html, "async function runSync(direction)", "\n    function terminalSetStatus")
 	terminalGuard := extractWebSource(t, html, "function terminalConnectionCurrent(", "\n    async function openTerminal(profile)")
@@ -954,6 +955,7 @@ function localAgentPayload(profile, extra = {}) {
 }
 async function localAgentAPI(path, options) {
   sequence.push("local:" + path + ":" + options.requestID);
+  if (path === "/host-key/check") return {data:{status:"current"}};
   if (path === "/start") return {output:"started"};
   if (path === "/open-vnc") return {output:"opened"};
   if (path === "/terminal/check") return {data:{
@@ -969,6 +971,7 @@ async function localAgentAPI(path, options) {
 function setBusy(value) { state.busy = value; }
 function setStatus() {}
 function setOutput() {}
+function showOperationError() {}
 function showView() {}
 function renderProfiles() {}
 function renderSelected() {}
@@ -987,6 +990,7 @@ class FakeWebSocket {
   close() {}
 }
 globalThis.WebSocket = FakeWebSocket;
+globalThis.window = {confirm: () => true};
 function selectedProfile() { return {name:"shared"}; }
 function profileReady() { return true; }
 function syncJob() { return null; }
@@ -1007,12 +1011,13 @@ async function updateTransferRecord() {}
 function loadSyncJobs() {}
 function presentSyncJob() {}
 async function failTransferRecord() {}
-	` + startTunnel + "\n" + runSync + "\n" + terminalGuard + "\n" + connectTerminal + `
+	` + hostKeyGuard + "\n" + startTunnel + "\n" + runSync + "\n" + terminalGuard + "\n" + connectTerminal + `
 
 sequence = [];
 await startTunnel("shared");
-assert.deepEqual(sequence.slice(0, 3), [
+assert.deepEqual(sequence.slice(0, 4), [
   "intent:vnc:server-vnc-123",
+  "local:/host-key/check:server-vnc-123",
   "local:/start:server-vnc-123",
   "local:/open-vnc:server-vnc-123"
 ]);
@@ -1020,9 +1025,10 @@ assert.deepEqual(sequence.slice(0, 3), [
 sequence = [];
 await connectLocalTerminal("shared");
 assert.equal(sequence[0], "intent:connect:server-connect-123");
-assert.equal(sequence[1], "local:/terminal/check:server-connect-123");
-assert.match(sequence[2], /^ws:.*terminal_session_token=terminal-token-123$/);
-assert.doesNotMatch(sequence[2], /request_id=/);
+assert.equal(sequence[1], "local:/host-key/check:server-connect-123");
+assert.equal(sequence[2], "local:/terminal/check:server-connect-123");
+assert.match(sequence[3], /^ws:.*terminal_session_token=terminal-token-123$/);
+assert.doesNotMatch(sequence[3], /request_id=/);
 
 sequence = [];
 await runSync("push");

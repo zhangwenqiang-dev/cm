@@ -28,6 +28,10 @@ func (a App) runPull(ctx context.Context, cfg Config, args []string) int {
 		a.logLocalCommand(ctx, "sync.pull.failed", profile, 1, startedAt, LogEntry{Direction: "pull", ErrorCode: "validation_error"})
 		return 1
 	}
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	rsyncArgs, err := RsyncPullArgs(profile, args[1], ".", mergeSyncFilters(profile.Sync.Pull, extraFilters))
 	if err != nil {
 		fmt.Fprintln(a.Err, err)
@@ -62,6 +66,10 @@ func (a App) runPush(ctx context.Context, cfg Config, args []string) int {
 	profile = a.promptMissingIdentityFile(profile)
 	if !a.validateRsyncAccess(profile) {
 		a.logLocalCommand(ctx, "sync.push.failed", profile, 1, startedAt, LogEntry{Direction: "push", ErrorCode: "validation_error"})
+		return 1
+	}
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 1
 	}
 	localPath := args[1]

@@ -269,12 +269,16 @@ type localAgentOptions struct {
 }
 
 type localAgentRequest struct {
-	TransferID  string `json:"transfer_id"`
-	RequestID   string `json:"request_id"`
-	Profile     string `json:"profile"`
-	ProfileYAML string `json:"profile_yaml"`
-	LocalPath   string `json:"local_path"`
-	RemotePath  string `json:"remote_path"`
+	TransferID          string   `json:"transfer_id"`
+	RequestID           string   `json:"request_id"`
+	Profile             string   `json:"profile"`
+	ProfileYAML         string   `json:"profile_yaml"`
+	LocalPath           string   `json:"local_path"`
+	RemotePath          string   `json:"remote_path"`
+	Confirm             bool     `json:"confirm"`
+	HostKeyFingerprint  string   `json:"host_key_fingerprint"`
+	HostKeyFingerprints []string `json:"host_key_fingerprints"`
+	HostKeyChallenge    string   `json:"host_key_challenge"`
 }
 
 var localAgentRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -1550,6 +1554,12 @@ func (a *App) newLocalAgentHandler() http.Handler {
 	if a.TerminalSessions == nil {
 		a.TerminalSessions = newTerminalSessionRegistry(defaultTerminalSessionLimit, defaultTerminalSessionTTL)
 	}
+	if a.HostKeyChallenges == nil {
+		a.HostKeyChallenges = newHostKeyChallengeRegistry(256, 60*time.Second)
+	}
+	if a.HostKeyBlockedEvents == nil {
+		a.HostKeyBlockedEvents = newHostKeyBlockedEventCache(1024, time.Minute)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/icon.svg", a.localAgentCORS(localAgentIconHandler, false))
 	mux.HandleFunc("/health", a.localAgentCORS(a.localAgentHealthHandler(), false))
@@ -1558,6 +1568,8 @@ func (a *App) newLocalAgentHandler() http.Handler {
 	mux.HandleFunc("/ssh", a.localAgentCORS(a.localAgentSSHHandler(), true))
 	mux.HandleFunc("/terminal/check", a.localAgentCORS(a.localAgentTerminalCheckHandler(), true))
 	mux.HandleFunc("/terminal/ws", a.localAgentTerminalWSHandler())
+	mux.HandleFunc("/host-key/check", a.localAgentCORS(a.localAgentHostKeyCheckHandler(), true))
+	mux.HandleFunc("/host-key/fix", a.localAgentCORS(a.localAgentHostKeyFixHandler(), true))
 	mux.HandleFunc("/sync/push", a.localAgentCORS(a.localAgentTransferHandler("push"), true))
 	mux.HandleFunc("/sync/pull", a.localAgentCORS(a.localAgentTransferHandler("pull"), true))
 	mux.HandleFunc("/sync/job", a.localAgentCORS(a.localAgentTransferJobHandler(), true))
@@ -1639,6 +1651,10 @@ func (a App) startLocalAgentTransfer(req localAgentRequest, direction, requestID
 		if err := a.Validator.CheckRsync(); err != nil {
 			return LocalTransferJob{}, err
 		}
+	}
+	ctx := withOperationContext(context.Background(), OperationContext{RequestID: requestID, Source: "web-local"})
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		return LocalTransferJob{}, err
 	}
 
 	rsyncOptions := DetectRsyncOptions(context.Background(), a.Runner)
@@ -1987,6 +2003,20 @@ func (a App) localAgentSSHHandler() http.HandlerFunc {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
 		}
+		cfg, err := LoadConfig(configPath)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		profile, err := resolveProfileRef(cfg, profileName)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
 		if runtime.GOOS != "darwin" {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "opening a local terminal is only supported on macOS"})
 			return
@@ -2003,6 +2033,101 @@ end tell`, command)
 			return
 		}
 		writeWebJSON(w, webAPIResponse{OK: true, Output: "Opened Terminal: " + command + "\n"})
+	}
+}
+
+func (a App) localAgentHostKeyCheckHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req localAgentRequest
+		if err := decodeWebJSON(r, &req); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		profile, _, err := a.prepareLocalAgentTerminalRequest(req)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		check, err := a.checkHostKey(r.Context(), profile)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "host key check failed"})
+			return
+		}
+		fingerprints := hostKeyFingerprints(check.Scanned)
+		challenge := ""
+		if check.Status == HostKeyMissing || check.Status == HostKeyStale {
+			challenge, err = a.HostKeyChallenges.Issue(profile.Name, profile.Host, hostKeyChallengePort(), fingerprints)
+			if err != nil {
+				writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "create host key confirmation challenge failed"})
+				return
+			}
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
+			"profile": profile.Name, "status": string(check.Status),
+			"fingerprints": fingerprints, "challenge": challenge,
+		}})
+	}
+}
+
+func (a App) localAgentHostKeyFixHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeWebError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req localAgentRequest
+		if err := decodeWebJSON(r, &req); err != nil {
+			writeWebError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !req.Confirm {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "explicit host key confirmation is required"})
+			return
+		}
+		confirmed := normalizeFingerprintSet(req.HostKeyFingerprints)
+		if len(confirmed) == 0 && strings.TrimSpace(req.HostKeyFingerprint) != "" {
+			confirmed = normalizeFingerprintSet([]string{req.HostKeyFingerprint})
+		}
+		if len(confirmed) == 0 || strings.TrimSpace(req.HostKeyChallenge) == "" {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "confirmed host key fingerprints and challenge are required"})
+			return
+		}
+		profile, _, err := a.prepareLocalAgentTerminalRequest(req)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
+			return
+		}
+		check, err := a.checkHostKey(r.Context(), profile)
+		if err != nil || check.Status == HostKeyScanFailed {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "host key scan failed"})
+			return
+		}
+		if err := a.HostKeyChallenges.Consume(req.HostKeyChallenge, profile.Name, profile.Host, hostKeyChallengePort(), confirmed); err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: challengeError(err).Error()})
+			return
+		}
+		actual := hostKeyFingerprints(check.Scanned)
+		if fingerprintSetDigest(actual) != fingerprintSetDigest(confirmed) {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "host key fingerprint changed; check and confirm again"})
+			return
+		}
+		check.Scanned, err = confirmedHostKeyMaterial(check.Scanned, confirmed)
+		if err != nil {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "confirmed host key material is invalid"})
+			return
+		}
+		fixed, err := a.applyCheckedHostKey(r.Context(), check)
+		if err != nil || fixed.Status == HostKeyScanFailed {
+			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: "host key fix failed"})
+			return
+		}
+		writeWebJSON(w, webAPIResponse{OK: true, Data: map[string]interface{}{
+			"profile": profile.Name, "status": string(fixed.Status),
+		}})
 	}
 }
 
@@ -2028,13 +2153,9 @@ func (a App) localAgentTerminalCheckHandler() http.HandlerFunc {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
 			return
 		}
-		check, err := a.fixHostKey(ctx, profile)
+		check, err := a.requireCurrentHostKey(ctx, profile)
 		if err != nil {
 			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: err.Error()})
-			return
-		}
-		if check.Status == HostKeyScanFailed {
-			writeWebJSON(w, webAPIResponse{OK: false, Code: 1, Error: fmt.Sprintf("ssh host key scan failed for %s: %s", profile.Host, check.Message)})
 			return
 		}
 		token, err := a.TerminalSessions.Issue(profile.Name, requestID)
@@ -2094,13 +2215,9 @@ func (a App) localAgentTerminalWSHandler() http.HandlerFunc {
 			writeWebError(w, http.StatusBadRequest, strings.Join(validationMessages(errs), "\n"))
 			return
 		}
-		check, err := a.fixHostKey(ctx, profile)
+		_, err = a.requireCurrentHostKey(ctx, profile)
 		if err != nil {
 			writeWebError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if check.Status == HostKeyScanFailed {
-			writeWebError(w, http.StatusBadRequest, fmt.Sprintf("ssh host key scan failed for %s: %s", profile.Host, check.Message))
 			return
 		}
 		grant, err = a.TerminalSessions.Reserve(token, profileName)

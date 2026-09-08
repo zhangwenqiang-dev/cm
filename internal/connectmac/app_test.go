@@ -3,6 +3,8 @@ package connectmac
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -23,28 +25,33 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type fakeRunner struct {
-	foreground    []string
-	foregroundErr error
-	background    []string
-	startErr      error
-	rsync         []string
-	rsyncPath     string
-	rsyncOutput   []string
-	rsyncErr      error
-	rsyncWait     <-chan struct{}
-	rsyncProbe    map[string]error
-	forgotHost    string
-	knownHost     string
-	scannedKey    string
-	scanErr       error
-	openedURL     string
-	openedVNC     string
-	openVNCErr    error
-	stopPID       int
-	stopErr       error
+	foreground     []string
+	foregroundErr  error
+	background     []string
+	startErr       error
+	rsync          []string
+	rsyncPath      string
+	rsyncOutput    []string
+	rsyncErr       error
+	rsyncWait      <-chan struct{}
+	rsyncProbe     map[string]error
+	forgotHost     string
+	knownHost      string
+	missingHostKey bool
+	scannedKey     string
+	scanKeys       []string
+	scanCalls      int
+	scanErr        error
+	openedURL      string
+	openedVNC      string
+	openVNCErr     error
+	stopPID        int
+	stopErr        error
 }
 
 type synchronizedRunner struct {
@@ -133,12 +140,26 @@ func (r *fakeRunner) RsyncCommandOutput(ctx context.Context, path string, args [
 }
 
 func (r *fakeRunner) KnownHostKey(ctx context.Context, host string) (string, error) {
+	if r.missingHostKey {
+		return "", nil
+	}
+	if r.knownHost == "" {
+		return "mac-host.example.com ssh-ed25519 AAAACURRENT\n", nil
+	}
 	return r.knownHost, nil
 }
 
 func (r *fakeRunner) ScanHostKey(ctx context.Context, host string) (string, error) {
 	if r.scanErr != nil {
 		return r.scannedKey, r.scanErr
+	}
+	if len(r.scanKeys) > 0 {
+		index := r.scanCalls
+		if index >= len(r.scanKeys) {
+			index = len(r.scanKeys) - 1
+		}
+		r.scanCalls++
+		return r.scanKeys[index], nil
 	}
 	if r.scannedKey == "" {
 		return "mac-host.example.com ssh-ed25519 AAAACURRENT\n", nil
@@ -539,6 +560,19 @@ func readTestLogsRaw(t *testing.T, manager LogManager) string {
 	return string(data)
 }
 
+func testScannedHostKey(t *testing.T, host string) (string, string) {
+	t.Helper()
+	public, _, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ssh.NewPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))) + "\n", ssh.FingerprintSHA256(key)
+}
+
 func TestAppInitCreatesConfigWithoutExampleProfile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
@@ -891,7 +925,7 @@ profiles:
 	}
 }
 
-func TestLocalAgentTerminalCheckMergesIdentityAndFixesHostKey(t *testing.T) {
+func TestLocalAgentTerminalCheckMergesIdentityAndRequiresCurrentHostKey(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	key := filepath.Join(home, ".ssh", "key.pem")
@@ -930,7 +964,7 @@ profiles:
 	if data["target"] != "ec2-user@mac-host.example.com" {
 		t.Fatalf("target = %#v", data["target"])
 	}
-	if data["host_key_status"] != string(HostKeyMissing) {
+	if data["host_key_status"] != string(HostKeyCurrent) {
 		t.Fatalf("host_key_status = %#v", data["host_key_status"])
 	}
 	if strings.TrimSpace(fmt.Sprint(data["terminal_session_token"])) == "" {
@@ -957,7 +991,7 @@ profiles:
 	}
 }
 
-func TestLocalAgentTerminalWSFixesHostKeyBeforeUpgrade(t *testing.T) {
+func TestLocalAgentTerminalWSRequiresCurrentHostKeyBeforeUpgrade(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	key := filepath.Join(home, ".ssh", "key.pem")
@@ -985,18 +1019,179 @@ func TestLocalAgentTerminalWSFixesHostKeyBeforeUpgrade(t *testing.T) {
 	req.Header.Set("Origin", "https://cm.hsgitlab.xyz")
 	rec := httptest.NewRecorder()
 	app.newLocalAgentHandler().ServeHTTP(rec, req)
-	knownHosts, err := os.ReadFile(filepath.Join(home, ".ssh", "known_hosts"))
-	if err != nil {
-		t.Fatalf("read known_hosts: %v", err)
-	}
-	if !strings.Contains(string(knownHosts), "mac-host.example.com ssh-ed25519 AAAACURRENT") {
-		t.Fatalf("known_hosts = %q", string(knownHosts))
-	}
 	if _, err := app.TerminalSessions.Reserve(token, "remote-usw2"); err != nil {
 		t.Fatalf("failed websocket upgrade must release token for retry: %v", err)
 	}
 	if err := app.TerminalSessions.Release(token); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLocalAgentHostKeyConfirmationRepairsOnlyAfterExplicitMatchingConfirmation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := writeSSHKey(t, 0o600)
+	scannedFirst, fingerprint := testScannedHostKey(t, "mac-host.example.com")
+	scannedSecond, secondFingerprint := testScannedHostKey(t, "mac-host.example.com")
+	scanned := scannedFirst + scannedSecond
+	runner := &fakeRunner{
+		knownHost:  "mac-host.example.com ssh-ed25519 AAAAOLD\n",
+		scannedKey: scanned,
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	profile := validProfile(key)
+	body := FormatProfileFile(profile)
+	handler := app.newLocalAgentHandler()
+
+	checkReq := localAgentTestRequest(http.MethodPost, "/host-key/check", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(body)+`}`))
+	checkRec := httptest.NewRecorder()
+	handler.ServeHTTP(checkRec, checkReq)
+	if !strings.Contains(checkRec.Body.String(), `"status":"stale"`) || !strings.Contains(checkRec.Body.String(), fingerprint) || !strings.Contains(checkRec.Body.String(), secondFingerprint) {
+		t.Fatalf("check response=%s", checkRec.Body.String())
+	}
+	if runner.forgotHost != "" {
+		t.Fatalf("check mutated known_hosts for %q", runner.forgotHost)
+	}
+	if files, err := app.LogManager.List(); err != nil || len(files) != 0 {
+		t.Fatalf("fingerprint check should not log pending fingerprint: files=%v err=%v", files, err)
+	}
+	var checked struct {
+		Data struct {
+			Challenge string `json:"challenge"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(checkRec.Body.Bytes(), &checked); err != nil || checked.Data.Challenge == "" {
+		t.Fatalf("decode check challenge: %+v err=%v", checked, err)
+	}
+
+	wrongReq := localAgentTestRequest(http.MethodPost, "/host-key/fix", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(body)+`,"confirm":true,"host_key_fingerprints":["SHA256:wrong"],"host_key_challenge":`+strconv.Quote(checked.Data.Challenge)+`}`))
+	wrongRec := httptest.NewRecorder()
+	handler.ServeHTTP(wrongRec, wrongReq)
+	if !strings.Contains(wrongRec.Body.String(), "does not match") || runner.forgotHost != "" {
+		t.Fatalf("mismatched confirmation response=%s forgot=%q", wrongRec.Body.String(), runner.forgotHost)
+	}
+
+	checkRec = httptest.NewRecorder()
+	handler.ServeHTTP(checkRec, localAgentTestRequest(http.MethodPost, "/host-key/check", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(body)+`}`)))
+	if err := json.Unmarshal(checkRec.Body.Bytes(), &checked); err != nil || checked.Data.Challenge == "" {
+		t.Fatalf("refresh challenge: %v", err)
+	}
+	fixReq := localAgentTestRequest(http.MethodPost, "/host-key/fix", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(body)+`,"confirm":true,"host_key_fingerprints":[`+strconv.Quote(secondFingerprint)+`,`+strconv.Quote(fingerprint)+`],"host_key_challenge":`+strconv.Quote(checked.Data.Challenge)+`}`))
+	fixRec := httptest.NewRecorder()
+	handler.ServeHTTP(fixRec, fixReq)
+	if !strings.Contains(fixRec.Body.String(), `"ok":true`) {
+		t.Fatalf("fix response=%s forgot=%q", fixRec.Body.String(), runner.forgotHost)
+	}
+	replayBody := `{"profile":"xcode-vnc","profile_yaml":` + strconv.Quote(body) + `,"confirm":true,"host_key_fingerprints":[` + strconv.Quote(secondFingerprint) + `,` + strconv.Quote(fingerprint) + `],"host_key_challenge":` + strconv.Quote(checked.Data.Challenge) + `}`
+	replayRec := httptest.NewRecorder()
+	handler.ServeHTTP(replayRec, localAgentTestRequest(http.MethodPost, "/host-key/fix", strings.NewReader(replayBody)))
+	if !strings.Contains(replayRec.Body.String(), "already used") {
+		t.Fatalf("challenge replay response=%s", replayRec.Body.String())
+	}
+	knownHosts, err := os.ReadFile(filepath.Join(home, ".ssh", "known_hosts"))
+	if err != nil || !strings.Contains(string(knownHosts), strings.Fields(scannedFirst)[2]) || !strings.Contains(string(knownHosts), strings.Fields(scannedSecond)[2]) {
+		t.Fatalf("known_hosts=%q err=%v", knownHosts, err)
+	}
+}
+
+func TestLocalAgentHostKeyConfirmationRejectsChangedKeyBetweenCheckAndFix(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	key := writeSSHKey(t, 0o600)
+	scannedA, fingerprintA := testScannedHostKey(t, "mac-host.example.com")
+	scannedB, fingerprintB := testScannedHostKey(t, "mac-host.example.com")
+	if fingerprintA == fingerprintB {
+		t.Fatal("test keys unexpectedly have the same fingerprint")
+	}
+	runner := &fakeRunner{
+		knownHost: "mac-host.example.com ssh-ed25519 AAAAOLD\n",
+		scanKeys:  []string{scannedA, scannedB},
+	}
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	app.Runner = runner
+	profileYAML := FormatProfileFile(validProfile(key))
+	handler := app.newLocalAgentHandler()
+
+	checkReq := localAgentTestRequest(http.MethodPost, "/host-key/check", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(profileYAML)+`}`))
+	checkRec := httptest.NewRecorder()
+	handler.ServeHTTP(checkRec, checkReq)
+	if !strings.Contains(checkRec.Body.String(), fingerprintA) || strings.Contains(checkRec.Body.String(), fingerprintB) {
+		t.Fatalf("check response=%s", checkRec.Body.String())
+	}
+	var checked struct {
+		Data struct {
+			Challenge string `json:"challenge"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(checkRec.Body.Bytes(), &checked); err != nil || checked.Data.Challenge == "" {
+		t.Fatalf("decode challenge: %v", err)
+	}
+
+	fixReq := localAgentTestRequest(http.MethodPost, "/host-key/fix", strings.NewReader(`{"profile":"xcode-vnc","profile_yaml":`+strconv.Quote(profileYAML)+`,"confirm":true,"host_key_fingerprints":[`+strconv.Quote(fingerprintA)+`],"host_key_challenge":`+strconv.Quote(checked.Data.Challenge)+`}`))
+	fixRec := httptest.NewRecorder()
+	handler.ServeHTTP(fixRec, fixReq)
+	if !strings.Contains(fixRec.Body.String(), "fingerprint changed") {
+		t.Fatalf("fix response=%s", fixRec.Body.String())
+	}
+	if runner.forgotHost != "" {
+		t.Fatalf("changed key removed known_hosts entry for %q", runner.forgotHost)
+	}
+	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+	if data, err := os.ReadFile(knownHosts); !os.IsNotExist(err) {
+		t.Fatalf("changed key wrote known_hosts: data=%q err=%v", data, err)
+	}
+	if files, err := app.LogManager.List(); err != nil || len(files) != 0 {
+		t.Fatalf("confirmation flow logged key or fingerprint: files=%v err=%v", files, err)
+	}
+}
+
+func TestLocalAgentEntryPointsBlockNonCurrentHostKeys(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		extra     string
+		configure func(*fakeRunner)
+		wantCode  string
+	}{
+		{name: "ssh stale", path: "/ssh", configure: func(r *fakeRunner) {
+			r.knownHost = "mac-host.example.com ssh-ed25519 AAAAOLD\n"
+		}, wantCode: "host_key_changed"},
+		{name: "terminal missing", path: "/terminal/check", configure: func(r *fakeRunner) {
+			r.missingHostKey = true
+		}, wantCode: "host_key_missing"},
+		{name: "transfer stale", path: "/sync/push", extra: `,"local_path":"/does/not/matter","remote_path":"~/Documents/"`, configure: func(r *fakeRunner) {
+			r.knownHost = "mac-host.example.com ssh-ed25519 AAAAOLD\n"
+		}, wantCode: "host_key_changed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			key := writeSSHKey(t, 0o600)
+			profile := validProfile(key)
+			runner := &fakeRunner{}
+			tc.configure(runner)
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, home)
+			app.Runner = runner
+			payload := `{"profile":"xcode-vnc","profile_yaml":` + strconv.Quote(FormatProfileFile(profile)) + tc.extra + `}`
+			req := localAgentTestRequest(http.MethodPost, tc.path, strings.NewReader(payload))
+			rec := httptest.NewRecorder()
+			app.newLocalAgentHandler().ServeHTTP(rec, req)
+			if !strings.Contains(rec.Body.String(), "host key") {
+				t.Fatalf("response=%s", rec.Body.String())
+			}
+			if len(runner.foreground) != 0 || len(runner.background) != 0 || len(runner.rsync) != 0 || runner.openedVNC != "" || runner.forgotHost != "" {
+				t.Fatalf("blocked local Agent request invoked command or mutation: runner=%+v", runner)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 1 || entries[0].Action != "host-key.blocked" || entries[0].ErrorCode != tc.wantCode || entries[0].RequestID == "" {
+				t.Fatalf("blocked entries=%+v", entries)
+			}
+		})
 	}
 }
 
@@ -4563,6 +4758,61 @@ func TestAppWebTerminalCheckReady(t *testing.T) {
 	}
 }
 
+func TestAppWebTerminalAndSyncBlockNonCurrentHostKeys(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		body      string
+		configure func(*fakeRunner)
+		wantCode  string
+	}{
+		{name: "terminal stale", method: http.MethodGet, path: "/api/terminal/check?profile=xcode-vnc",
+			configure: func(r *fakeRunner) { r.knownHost = "mac-host.example.com ssh-ed25519 AAAAOLD\n" }, wantCode: "host_key_changed"},
+		{name: "sync missing", method: http.MethodPost, path: "/api/sync/pull",
+			body:      `{"profile":"xcode-vnc","remote_path":"~/Downloads/","local_path":"."}`,
+			configure: func(r *fakeRunner) { r.missingHostKey = true }, wantCode: "host_key_missing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			key := writeSSHKey(t, 0o600)
+			config := writeConfig(t, dir, key)
+			var out, errOut bytes.Buffer
+			runner := &fakeRunner{}
+			tc.configure(runner)
+			app := testApp(&out, &errOut, dir)
+			app.Runner = runner
+			app.AWSService.NewClient = func(context.Context, MacPlan) (AWSClient, error) {
+				return &fakeAWSClient{status: AWSStatus{
+					Instances: []InstanceStatus{{InstanceID: "i-ready", State: "running", SystemStatus: "ok", InstanceStatusCheck: "ok", EBSStatus: "ok", Tags: managedTestTags()}},
+					ElasticIP: ElasticIP{InstanceID: "i-ready", PublicIP: "54.1.2.3", AllocationID: "eipalloc-1"},
+				}}, nil
+			}
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			addWebAuth(t, &app, req, "operator")
+			rec := httptest.NewRecorder()
+			app.newWebHandler(config).ServeHTTP(rec, req)
+			if !strings.Contains(rec.Body.String(), "host key") {
+				t.Fatalf("response=%s", rec.Body.String())
+			}
+			if len(runner.rsync) != 0 || len(runner.foreground) != 0 || runner.forgotHost != "" {
+				t.Fatalf("blocked web request invoked command or mutation: runner=%+v", runner)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			var blocked []LogEntry
+			for _, entry := range entries {
+				if entry.Action == "host-key.blocked" {
+					blocked = append(blocked, entry)
+				}
+			}
+			if len(blocked) != 1 || blocked[0].ErrorCode != tc.wantCode || blocked[0].RequestID == "" {
+				t.Fatalf("blocked entries=%+v all=%+v", blocked, entries)
+			}
+		})
+	}
+}
+
 func TestAppWebSyncPushRequiresReadyAndSavesHistory(t *testing.T) {
 	dir := t.TempDir()
 	key := writeSSHKey(t, 0o600)
@@ -5559,6 +5809,7 @@ function reset(next) {
 
 async function localAgentAPI(path, options) {
   calls.push([path, options.method, JSON.parse(options.body)]);
+  if (path === "/host-key/check") return {data:{status:"current"}};
   if (path === "/start") {
     if (scenario.startError) throw scenario.startError;
     return scenario.start;
@@ -5612,6 +5863,10 @@ reset({
 });
 await startTunnel("reject-profile");
 assert.deepEqual(calls, [
+  ["/host-key/check", "POST", {
+    profile: "reject-profile",
+    profile_yaml: "name: reject-profile\napple_email: reject@example.com\n"
+  }],
   ["/start", "POST", {
     profile: "reject-profile",
     profile_yaml: "name: reject-profile\napple_email: reject@example.com\n"
@@ -5633,6 +5888,10 @@ reset({
 });
 await startTunnel("open-reject-profile");
 assert.deepEqual(calls, [
+  ["/host-key/check", "POST", {
+    profile: "open-reject-profile",
+    profile_yaml: "name: open-reject-profile\napple_email: open-reject@example.com\n"
+  }],
   ["/start", "POST", {
     profile: "open-reject-profile",
     profile_yaml: "name: open-reject-profile\napple_email: open-reject@example.com\n"
@@ -5658,6 +5917,10 @@ reset({
 });
 await startTunnel("new-profile");
 assert.deepEqual(calls, [
+  ["/host-key/check", "POST", {
+    profile: "new-profile",
+    profile_yaml: "name: new-profile\napple_email: new@example.com\n"
+  }],
   ["/start", "POST", {
     profile: "new-profile",
     profile_yaml: "name: new-profile\napple_email: new@example.com\n"
@@ -5683,6 +5946,10 @@ reset({
 });
 await startTunnel("reuse-profile");
 assert.deepEqual(calls, [
+  ["/host-key/check", "POST", {
+    profile: "reuse-profile",
+    profile_yaml: "name: reuse-profile\napple_email: reuse@example.com\n"
+  }],
   ["/start", "POST", {
     profile: "reuse-profile",
     profile_yaml: "name: reuse-profile\napple_email: reuse@example.com\n"
@@ -5707,6 +5974,10 @@ reset({
 });
 await startTunnel("events-profile");
 assert.deepEqual(calls, [
+  ["/host-key/check", "POST", {
+    profile: "events-profile",
+    profile_yaml: "name: events-profile\napple_email: events@example.com\n"
+  }],
   ["/start", "POST", {
     profile: "events-profile",
     profile_yaml: "name: events-profile\napple_email: events@example.com\n"
@@ -6369,9 +6640,6 @@ func TestAppStartSavesStateAfterHealthyTunnel(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "started xcode-vnc with pid 55") {
 		t.Fatalf("out = %q", out.String())
-	}
-	if !strings.Contains(out.String(), "Host key: current") {
-		t.Fatalf("out missing host key status = %q", out.String())
 	}
 	state, ok, err := app.StateManager.Load("xcode-vnc")
 	if err != nil || !ok || state.PID != 55 {
@@ -7174,50 +7442,52 @@ func TestAppStartSerializesConcurrentStartsPerProfile(t *testing.T) {
 	}
 }
 
-func TestAppStartAddsMissingHostKeyBeforeTunnel(t *testing.T) {
+func TestAppStartBlocksMissingHostKeyBeforeTunnel(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
-	runner := &fakeRunner{}
+	runner := &fakeRunner{missingHostKey: true}
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
-	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
 		t.Fatalf("start code = %d, err = %s", code, errOut.String())
 	}
-	data, err := os.ReadFile(filepath.Join(dir, ".ssh", "known_hosts"))
-	if err != nil {
-		t.Fatalf("read known_hosts: %v", err)
-	}
-	if !strings.Contains(string(data), "AAAACURRENT") || !strings.Contains(out.String(), "Host key: missing") {
-		t.Fatalf("known_hosts=%q out=%q", data, out.String())
-	}
-	if len(runner.background) == 0 {
-		t.Fatal("expected tunnel to start after adding host key")
+	if len(runner.background) != 0 || runner.forgotHost != "" {
+		t.Fatalf("missing key mutated state or started tunnel: background=%v forgot=%q", runner.background, runner.forgotHost)
 	}
 }
 
-func TestAppStartReplacesStaleHostKeyBeforeTunnel(t *testing.T) {
+func TestAppStartBlocksStaleHostKeyUntilExplicitFix(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
-	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAAOLD\n"}
+	scanned, _ := testScannedHostKey(t, "mac-host.example.com")
+	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAAOLD\n", scannedKey: scanned}
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
-	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
-		t.Fatalf("start code = %d, err = %s", code, errOut.String())
+	app.In = strings.NewReader("yes\n")
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 1 {
+		t.Fatalf("blocked start code = %d, err = %s", code, errOut.String())
 	}
-	if runner.forgotHost != "mac-host.example.com" {
-		t.Fatalf("forgot host = %q", runner.forgotHost)
+	if runner.forgotHost != "" || len(runner.background) != 0 {
+		t.Fatalf("stale key mutated state or started tunnel: forgot=%q background=%v", runner.forgotHost, runner.background)
+	}
+	if code := app.Run(context.Background(), []string{"host-key", "fix", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("host-key fix code = %d, err = %s", code, errOut.String())
+	}
+	runner.knownHost = runner.scannedKey
+	if code := app.Run(context.Background(), []string{"start", "xcode-vnc", "--config", config}); code != 0 {
+		t.Fatalf("start after explicit fix code = %d, err = %s", code, errOut.String())
 	}
 	data, err := os.ReadFile(filepath.Join(dir, ".ssh", "known_hosts"))
 	if err != nil {
 		t.Fatalf("read known_hosts: %v", err)
 	}
-	if !strings.Contains(string(data), "AAAACURRENT") || !strings.Contains(out.String(), "Host key: stale") {
+	if !strings.Contains(string(data), strings.Fields(scanned)[2]) {
 		t.Fatalf("known_hosts=%q out=%q", data, out.String())
 	}
 }
@@ -7429,9 +7699,11 @@ func TestAppHostKeyCommands(t *testing.T) {
 	key := writeSSHKey(t, 0o600)
 	config := writeConfig(t, dir, key)
 	var out, errOut bytes.Buffer
-	runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAACURRENT\n"}
+	scanned, _ := testScannedHostKey(t, "mac-host.example.com")
+	runner := &fakeRunner{knownHost: scanned, scannedKey: scanned}
 	app := testApp(&out, &errOut, dir)
 	app.Runner = runner
+	app.In = strings.NewReader("yes\n")
 	if code := app.Run(context.Background(), []string{"host-key", "check", "xcode-vnc", "--config", config}); code != 0 {
 		t.Fatalf("host-key check code = %d, err = %s", code, errOut.String())
 	}
@@ -7440,12 +7712,102 @@ func TestAppHostKeyCommands(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	runner.knownHost = ""
+	runner.missingHostKey = true
 	if code := app.Run(context.Background(), []string{"host-key", "fix", "xcode-vnc", "--config", config}); code != 0 {
 		t.Fatalf("host-key fix code = %d, err = %s", code, errOut.String())
 	}
 	if !strings.Contains(out.String(), "Host key: missing") {
 		t.Fatalf("fix out = %q", out.String())
+	}
+}
+
+func TestHostKeyGateBlocksCommandsWithoutMutationOrKeyMaterialInLogs(t *testing.T) {
+	commands := []struct {
+		name string
+		run  func(App, context.Context, Config, Profile) int
+	}{
+		{name: "ssh", run: func(app App, ctx context.Context, cfg Config, profile Profile) int {
+			return app.runSSH(ctx, cfg, []string{profile.Name})
+		}},
+		{name: "tunnel", run: func(app App, ctx context.Context, cfg Config, profile Profile) int {
+			return app.runStart(ctx, cfg, []string{profile.Name})
+		}},
+		{name: "vnc", run: func(app App, ctx context.Context, cfg Config, profile Profile) int {
+			return app.runOpenVNC(ctx, cfg, []string{profile.Name})
+		}},
+		{name: "push", run: func(app App, ctx context.Context, cfg Config, profile Profile) int {
+			localPath := filepath.Join(app.StateManager.Dir, "payload")
+			writeFile(t, localPath, "payload")
+			return app.runPush(ctx, cfg, []string{profile.Name, localPath, "~/Documents/"})
+		}},
+		{name: "pull", run: func(app App, ctx context.Context, cfg Config, profile Profile) int {
+			return app.runPull(ctx, cfg, []string{profile.Name, "~/Documents/payload"})
+		}},
+	}
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out, errOut bytes.Buffer
+			runner := &fakeRunner{knownHost: "mac-host.example.com ssh-ed25519 AAAA-DO-NOT-LOG\n"}
+			app := testApp(&out, &errOut, dir)
+			app.Runner = runner
+			profile := validProfile(writeSSHKey(t, 0o600))
+			profile.Name = "blocked-profile"
+			cfg := Config{Profiles: map[string]Profile{profile.Name: profile}}
+			ctx := localLifecycleTestContext("blocked-" + tc.name)
+
+			if code := tc.run(app, ctx, cfg, profile); code != 1 {
+				t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+			}
+			if len(runner.foreground) != 0 || len(runner.background) != 0 || len(runner.rsync) != 0 || runner.openedVNC != "" || runner.forgotHost != "" {
+				t.Fatalf("blocked command invoked runner or mutation: %+v", runner)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			blocked := make([]LogEntry, 0, 1)
+			for _, entry := range entries {
+				if entry.Action == "host-key.blocked" {
+					blocked = append(blocked, entry)
+				}
+			}
+			if len(blocked) != 1 {
+				t.Fatalf("host-key.blocked entries=%d, all=%+v", len(blocked), entries)
+			}
+			if blocked[0].ErrorCode != "host_key_changed" || blocked[0].Status != string(HostKeyStale) || blocked[0].RequestID != "blocked-"+tc.name {
+				t.Fatalf("blocked entry=%+v", blocked[0])
+			}
+			raw := readTestLogsRaw(t, app.LogManager)
+			if strings.Contains(raw, "AAAA-DO-NOT-LOG") || strings.Contains(raw, "ssh-ed25519") {
+				t.Fatalf("host key material leaked in logs: %s", raw)
+			}
+		})
+	}
+}
+
+func TestRequireCurrentHostKeyErrorCodes(t *testing.T) {
+	tests := []struct {
+		name       string
+		runner     *fakeRunner
+		wantCode   string
+		wantStatus HostKeyStatus
+	}{
+		{name: "missing", runner: &fakeRunner{missingHostKey: true}, wantCode: "host_key_missing", wantStatus: HostKeyMissing},
+		{name: "scan failed", runner: &fakeRunner{scanErr: errors.New("network unavailable")}, wantCode: "host_key_scan_failed", wantStatus: HostKeyScanFailed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			app := testApp(&out, &errOut, t.TempDir())
+			app.Runner = tc.runner
+			profile := validProfile(writeSSHKey(t, 0o600))
+			check, err := app.requireCurrentHostKey(localLifecycleTestContext("host-key-code"), profile)
+			if err == nil || check.Status != tc.wantStatus {
+				t.Fatalf("check=%+v err=%v", check, err)
+			}
+			classified := classifyLocalOperationError(err)
+			if classified.Code != tc.wantCode {
+				t.Fatalf("error code=%q want=%q err=%v", classified.Code, tc.wantCode, err)
+			}
+		})
 	}
 }
 

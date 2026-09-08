@@ -233,6 +233,7 @@ function openLocalAgentRepair() {}
 function showOperationError() {}
 function showView(value) { views.push(value); state.view = value; }
 function localAgentPayload(profile) { return { profile }; }
+async function ensureLocalHostKey() {}
 function sanitizedOperationMessage(error) { return String(error?.message || error); }
 function $(id) { return { focus() {} }; }
 async function recordLocalIntent() { const item = deferred(); intentDeferred.push(item); return item.promise; }

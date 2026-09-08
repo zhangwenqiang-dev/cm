@@ -37,6 +37,10 @@ func (a App) runConnect(ctx context.Context, cfg Config, args []string) int {
 		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	a.logLocalCommand(ctx, "ssh.attempted", profile, 0, startedAt, LogEntry{Phase: "attempted"})
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
 		fmt.Fprintf(a.Err, "ssh failed: %v\n", err)
@@ -182,14 +186,8 @@ func (a App) runStartLockedResult(ctx context.Context, profile Profile, stateKey
 		return 1, result
 	}
 	printSummary(a.Out, profile)
-	check, err := a.fixHostKey(ctx, profile)
-	if err != nil {
-		fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
-		return 1, result
-	}
-	fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
-	if check.Status == HostKeyScanFailed {
-		fmt.Fprintf(a.Err, "host key scan failed for %s: %s\n", profile.Host, check.Message)
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
 		return 1, result
 	}
 	pid, err := a.Runner.StartBackground(ctx, sshArgs)
@@ -251,6 +249,10 @@ func (a App) runSSH(ctx context.Context, cfg Config, args []string) int {
 		a.logLocalCommand(ctx, "ssh.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	fmt.Fprintf(a.Out, "SSH: %s@%s\n", profile.User, profile.Host)
 	a.logLocalCommand(ctx, "ssh.attempted", profile, 0, startedAt, LogEntry{Phase: "attempted"})
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
@@ -290,6 +292,10 @@ func (a App) runExec(ctx context.Context, cfg Config, args []string) int {
 		a.logLocalCommand(ctx, "ssh.exec.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 		return 1
 	}
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
+	}
 	fmt.Fprintf(a.Out, "Exec: %s@%s %s\n", profile.User, profile.Host, strings.Join(command, " "))
 	if err := a.Runner.RunForeground(ctx, sshArgs); err != nil {
 		fmt.Fprintf(a.Err, "ssh exec failed: %v\n", err)
@@ -309,6 +315,10 @@ func (a App) runOpenVNC(ctx context.Context, cfg Config, args []string) int {
 	if !ok {
 		fmt.Fprintln(a.Err, unknownProfileError(cfg, args[0]))
 		return 2
+	}
+	if _, err := a.requireCurrentHostKey(ctx, profile); err != nil {
+		fmt.Fprintln(a.Err, err)
+		return 1
 	}
 	target, err := VNCURL(profile)
 	if err != nil {
@@ -352,8 +362,8 @@ func (a App) runForgetHost(ctx context.Context, cfg Config, args []string) int {
 }
 func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 	startedAt := time.Now()
-	if len(args) != 2 {
-		fmt.Fprintln(a.Err, "usage: cm host-key <check|fix> <profile>")
+	if len(args) < 2 {
+		fmt.Fprintln(a.Err, "usage: cm host-key <check|fix> <profile> [--confirm --fingerprint <SHA256:...> ...]")
 		return 2
 	}
 	action := args[0]
@@ -364,6 +374,10 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 	}
 	switch action {
 	case "check":
+		if len(args) != 2 {
+			fmt.Fprintln(a.Err, "usage: cm host-key check <profile>")
+			return 2
+		}
 		check, err := a.checkHostKey(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "host key check failed: %v\n", err)
@@ -378,15 +392,45 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 		a.logLocalCommand(ctx, "known-host.checked", profile, 0, startedAt, LogEntry{})
 		return 0
 	case "fix":
-		check, err := a.fixHostKey(ctx, profile)
+		confirm, supplied, err := parseHostKeyFixConfirmation(args[2:])
+		if err != nil {
+			fmt.Fprintln(a.Err, err)
+			return 2
+		}
+		check, err := a.checkHostKey(ctx, profile)
 		if err != nil {
 			fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
 			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: classifyOperationalError(err).Code})
 			return 1
 		}
-		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
 		if check.Status == HostKeyScanFailed {
 			a.logLocalCommand(ctx, "known-host.failed", profile, 1, startedAt, LogEntry{ErrorCode: "host_key_scan_failed"})
+			return 1
+		}
+		fingerprints := hostKeyFingerprints(check.Scanned)
+		fmt.Fprintf(a.Out, "Host key: %s (%s)\n", check.Status, check.Message)
+		for _, fingerprint := range fingerprints {
+			fmt.Fprintf(a.Out, "Fingerprint: %s\n", fingerprint)
+		}
+		if len(args) == 2 {
+			fmt.Fprint(a.Out, "Confirm all fingerprints and replace known_hosts? Type yes: ")
+			var answer string
+			if _, err := fmt.Fscan(a.In, &answer); err != nil || !strings.EqualFold(answer, "yes") {
+				fmt.Fprintln(a.Err, "host key fix canceled; no changes made")
+				return 1
+			}
+		} else if !confirm || fingerprintSetDigest(supplied) != fingerprintSetDigest(fingerprints) {
+			fmt.Fprintln(a.Err, "--confirm requires the exact complete set of --fingerprint values shown by host-key check")
+			return 1
+		}
+		check.Scanned, err = confirmedHostKeyMaterial(check.Scanned, fingerprints)
+		if err != nil {
+			fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
+			return 1
+		}
+		check, err = a.applyCheckedHostKey(ctx, check)
+		if err != nil {
+			fmt.Fprintf(a.Err, "host key fix failed: %v\n", err)
 			return 1
 		}
 		a.logLocalCommand(ctx, "known-host.fixed", profile, 0, startedAt, LogEntry{})
@@ -395,6 +439,26 @@ func (a App) runHostKey(ctx context.Context, cfg Config, args []string) int {
 		fmt.Fprintf(a.Err, "unknown host-key command %q\n", action)
 		return 2
 	}
+}
+
+func parseHostKeyFixConfirmation(args []string) (bool, []string, error) {
+	confirm := false
+	var fingerprints []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--confirm":
+			confirm = true
+		case "--fingerprint":
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
+				return false, nil, fmt.Errorf("--fingerprint requires a value")
+			}
+			fingerprints = append(fingerprints, args[i])
+		default:
+			return false, nil, fmt.Errorf("unknown host-key fix option %q", args[i])
+		}
+	}
+	return confirm, normalizeFingerprintSet(fingerprints), nil
 }
 func (a App) runStop(args []string) int {
 	startedAt := time.Now()

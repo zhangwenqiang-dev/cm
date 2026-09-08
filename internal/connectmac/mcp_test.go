@@ -277,6 +277,56 @@ func TestMCPPullAcceptsSyncFilters(t *testing.T) {
 	}
 }
 
+func TestMCPSyncBlocksNonCurrentHostKeysBeforeRsync(t *testing.T) {
+	tests := []struct {
+		name       string
+		tool       string
+		args       map[string]interface{}
+		configure  func(*fakeRunner)
+		wantCode   string
+		wantStatus HostKeyStatus
+	}{
+		{name: "push stale", tool: "cm_push", args: map[string]interface{}{
+			"profile": "xcode-vnc", "remote_dir": "~/Documents/", "confirm": true,
+		}, configure: func(r *fakeRunner) { r.knownHost = "mac-host.example.com ssh-ed25519 AAAAOLD\n" }, wantCode: "host_key_changed", wantStatus: HostKeyStale},
+		{name: "pull missing", tool: "cm_pull", args: map[string]interface{}{
+			"profile": "xcode-vnc", "remote_path": "~/Documents/file", "local_dir": ".", "confirm": true,
+		}, configure: func(r *fakeRunner) { r.missingHostKey = true }, wantCode: "host_key_missing", wantStatus: HostKeyMissing},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			app, config, runner := mcpTestApp(t)
+			app.LogManager = NewLogManager(filepath.Join(t.TempDir(), "logs"))
+			tc.configure(runner)
+			if tc.tool == "cm_push" {
+				localPath := filepath.Join(t.TempDir(), "file")
+				writeFile(t, localPath, "data")
+				tc.args["local_path"] = localPath
+			}
+			cfg, err := LoadConfig(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := MCPServer{App: app, ConfigPath: config}
+			if tc.tool == "cm_push" {
+				_, err = server.mcpPush(context.Background(), cfg, tc.args)
+			} else {
+				_, err = server.mcpPull(context.Background(), cfg, tc.args)
+			}
+			if err == nil || !strings.Contains(err.Error(), "host key") {
+				t.Fatalf("MCP error=%v", err)
+			}
+			if len(runner.rsync) != 0 || runner.forgotHost != "" {
+				t.Fatalf("blocked MCP sync invoked rsync or mutation: rsync=%v forgot=%q", runner.rsync, runner.forgotHost)
+			}
+			entries := readTestLogEntries(t, app.LogManager)
+			if len(entries) != 1 || entries[0].Action != "host-key.blocked" || entries[0].ErrorCode != tc.wantCode || entries[0].Status != string(tc.wantStatus) || entries[0].RequestID == "" {
+				t.Fatalf("blocked entries=%+v", entries)
+			}
+		})
+	}
+}
+
 func TestMCPForgetHostRequiresConfirm(t *testing.T) {
 	app, config, runner := mcpTestApp(t)
 	out := runMCPCall(t, app, config, "cm_forget_host", map[string]interface{}{

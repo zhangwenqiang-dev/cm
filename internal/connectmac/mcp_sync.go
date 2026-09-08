@@ -38,6 +38,9 @@ func (s MCPServer) mcpPush(ctx context.Context, cfg Config, args map[string]inte
 	if !s.validateMCPRsync(profile) {
 		return mcpTextData("profile validation failed", mcpSyncData(profile, "push", true, localPath, remoteDir, filters, "profile validation failed")), nil
 	}
+	if _, err := s.App.requireCurrentHostKey(ctx, profile); err != nil {
+		return nil, err
+	}
 	rsyncArgs, err := RsyncPushArgs(profile, localPath, remoteDir, filters)
 	if err != nil {
 		return mcpUserError("rsync_args", err), nil
@@ -71,6 +74,9 @@ func (s MCPServer) mcpPull(ctx context.Context, cfg Config, args map[string]inte
 	}
 	if !s.validateMCPRsync(profile) {
 		return mcpTextData("profile validation failed", mcpSyncData(profile, "pull", true, remotePath, localDir, filters, "profile validation failed")), nil
+	}
+	if _, err := s.App.requireCurrentHostKey(ctx, profile); err != nil {
+		return nil, err
 	}
 	rsyncArgs, err := RsyncPullArgs(profile, remotePath, localDir, filters)
 	if err != nil {

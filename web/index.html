@@ -1755,6 +1755,32 @@ cm local-agent start</pre>
       };
     }
 
+    async function ensureLocalHostKey(profileName, requestID) {
+      const checked = await localAgentAPI("/host-key/check", {
+        method: "POST",
+        body: JSON.stringify(localAgentPayload(profileName)),
+        requestID
+      });
+      const data = checked.data || {};
+      const status = String(data.status || "");
+      if (status === "current") return;
+      if (status === "scan-failed") throw new Error("SSH 主机指纹扫描失败，请检查网络后重试。");
+      const fingerprints = Array.isArray(data.fingerprints) ? data.fingerprints.filter(Boolean) : [];
+      if (!fingerprints.length) throw new Error("未获取到可确认的 SSH 主机指纹。");
+	  const challenge = String(data.challenge || "");
+	  if (!challenge) throw new Error("未获取到 SSH 主机指纹确认挑战。");
+      const action = status === "stale" ? "发生变化" : "尚未保存";
+	  const fingerprintText = fingerprints.map((value) => String(value)).join("\n");
+      if (!window.confirm("SSH 主机指纹" + action + "：\n\n" + fingerprintText + "\n\n确认以上全部指纹属于目标 Mac 后继续。")) {
+        throw new Error("已取消 SSH 主机指纹确认。");
+      }
+      await localAgentAPI("/host-key/fix", {
+        method: "POST",
+		body: JSON.stringify(localAgentPayload(profileName, { confirm: true, host_key_fingerprints: fingerprints, host_key_challenge: challenge })),
+        requestID
+      });
+    }
+
     async function loadClientConfig() {
       const body = await api("/api/config");
       state.clientConfig = body.data?.config || { user_api: "" };
@@ -3284,6 +3310,7 @@ cm local-agent start</pre>
         const intent = await recordLocalIntent(profile, "vnc");
         const requestID = String(intent?.data?.request_id || "");
         if (!requestID) throw new Error("服务端未返回本机操作请求标识");
+        await ensureLocalHostKey(profile, requestID);
         const start = await localAgentAPI("/start", {
           method: "POST",
           body: JSON.stringify(localAgentPayload(profile)),
@@ -4308,6 +4335,7 @@ cm local-agent start</pre>
         const intent = await recordLocalIntent(p.name, "transfer");
         const requestID = String(intent?.data?.request_id || "");
         if (!requestID) throw new Error("服务端未返回本机操作请求标识");
+        await ensureLocalHostKey(p.name, requestID);
         const body = await localAgentAPI("/sync/" + direction, {
           method: "POST",
           body: JSON.stringify(localAgentPayload(p.name, payload)),
@@ -4479,6 +4507,7 @@ cm local-agent start</pre>
         if (!terminalConnectionCurrent(generation, profile)) return;
         const requestID = String(intent?.data?.request_id || "");
         if (!requestID) throw new Error("服务端未返回本机操作请求标识");
+        await ensureLocalHostKey(profile, requestID);
         const check = await localAgentAPI("/terminal/check", {
           method: "POST",
           body: JSON.stringify(localAgentPayload(profile)),
