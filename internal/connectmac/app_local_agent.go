@@ -1750,20 +1750,24 @@ func (a App) writeLocalTransferEventWithRequest(event LocalTransferEvent, reques
 	}
 	message = fmt.Sprintf("%s; phase=%s percent=%d elapsed=%s", message, event.Phase, event.Percent, event.Elapsed)
 	a.writeRuntimeLog(LogEntry{
-		Level:      level,
-		Action:     action,
-		TransferID: event.TransferID,
-		LocalJobID: event.LocalJobID,
-		Profile:    event.Profile,
-		Direction:  event.Direction,
-		Status:     event.Status,
-		Phase:      event.Phase,
-		Percent:    event.Percent,
-		ElapsedMS:  event.Elapsed.Milliseconds(),
-		DurationMS: positiveDurationMS(event.Elapsed),
-		RequestID:  requestID,
-		Source:     "web-local",
-		Message:    message,
+		Level:            level,
+		Action:           action,
+		TransferID:       event.TransferID,
+		LocalJobID:       event.LocalJobID,
+		Profile:          event.Profile,
+		Direction:        event.Direction,
+		Status:           event.Status,
+		Phase:            event.Phase,
+		Percent:          event.Percent,
+		BytesTransferred: event.BytesTransferred,
+		BytesTotal:       event.BytesTotal,
+		BytesPerSecond:   event.BytesPerSecond,
+		ETASeconds:       event.ETASeconds,
+		ElapsedMS:        event.Elapsed.Milliseconds(),
+		DurationMS:       positiveDurationMS(event.Elapsed),
+		RequestID:        requestID,
+		Source:           "web-local",
+		Message:          message,
 	})
 }
 

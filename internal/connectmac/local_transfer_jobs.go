@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"regexp"
@@ -46,22 +47,27 @@ const (
 )
 
 type LocalTransferJob struct {
-	ID                string     `json:"id"`
-	TransferID        string     `json:"transfer_id,omitempty"`
-	Profile           string     `json:"profile"`
-	Direction         string     `json:"direction"`
-	Status            string     `json:"status"`
-	Phase             string     `json:"phase"`
-	Percent           int        `json:"percent"`
-	ProgressMode      string     `json:"progress_mode,omitempty"`
-	Output            string     `json:"output"`
-	Error             string     `json:"error"`
-	CallbackWarning   string     `json:"callback_warning,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	StartedAt         *time.Time `json:"started_at"`
-	FinishedAt        *time.Time `json:"finished_at"`
-	callbackEvents    chan localTransferCallbackDispatch
-	emittedMilestones map[string]bool
+	ID                 string     `json:"id"`
+	TransferID         string     `json:"transfer_id,omitempty"`
+	Profile            string     `json:"profile"`
+	Direction          string     `json:"direction"`
+	Status             string     `json:"status"`
+	Phase              string     `json:"phase"`
+	Percent            int        `json:"percent"`
+	BytesTransferred   int64      `json:"bytes_transferred,omitempty"`
+	BytesTotal         int64      `json:"bytes_total,omitempty"`
+	BytesPerSecond     int64      `json:"bytes_per_second,omitempty"`
+	ETASeconds         int64      `json:"eta_seconds,omitempty"`
+	ProgressMode       string     `json:"progress_mode,omitempty"`
+	Output             string     `json:"output"`
+	Error              string     `json:"error"`
+	CallbackWarning    string     `json:"callback_warning,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	StartedAt          *time.Time `json:"started_at"`
+	FinishedAt         *time.Time `json:"finished_at"`
+	callbackEvents     chan localTransferCallbackDispatch
+	progressBuffer     string
+	bytesTotalReliable bool
 }
 
 func (j LocalTransferJob) Active() bool {
@@ -69,16 +75,20 @@ func (j LocalTransferJob) Active() bool {
 }
 
 type LocalTransferEvent struct {
-	TransferID   string
-	LocalJobID   string
-	Profile      string
-	Direction    string
-	Status       string
-	Phase        string
-	Percent      int
-	ProgressMode string
-	Elapsed      time.Duration
-	Error        string
+	TransferID       string
+	LocalJobID       string
+	Profile          string
+	Direction        string
+	Status           string
+	Phase            string
+	Percent          int
+	BytesTransferred int64 `json:"bytes_transferred,omitempty"`
+	BytesTotal       int64 `json:"bytes_total,omitempty"`
+	BytesPerSecond   int64 `json:"bytes_per_second,omitempty"`
+	ETASeconds       int64 `json:"eta_seconds,omitempty"`
+	ProgressMode     string
+	Elapsed          time.Duration
+	Error            string
 }
 
 type localTransferCallbackDispatch struct {
@@ -135,15 +145,14 @@ func (m *LocalTransferJobManager) StartWithOptions(transferID, profile, directio
 	m.sequence++
 	created := m.now()
 	job := &LocalTransferJob{
-		ID:                fmt.Sprintf("transfer-%d-%d", created.UnixNano(), m.sequence),
-		TransferID:        transferID,
-		Profile:           profile,
-		Direction:         direction,
-		Status:            LocalTransferQueued,
-		Phase:             TransferPhasePreparing,
-		ProgressMode:      normalizeLocalTransferProgressMode(progressMode),
-		CreatedAt:         created,
-		emittedMilestones: make(map[string]bool),
+		ID:           fmt.Sprintf("transfer-%d-%d", created.UnixNano(), m.sequence),
+		TransferID:   transferID,
+		Profile:      profile,
+		Direction:    direction,
+		Status:       LocalTransferQueued,
+		Phase:        TransferPhasePreparing,
+		ProgressMode: normalizeLocalTransferProgressMode(progressMode),
+		CreatedAt:    created,
 	}
 	if onEvent != nil {
 		job.callbackEvents = make(chan localTransferCallbackDispatch, localTransferCallbackQueueSize)
@@ -234,7 +243,6 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 	job.Status = LocalTransferRunning
 	job.Phase = TransferPhasePreparing
 	job.StartedAt = &started
-	job.emittedMilestones[transferMilestoneKey(job.Phase, 0)] = true
 	event := localTransferEvent(*job, started)
 	m.mu.Unlock()
 	m.dispatchLocalTransferEvent(id, event, false)
@@ -256,6 +264,7 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 	case err == nil:
 		terminal.Status = LocalTransferSucceeded
 		terminal.Phase, terminal.Percent = mapRsyncProgress(100, true, terminal.ProgressMode)
+		normalizeSuccessfulTransferMetrics(&terminal)
 	case errors.Is(err, context.Canceled):
 		terminal.Status = LocalTransferCanceled
 		terminal.Phase = TransferPhaseInterrupted
@@ -283,6 +292,11 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 		job.Status = terminal.Status
 		job.Phase = terminal.Phase
 		job.Percent = terminal.Percent
+		job.BytesTransferred = terminal.BytesTransferred
+		job.BytesTotal = terminal.BytesTotal
+		job.BytesPerSecond = terminal.BytesPerSecond
+		job.ETASeconds = terminal.ETASeconds
+		job.bytesTotalReliable = terminal.bytesTotalReliable
 		job.Error = terminal.Error
 		job.FinishedAt = terminal.FinishedAt
 	}
@@ -333,45 +347,44 @@ func (m *LocalTransferJobManager) appendOutput(id, output string) {
 	if len(job.Output) > localTransferOutputLimit {
 		job.Output = job.Output[len(job.Output)-localTransferOutputLimit:]
 	}
-	if raw, ok := parseRsyncProgress(job.Output); ok {
-		phase, progress := mapRsyncProgress(raw, false, job.ProgressMode)
-		if progress > job.Percent || phase == TransferPhaseFinalizing && job.Phase != TransferPhaseFinalizing {
+	job.progressBuffer += output
+	if len(job.progressBuffer) > localTransferOutputLimit {
+		job.progressBuffer = job.progressBuffer[len(job.progressBuffer)-localTransferOutputLimit:]
+	}
+	previousPhase, previousPercent := job.Phase, job.Percent
+	if progress, ok := parseRsyncProgressRecord(job.progressBuffer); ok && job.ProgressMode == LocalTransferProgressTotal {
+		if progress.BytesTransferred >= job.BytesTransferred {
+			job.BytesTransferred = progress.BytesTransferred
+		}
+		job.BytesTotal = progress.BytesTotal
+		job.bytesTotalReliable = progress.BytesTotalReliable
+		job.BytesPerSecond = progress.BytesPerSecond
+		job.ETASeconds = progress.ETASeconds
+		phase, displayed := mapRsyncProgress(progress.Percent, false, job.ProgressMode)
+		if displayed > job.Percent {
+			job.Percent = displayed
+		}
+		if phase == TransferPhaseFinalizing || job.Phase == TransferPhasePreparing && phase == TransferPhaseTransferring {
 			job.Phase = phase
-			job.Percent = progress
+		}
+	} else if raw, ok := parseRsyncProgress(job.progressBuffer); ok {
+		phase, displayed := mapRsyncProgress(raw, false, job.ProgressMode)
+		if displayed > job.Percent {
+			job.Percent = displayed
+		}
+		if phase == TransferPhaseFinalizing || job.Phase == TransferPhasePreparing && phase == TransferPhaseTransferring {
+			job.Phase = phase
 		}
 	}
-	events := job.milestoneEvents(m.now())
+	var event *LocalTransferEvent
+	if job.Percent > previousPercent || job.Phase != previousPhase {
+		value := localTransferEvent(*job, m.now())
+		event = &value
+	}
 	m.mu.Unlock()
-	for _, event := range events {
-		m.dispatchLocalTransferEvent(id, event, false)
+	if event != nil {
+		m.dispatchLocalTransferEvent(id, *event, false)
 	}
-}
-
-func (j *LocalTransferJob) milestoneEvents(now time.Time) []LocalTransferEvent {
-	var events []LocalTransferEvent
-	for _, milestone := range []int{10, 25, 50, 75, 90, 99} {
-		if j.Percent < milestone {
-			continue
-		}
-		phase := TransferPhaseTransferring
-		if milestone == 99 {
-			phase = TransferPhaseFinalizing
-		}
-		key := transferMilestoneKey(phase, milestone)
-		if j.emittedMilestones[key] {
-			continue
-		}
-		j.emittedMilestones[key] = true
-		event := localTransferEvent(*j, now)
-		event.Phase = phase
-		event.Percent = milestone
-		events = append(events, event)
-	}
-	return events
-}
-
-func transferMilestoneKey(phase string, percent int) string {
-	return fmt.Sprintf("%s:%d", phase, percent)
 }
 
 func localTransferEvent(job LocalTransferJob, now time.Time) LocalTransferEvent {
@@ -383,16 +396,20 @@ func localTransferEvent(job LocalTransferJob, now time.Time) LocalTransferEvent 
 		}
 	}
 	return LocalTransferEvent{
-		TransferID:   job.TransferID,
-		LocalJobID:   job.ID,
-		Profile:      job.Profile,
-		Direction:    job.Direction,
-		Status:       job.Status,
-		Phase:        job.Phase,
-		Percent:      job.Percent,
-		ProgressMode: job.ProgressMode,
-		Elapsed:      elapsed,
-		Error:        job.Error,
+		TransferID:       job.TransferID,
+		LocalJobID:       job.ID,
+		Profile:          job.Profile,
+		Direction:        job.Direction,
+		Status:           job.Status,
+		Phase:            job.Phase,
+		Percent:          job.Percent,
+		BytesTransferred: job.BytesTransferred,
+		BytesTotal:       job.BytesTotal,
+		BytesPerSecond:   job.BytesPerSecond,
+		ETASeconds:       job.ETASeconds,
+		ProgressMode:     job.ProgressMode,
+		Elapsed:          elapsed,
+		Error:            job.Error,
 	}
 }
 
@@ -497,6 +514,9 @@ func parseRsyncProgress(output string) (int, bool) {
 		}
 		return 0, false
 	}
+	if progress, ok := parseRsyncProgressRecord(output); ok {
+		return progress.Percent, true
+	}
 	percentMatches := rsyncPercentPattern.FindAllStringSubmatch(output, -1)
 	if len(percentMatches) == 0 {
 		return 0, false
@@ -506,6 +526,140 @@ func parseRsyncProgress(output string) (int, bool) {
 		return 0, false
 	}
 	return clampRsyncProgress(progress), true
+}
+
+type rsyncProgressRecord struct {
+	Percent            int
+	BytesTransferred   int64
+	BytesTotal         int64
+	BytesPerSecond     int64
+	ETASeconds         int64
+	BytesTotalReliable bool
+}
+
+var rsyncProgress2Pattern = regexp.MustCompile(`([0-9][0-9 ,.]*?)\s+(\d{1,3})%\s+([0-9]+(?:[.,][0-9]+)?)\s*([kKMGT]?B)/s\s+(\d+):(\d{2}):(\d{2})`)
+
+func parseRsyncProgressRecord(output string) (rsyncProgressRecord, bool) {
+	output = strings.ReplaceAll(output, "\u00a0", " ")
+	matches := rsyncProgress2Pattern.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return rsyncProgressRecord{}, false
+	}
+	match := matches[len(matches)-1]
+	bytesTransferred, err := parseGroupedInt64(match[1])
+	if err != nil {
+		return rsyncProgressRecord{}, false
+	}
+	percent, err := strconv.Atoi(match[2])
+	if err != nil {
+		return rsyncProgressRecord{}, false
+	}
+	rate, err := parseRsyncRate(match[3], match[4])
+	if err != nil {
+		return rsyncProgressRecord{}, false
+	}
+	hours, errHours := strconv.ParseInt(match[5], 10, 64)
+	minutes, errMinutes := strconv.ParseInt(match[6], 10, 64)
+	seconds, errSeconds := strconv.ParseInt(match[7], 10, 64)
+	if errHours != nil || errMinutes != nil || errSeconds != nil || minutes > 59 || seconds > 59 {
+		return rsyncProgressRecord{}, false
+	}
+	percent = clampRsyncProgress(percent)
+	total, totalReliable := int64(0), false
+	if percent == 100 {
+		total = bytesTransferred
+		totalReliable = true
+	} else if percent > 0 {
+		total, _ = estimateRsyncTotal(bytesTransferred, percent)
+	}
+	eta, ok := safeETASeconds(hours, minutes, seconds)
+	if !ok {
+		return rsyncProgressRecord{}, false
+	}
+	return rsyncProgressRecord{
+		Percent: percent, BytesTransferred: bytesTransferred, BytesTotal: total,
+		BytesPerSecond: rate, ETASeconds: eta, BytesTotalReliable: totalReliable,
+	}, true
+}
+
+func estimateRsyncTotal(transferred int64, percent int) (int64, bool) {
+	if transferred < 0 || percent <= 0 || percent >= 100 {
+		return 0, false
+	}
+	divisor := int64(percent)
+	quotient, remainder := transferred/divisor, transferred%divisor
+	if quotient > math.MaxInt64/100 {
+		return 0, false
+	}
+	base := quotient * 100
+	extra := (remainder*100 + divisor/2) / divisor
+	if base > math.MaxInt64-extra {
+		return 0, false
+	}
+	return base + extra, true
+}
+
+func safeETASeconds(hours, minutes, seconds int64) (int64, bool) {
+	if hours < 0 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+		return 0, false
+	}
+	tail := minutes*60 + seconds
+	if hours > (math.MaxInt64-tail)/3600 {
+		return 0, false
+	}
+	return hours*3600 + tail, true
+}
+
+func normalizeSuccessfulTransferMetrics(job *LocalTransferJob) {
+	job.ETASeconds = 0
+	if job.BytesTransferred <= 0 {
+		if !job.bytesTotalReliable {
+			job.BytesTotal = 0
+		}
+		return
+	}
+	if job.bytesTotalReliable && job.BytesTotal > 0 {
+		job.BytesTransferred = job.BytesTotal
+		return
+	}
+	// A rounded percentage only provides an estimate. Successful process exit makes
+	// the latest transferred byte count the consistent terminal total.
+	job.BytesTotal = job.BytesTransferred
+	job.bytesTotalReliable = true
+}
+
+func parseGroupedInt64(value string) (int64, error) {
+	value = strings.NewReplacer(" ", "", ",", "", ".", "").Replace(strings.TrimSpace(value))
+	return strconv.ParseInt(value, 10, 64)
+}
+
+func parseRsyncRate(value, unit string) (int64, error) {
+	number, err := strconv.ParseFloat(strings.ReplaceAll(value, ",", "."), 64)
+	if err != nil {
+		return 0, err
+	}
+	if math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+		return 0, fmt.Errorf("invalid rsync rate %q", value)
+	}
+	multiplier := float64(1)
+	switch strings.ToUpper(unit) {
+	case "KB":
+		multiplier = 1000
+	case "MB":
+		multiplier = 1000 * 1000
+	case "GB":
+		multiplier = 1000 * 1000 * 1000
+	case "TB":
+		multiplier = 1000 * 1000 * 1000 * 1000
+	}
+	scaled := number * multiplier
+	// float64(math.MaxInt64) rounds up to 2^63, which is exactly the first
+	// value that cannot be represented by int64.
+	const int64UpperBound = float64(1 << 63)
+	if math.IsNaN(scaled) || math.IsInf(scaled, 0) || scaled < 0 || scaled >= int64UpperBound {
+		return 0, fmt.Errorf("rsync rate %q%s/s overflows int64", value, unit)
+	}
+	return int64(scaled), nil
 }
 
 func clampRsyncProgress(progress int) int {

@@ -93,6 +93,10 @@ type LogEntry struct {
 	Direction        string `json:"direction,omitempty"`
 	Status           string `json:"status,omitempty"`
 	Percent          int    `json:"percent,omitempty"`
+	BytesTransferred int64  `json:"bytes_transferred,omitempty"`
+	BytesTotal       int64  `json:"bytes_total,omitempty"`
+	BytesPerSecond   int64  `json:"bytes_per_second,omitempty"`
+	ETASeconds       int64  `json:"eta_seconds,omitempty"`
 	ElapsedMS        int64  `json:"elapsed_ms,omitempty"`
 	DurationMS       int64  `json:"duration_ms,omitempty"`
 	Region           string `json:"region,omitempty"`

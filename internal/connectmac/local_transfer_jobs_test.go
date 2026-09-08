@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -360,6 +361,258 @@ func TestParseRsyncProgress(t *testing.T) {
 	}
 }
 
+func TestParseRsyncProgress2Record(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   rsyncProgressRecord
+	}{
+		{
+			name:   "megabytes rate and eta",
+			output: "\r     7,654,321  73%   44.35MB/s    0:01:02 (xfr#12, ir-chk=8/20)\r",
+			want: rsyncProgressRecord{Percent: 73, BytesTransferred: 7654321, BytesTotal: 10485371,
+				BytesPerSecond: 44350000, ETASeconds: 62},
+		},
+		{
+			name:   "locale separators and decimal comma",
+			output: " 7 654 321  73%  1,25MB/s  1:02:03\r",
+			want: rsyncProgressRecord{Percent: 73, BytesTransferred: 7654321, BytesTotal: 10485371,
+				BytesPerSecond: 1250000, ETASeconds: 3723},
+		},
+		{
+			name:   "latest record in carriage return chunk",
+			output: " 1,000 10% 1.00kB/s 0:00:09\r 5,000 50% 2.00kB/s 0:00:05\r",
+			want: rsyncProgressRecord{Percent: 50, BytesTransferred: 5000, BytesTotal: 10000,
+				BytesPerSecond: 2000, ETASeconds: 5},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseRsyncProgressRecord(tt.output)
+			if !ok || got != tt.want {
+				t.Fatalf("parseRsyncProgressRecord() = (%+v, %v), want (%+v, true)", got, ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRsyncProgress2RecordRejectsOverflow(t *testing.T) {
+	t.Run("max int64 bytes keeps record and clears unsafe estimate", func(t *testing.T) {
+		got, ok := parseRsyncProgressRecord(" 9,223,372,036,854,775,807 1% 1.00MB/s 0:00:01\r")
+		if !ok || got.BytesTransferred != int64(math.MaxInt64) || got.Percent != 1 || got.BytesTotal != 0 {
+			t.Fatalf("progress = (%+v, %v)", got, ok)
+		}
+	})
+	t.Run("huge eta is rejected", func(t *testing.T) {
+		if got, ok := parseRsyncProgressRecord(" 1,000 1% 1.00MB/s 9223372036854775807:00:00\r"); ok {
+			t.Fatalf("progress = %+v, want invalid ETA rejection", got)
+		}
+	})
+}
+
+func TestParseRsyncRateValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		unit    string
+		want    int64
+		wantErr bool
+	}{
+		{name: "huge exponent", value: "1e309", unit: "MB", wantErr: true},
+		{name: "positive infinity", value: "+Inf", unit: "B", wantErr: true},
+		{name: "negative", value: "-1", unit: "MB", wantErr: true},
+		{name: "multiplication overflow", value: "9223373", unit: "TB", wantErr: true},
+		{name: "valid near max", value: "9223372036854774784", unit: "B", want: 9223372036854774784},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseRsyncRate(tt.value, tt.unit)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("parseRsyncRate(%q, %q) = (%d, %v), want (%d, error=%v)", tt.value, tt.unit, got, err, tt.want, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLocalTransferJobManagerInvalidRateDoesNotCorruptProgress(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	release := make(chan struct{})
+	written := make(chan struct{})
+	job, err := manager.StartWithOptions("transfer-1", "mac-one", "push", LocalTransferProgressTotal, nil, func(onOutput func(string)) error {
+		onOutput(" 5,000 50% 2.00MB/s 0:00:04\r")
+		onOutput(" 6,000 60% 1e309MB/s 0:00:03\r")
+		close(written)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	active, ok := manager.Get(job.ID)
+	if !ok || active.Percent != 50 || active.BytesTransferred != 5000 || active.BytesTotal != 10000 ||
+		active.BytesPerSecond != 2000000 || active.ETASeconds != 4 {
+		t.Fatalf("progress after invalid rate = %+v, found=%v", active, ok)
+	}
+	close(release)
+	waitForLocalTransferJob(t, manager, job.ID)
+}
+
+func TestLocalTransferJobManagerUsesReportedPercentAfterRoundedEstimate(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	release := make(chan struct{})
+	written := make(chan struct{})
+	job, err := manager.StartWithOptions("transfer-1", "mac-one", "push", LocalTransferProgressTotal, nil, func(onOutput func(string)) error {
+		onOutput(" 1 1% 1.00kB/s 0:00:10\r")
+		onOutput(" 60 50% 1.00kB/s 0:00:05\r")
+		close(written)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	active, ok := manager.Get(job.ID)
+	if !ok || active.Percent != 50 || active.BytesTransferred != 60 || active.BytesTotal != 120 {
+		t.Fatalf("active progress = %+v, found=%v", active, ok)
+	}
+	close(release)
+	waitForLocalTransferJob(t, manager, job.ID)
+}
+
+func TestLocalTransferJobManagerNormalizesSuccessfulTerminalBytes(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	job, err := manager.StartWithOptions("transfer-1", "mac-one", "push", LocalTransferProgressTotal, nil, func(onOutput func(string)) error {
+		onOutput(" 7,654,321 73% 44.35MB/s 0:00:01\r")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.Status != LocalTransferSucceeded || finished.Percent != 100 ||
+		finished.BytesTransferred != 7654321 || finished.BytesTotal != finished.BytesTransferred || finished.ETASeconds != 0 {
+		t.Fatalf("finished progress = %+v", finished)
+	}
+}
+
+func TestLocalTransferJobManagerProgress2ChunkingAndMonotonicity(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	release := make(chan struct{})
+	written := make(chan struct{})
+	job, err := manager.StartWithOptions("transfer-1", "mac-one", "push", LocalTransferProgressTotal, nil, func(onOutput func(string)) error {
+		onOutput(" 2,500 2")
+		onOutput("5% 1.50MB/s 0:00:03\r")
+		onOutput(" 2,000 20% 1.00MB/s 0:00:04\r")
+		close(written)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	active, ok := manager.Get(job.ID)
+	if !ok {
+		t.Fatalf("job %q not found", job.ID)
+	}
+	if active.Percent != 25 || active.BytesTransferred != 2500 || active.BytesTotal != 10000 ||
+		active.BytesPerSecond != 1000000 || active.ETASeconds != 4 {
+		t.Fatalf("active progress = %+v", active)
+	}
+	close(release)
+	waitForLocalTransferJob(t, manager, job.ID)
+}
+
+func TestLocalTransferJobManagerUpdatesByteDetailsWithoutProgressEventSpam(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	release := make(chan struct{})
+	written := make(chan struct{})
+	var (
+		mu     sync.Mutex
+		events []LocalTransferEvent
+	)
+	job, err := manager.StartWithOptions("transfer-1", "mac-one", "push", LocalTransferProgressTotal, func(event LocalTransferEvent) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}, func(onOutput func(string)) error {
+		onOutput(" 5,000 50% 1.00MB/s 0:00:05\r")
+		onOutput(" 5,099 50% 2.00MB/s 0:00:04\r")
+		close(written)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-written
+	active, ok := manager.Get(job.ID)
+	if !ok {
+		t.Fatalf("job %q not found", job.ID)
+	}
+	if active.Percent != 50 || active.Phase != TransferPhaseTransferring || active.BytesTransferred != 5099 ||
+		active.BytesTotal != 10198 || active.BytesPerSecond != 2000000 || active.ETASeconds != 4 {
+		t.Fatalf("stored progress = %+v", active)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		count := len(events)
+		mu.Unlock()
+		if count >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	if len(events) != 2 {
+		mu.Unlock()
+		t.Fatalf("events before terminal = %+v", events)
+	}
+	mu.Unlock()
+	close(release)
+	waitForLocalTransferJob(t, manager, job.ID)
+}
+
+func TestLocalTransferJobManagerRawCompletionThenFailureNeverSucceeds(t *testing.T) {
+	manager := NewLocalTransferJobManager()
+	var (
+		mu     sync.Mutex
+		events []LocalTransferEvent
+	)
+	job, err := manager.StartWithOptions("transfer-1", "mac-one", "push", LocalTransferProgressTotal, func(event LocalTransferEvent) {
+		mu.Lock()
+		events = append(events, event)
+		mu.Unlock()
+	}, func(onOutput func(string)) error {
+		onOutput(" 10,000 100% 3.00MB/s 0:00:00\r")
+		return errors.New("exit status 23")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForLocalTransferJob(t, manager, job.ID)
+	if finished.Status != LocalTransferFailed || finished.Phase != TransferPhaseFailed || finished.Percent != 99 {
+		t.Fatalf("finished job = %+v", finished)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 3 {
+		t.Fatalf("events = %+v", events)
+	}
+	if events[1].Phase != TransferPhaseFinalizing || events[1].Percent != 99 ||
+		events[2].Status != LocalTransferFailed || events[2].Percent > 99 {
+		t.Fatalf("events = %+v", events)
+	}
+	for _, event := range events {
+		if event.Status == LocalTransferSucceeded || event.Percent == 100 {
+			t.Fatalf("unexpected success event = %+v", event)
+		}
+	}
+}
+
 func TestMapRsyncProgress(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -658,7 +911,7 @@ func TestLocalTransferJobManagerProgressCallbackPanicAndBlockAreContained(t *tes
 	t.Run("panic", func(t *testing.T) {
 		manager := NewLocalTransferJobManager()
 		job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
-			if event.Percent == 10 {
+			if event.Percent == 19 {
 				panic("progress callback panic")
 			}
 		}, func(onOutput func(string)) error {
@@ -680,7 +933,7 @@ func TestLocalTransferJobManagerProgressCallbackPanicAndBlockAreContained(t *tes
 		progressEntered := make(chan struct{})
 		releaseCallback := make(chan struct{})
 		job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
-			if event.Percent == 10 {
+			if event.Percent == 19 {
 				close(progressEntered)
 				<-releaseCallback
 			}
@@ -704,19 +957,19 @@ func TestLocalTransferJobManagerProgressCallbackPanicAndBlockAreContained(t *tes
 	})
 }
 
-func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
+func TestLocalTransferJobManagerEmitsAtMostOneProgressEventPerChunk(t *testing.T) {
 	manager := NewLocalTransferJobManager()
 	var (
 		mu     sync.Mutex
 		events []LocalTransferEvent
 	)
-	job, err := manager.StartWithEvents("member-transfer-1", "mac-one", "push", func(event LocalTransferEvent) {
+	job, err := manager.StartWithOptions("member-transfer-1", "mac-one", "push", LocalTransferProgressTotal, func(event LocalTransferEvent) {
 		mu.Lock()
 		events = append(events, event)
 		mu.Unlock()
 	}, func(onOutput func(string)) error {
-		onOutput("file-one (xfr#1, to-chk=8/10)\n")
-		onOutput("file-two (xfr#2, to-chk=0/10)\n")
+		onOutput("  1,000  10%  1.00MB/s 0:00:09\r  5,000  50%  2.00MB/s 0:00:05\r  9,000  90%  3.00MB/s 0:00:01\r")
+		onOutput(" 10,000 100%  3.00MB/s 0:00:00\r")
 		return nil
 	})
 	if err != nil {
@@ -732,7 +985,7 @@ func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
 		mu.Lock()
 		count := len(events)
 		mu.Unlock()
-		if count == 8 || time.Now().After(deadline) {
+		if count == 4 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -749,10 +1002,6 @@ func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
 	}
 	want := []string{
 		"running:preparing:0",
-		"running:transferring:10",
-		"running:transferring:25",
-		"running:transferring:50",
-		"running:transferring:75",
 		"running:transferring:90",
 		"running:finalizing:99",
 		"succeeded:succeeded:100",
@@ -762,7 +1011,7 @@ func TestLocalTransferJobManagerCorrelationAndMilestoneEvents(t *testing.T) {
 	}
 }
 
-func TestLocalTransferJobManagerDoesNotJumpFromZeroToFinalizing(t *testing.T) {
+func TestLocalTransferJobManagerFinalizingThenSuccessEvents(t *testing.T) {
 	manager := NewLocalTransferJobManager()
 	var (
 		mu     sync.Mutex
@@ -773,7 +1022,7 @@ func TestLocalTransferJobManagerDoesNotJumpFromZeroToFinalizing(t *testing.T) {
 		events = append(events, event)
 		mu.Unlock()
 	}, func(onOutput func(string)) error {
-		onOutput("file-one 100%\n")
+		onOutput(" 1,024 100% 1.00MB/s 0:00:00\r")
 		return nil
 	})
 	if err != nil {
@@ -782,14 +1031,14 @@ func TestLocalTransferJobManagerDoesNotJumpFromZeroToFinalizing(t *testing.T) {
 	waitForLocalTransferJob(t, manager, job.ID)
 	mu.Lock()
 	defer mu.Unlock()
-	if len(events) != 8 {
+	if len(events) != 3 {
 		t.Fatalf("events = %+v", events)
 	}
 	var got []int
 	for _, event := range events {
 		got = append(got, event.Percent)
 	}
-	want := []int{0, 10, 25, 50, 75, 90, 99, 100}
+	want := []int{0, 99, 100}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("event percentages = %v, want %v", got, want)
 	}

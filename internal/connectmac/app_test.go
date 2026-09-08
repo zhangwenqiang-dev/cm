@@ -2897,6 +2897,10 @@ func TestLocalAgentTransferUsesProgress2WhenSupported(t *testing.T) {
 	if active.ProgressMode != LocalTransferProgressTotal || active.Percent != 73 {
 		t.Fatalf("active job = %+v", active)
 	}
+	if active.BytesTransferred != 7654321 || active.BytesTotal != 10485371 ||
+		active.BytesPerSecond != 44350000 || active.ETASeconds != 1 {
+		t.Fatalf("active byte progress = %+v", active)
+	}
 	if runner.rsyncPath != "/usr/local/bin/rsync" || !containsString(runner.rsync, "--info=progress2") || containsString(runner.rsync, "-avzP") {
 		t.Fatalf("rsync path=%q args=%#v", runner.rsyncPath, runner.rsync)
 	}
@@ -2904,6 +2908,17 @@ func TestLocalAgentTransferUsesProgress2WhenSupported(t *testing.T) {
 	finished := waitForLocalTransferJob(t, app.LocalTransfers, job.ID)
 	if finished.Status != LocalTransferSucceeded || finished.Percent != 100 {
 		t.Fatalf("finished job = %+v", finished)
+	}
+	entries := waitForLocalTransferLogs(t, app.LogManager, 3)
+	var progress LogEntry
+	for _, entry := range entries {
+		if entry.Action == "transfer.progress" {
+			progress = entry
+		}
+	}
+	if progress.BytesTransferred != 7654321 || progress.BytesTotal != 10485371 ||
+		progress.BytesPerSecond != 44350000 || progress.ETASeconds != 1 {
+		t.Fatalf("progress log = %+v", progress)
 	}
 }
 
@@ -2937,7 +2952,7 @@ func TestLocalTransferCorrelationAndLogs(t *testing.T) {
 		t.Fatalf("job transfer id = %q", finished.TransferID)
 	}
 
-	entries := waitForLocalTransferLogs(t, app.LogManager, 8)
+	entries := waitForLocalTransferLogs(t, app.LogManager, 5)
 	actions := make(map[string]bool)
 	for _, entry := range entries {
 		actions[entry.Action] = true
@@ -3029,7 +3044,7 @@ func TestLocalTransferInterruptedLifecycleLog(t *testing.T) {
 		t.Fatalf("interrupted job = %+v", finished)
 	}
 
-	entries := waitForLocalTransferLogs(t, app.LogManager, 4)
+	entries := waitForLocalTransferLogs(t, app.LogManager, 3)
 	var interrupted LogEntry
 	for _, entry := range entries {
 		if entry.Action == "transfer.local.interrupted" {
