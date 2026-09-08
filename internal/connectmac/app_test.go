@@ -2819,7 +2819,7 @@ func TestLocalTransferInterruptedLifecycleLog(t *testing.T) {
 
 	runner := &fakeRunner{
 		rsyncOutput: []string{"  1,024  50% cookie interrupted-cookie\n"},
-		rsyncErr:    context.Canceled,
+		rsyncErr:    context.DeadlineExceeded,
 	}
 	var out, errOut bytes.Buffer
 	app := testApp(&out, &errOut, home)

@@ -2,6 +2,7 @@ package connectmac
 
 import (
 	"archive/zip"
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 )
 
 const DefaultLogDir = "~/.connectmac/logs"
+
+const maxStructuredLogLineBytes = 1024 * 1024
 
 type LogManager struct {
 	Dir string
@@ -147,6 +150,132 @@ func (m LogManager) List() ([]LogFile, error) {
 		return files[i].Name < files[j].Name
 	})
 	return files, nil
+}
+
+// ReadSince reads recent structured JSONL entries. Non-JSON and legacy entries
+// without a usable timestamp are ignored so raw or partial logs cannot prevent
+// local-agent recovery.
+func (m LogManager) ReadSince(cutoff time.Time) ([]LogEntry, error) {
+	m = m.normalize()
+	files, err := m.List()
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]LogEntry, 0)
+	for _, file := range files {
+		if !strings.HasPrefix(file.Name, "cm-") {
+			continue
+		}
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return nil, err
+		}
+		err = readBoundedLogLines(f, maxStructuredLogLineBytes, func(line []byte) {
+			var entry LogEntry
+			if err := json.Unmarshal(line, &entry); err != nil {
+				return
+			}
+			createdAt, err := time.Parse(time.RFC3339Nano, entry.Time)
+			if err != nil || createdAt.Before(cutoff) {
+				return
+			}
+			entries = append(entries, entry)
+		})
+		closeErr := f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read structured log %s: %w", file.Name, err)
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+	}
+	return entries, nil
+}
+
+func readBoundedLogLines(r io.Reader, maxLineBytes int, visit func([]byte)) error {
+	if maxLineBytes <= 0 {
+		maxLineBytes = maxStructuredLogLineBytes
+	}
+	reader := bufio.NewReaderSize(r, 64*1024)
+	line := make([]byte, 0, 64*1024)
+	oversized := false
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if !oversized {
+			if len(line)+len(fragment) > maxLineBytes {
+				line = line[:0]
+				oversized = true
+			} else {
+				line = append(line, fragment...)
+			}
+		}
+		switch err {
+		case nil:
+			if !oversized {
+				visit(line)
+			}
+			line = line[:0]
+			oversized = false
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			if !oversized && len(line) > 0 {
+				visit(line)
+			}
+			return nil
+		default:
+			return err
+		}
+	}
+}
+
+func (m LogManager) ReconcileInterruptedTransfers(reason string) error {
+	m = m.normalize()
+	entries, err := m.ReadSince(m.Now().Add(-localTransferRetention))
+	if err != nil {
+		return err
+	}
+	open := make(map[string]LogEntry)
+	for _, entry := range entries {
+		if entry.TransferID == "" {
+			continue
+		}
+		switch {
+		case entry.Action == "transfer.local.started":
+			open[entry.TransferID] = entry
+		case isLocalTransferTerminalEntry(entry):
+			delete(open, entry.TransferID)
+		}
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "local agent restarted"
+	}
+	for _, started := range open {
+		if err := m.Write(LogEntry{
+			Level: "warn", Action: "transfer.local.interrupted", Outcome: "failure",
+			TransferID: started.TransferID, LocalJobID: started.LocalJobID,
+			Profile: started.Profile, Direction: started.Direction,
+			Status: LocalTransferInterrupted, Phase: TransferPhaseInterrupted,
+			RequestID: started.RequestID, Source: "local-agent-recovery",
+			ErrorCode: "agent_restarted", Message: reason,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isLocalTransferTerminalEntry(entry LogEntry) bool {
+	switch entry.Action {
+	case "transfer.local.succeeded", "transfer.local.failed", "transfer.local.canceled", "transfer.local.interrupted":
+		return true
+	}
+	switch entry.Status {
+	case LocalTransferSucceeded, LocalTransferFailed, LocalTransferCanceled, LocalTransferInterrupted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m LogManager) Clean(retention time.Duration) error {

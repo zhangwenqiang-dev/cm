@@ -337,6 +337,16 @@ func (a App) runLocalAgent(ctx context.Context, configPath string, args []string
 		fmt.Fprintf(a.Err, "local-agent TLS material is invalid: %v\nrun: cm local-agent install\n", err)
 		return 1
 	}
+	if err := a.LogManager.ReconcileInterruptedTransfers("local agent restarted"); err != nil {
+		recoveryErr := sanitizeOperationalError(err)
+		if logErr := a.LogManager.Write(LogEntry{
+			Level: "error", Action: "local-agent.recovery.failed", Outcome: "failure",
+			Source: "local-agent-recovery", ErrorCode: "recovery_failed",
+			Message: recoveryErr.Error(),
+		}); logErr != nil {
+			fmt.Fprintf(a.Err, "local-agent transfer recovery failed: %v (log error: %v)\n", recoveryErr, logErr)
+		}
+	}
 	server := &http.Server{Addr: addr, Handler: a.newLocalAgentHandler()}
 	go func() {
 		<-ctx.Done()
@@ -1703,6 +1713,10 @@ func (a App) writeLocalTransferEventWithRequest(event LocalTransferEvent, reques
 	case LocalTransferFailed:
 		action = "transfer.local.failed"
 		level = "error"
+		message = sanitizedLocalTransferError(event.Error)
+	case LocalTransferCanceled:
+		action = "transfer.local.canceled"
+		level = "warn"
 		message = sanitizedLocalTransferError(event.Error)
 	case LocalTransferInterrupted:
 		action = "transfer.local.interrupted"

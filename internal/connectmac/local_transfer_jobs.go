@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +20,7 @@ const (
 	LocalTransferRunning     = "running"
 	LocalTransferSucceeded   = "succeeded"
 	LocalTransferFailed      = "failed"
+	LocalTransferCanceled    = "canceled"
 	LocalTransferInterrupted = "interrupted"
 
 	localTransferOutputLimit       = 64 * 1024
@@ -252,7 +256,15 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 	case err == nil:
 		terminal.Status = LocalTransferSucceeded
 		terminal.Phase, terminal.Percent = mapRsyncProgress(100, true, terminal.ProgressMode)
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.Canceled):
+		terminal.Status = LocalTransferCanceled
+		terminal.Phase = TransferPhaseInterrupted
+		terminal.Error = localTransferFailureError(terminal.Output, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		terminal.Status = LocalTransferInterrupted
+		terminal.Phase = TransferPhaseInterrupted
+		terminal.Error = localTransferFailureError(terminal.Output, err)
+	case isSignalTerminatedTransfer(err):
 		terminal.Status = LocalTransferInterrupted
 		terminal.Phase = TransferPhaseInterrupted
 		terminal.Error = localTransferFailureError(terminal.Output, err)
@@ -275,6 +287,19 @@ func (m *LocalTransferJobManager) run(id string, run func(func(string)) error) {
 		job.FinishedAt = terminal.FinishedAt
 	}
 	m.mu.Unlock()
+}
+
+func isSignalTerminatedTransfer(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
+		return false
+	}
+	status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() {
+		return false
+	}
+	signal := status.Signal()
+	return signal == os.Kill || signal == syscall.SIGTERM
 }
 
 func localTransferFailureError(output string, err error) string {

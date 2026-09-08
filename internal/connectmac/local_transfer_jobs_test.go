@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -55,7 +56,7 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("context cancellation is interrupted", func(t *testing.T) {
+	t.Run("context cancellation is canceled", func(t *testing.T) {
 		manager := NewLocalTransferJobManager()
 		job, err := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
 			onOutput("rsync: received SIGINT\n")
@@ -65,11 +66,68 @@ func TestLocalTransferJobManagerSuccessAndFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 		finished := waitForLocalTransferJob(t, manager, job.ID)
-		if finished.Status != LocalTransferInterrupted {
+		if finished.Status != LocalTransferCanceled {
 			t.Fatalf("status = %q", finished.Status)
 		}
 		if !strings.Contains(finished.Error, "received SIGINT") || !strings.Contains(finished.Error, context.Canceled.Error()) {
 			t.Fatalf("error = %q", finished.Error)
+		}
+	})
+
+	t.Run("deadline is interrupted", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job, err := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
+			onOutput("rsync: process disappeared\n")
+			return context.DeadlineExceeded
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Status != LocalTransferInterrupted || finished.Phase != TransferPhaseInterrupted {
+			t.Fatalf("job = %#v", finished)
+		}
+	})
+
+	t.Run("signal killed child is interrupted", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job, err := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
+			return exec.Command("sh", "-c", "kill -KILL $$").Run()
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Status != LocalTransferInterrupted || finished.Phase != TransferPhaseInterrupted {
+			t.Fatalf("job = %#v", finished)
+		}
+	})
+
+	t.Run("sigpipe child remains failed", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job, err := manager.Start("mac-one", "pull", func(onOutput func(string)) error {
+			return exec.Command("sh", "-c", "kill -PIPE $$").Run()
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Status != LocalTransferFailed || finished.Phase != TransferPhaseFailed {
+			t.Fatalf("job = %#v", finished)
+		}
+	})
+
+	t.Run("ordinary child exit remains failed", func(t *testing.T) {
+		manager := NewLocalTransferJobManager()
+		job, err := manager.Start("mac-one", "push", func(onOutput func(string)) error {
+			return exec.Command("sh", "-c", "exit 23").Run()
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := waitForLocalTransferJob(t, manager, job.ID)
+		if finished.Status != LocalTransferFailed || finished.Phase != TransferPhaseFailed {
+			t.Fatalf("job = %#v", finished)
 		}
 	})
 

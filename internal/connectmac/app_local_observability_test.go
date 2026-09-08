@@ -49,6 +49,100 @@ func TestLocalAgentRequestIDValidationAndCorrelation(t *testing.T) {
 	}
 }
 
+func TestLocalAgentStartupReconcilesInterruptedTransfers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	if err := app.LogManager.Write(LogEntry{
+		Action: "transfer.local.started", TransferID: "startup-orphan",
+		LocalJobID: "local-job-1", Profile: "mac-one", Direction: "pull",
+		Status: LocalTransferRunning, Phase: TransferPhasePreparing,
+		RequestID: "request-1", Source: "web-local", Message: "started",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := localAgentUnusedOptions(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan int, 1)
+	go func() {
+		result <- app.runLocalAgent(ctx, filepath.Join(home, "missing-config.yaml"), []string{
+			"--host", opts.Host, "--port", fmt.Sprint(opts.Port),
+		})
+	}()
+	waitForLocalAgentEndpoint(t, localAgentEndpoint(opts, false, "/health"), localAgentTLSMaterial{})
+	cancel()
+	if code := <-result; code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+
+	entries := readTestLogEntries(t, app.LogManager)
+	count := 0
+	for _, entry := range entries {
+		if entry.TransferID == "startup-orphan" && entry.Action == "transfer.local.interrupted" {
+			count++
+			if entry.Source != "local-agent-recovery" || entry.ErrorCode != "agent_restarted" {
+				t.Fatalf("recovery entry = %+v", entry)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("recovery count=%d entries=%+v", count, entries)
+	}
+}
+
+func TestLocalAgentRecoveryFailureDoesNotBlockStartup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, home)
+	if err := os.MkdirAll(app.LogManager.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	brokenPath := filepath.Join(app.LogManager.Dir, "cm-2026-06-30.log")
+	if err := os.Symlink(filepath.Join(home, "missing-log-target"), brokenPath); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := localAgentUnusedOptions(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan int, 1)
+	go func() {
+		result <- app.runLocalAgent(ctx, filepath.Join(home, "missing-config.yaml"), []string{
+			"--host", opts.Host, "--port", fmt.Sprint(opts.Port),
+		})
+	}()
+	waitForLocalAgentEndpoint(t, localAgentEndpoint(opts, false, "/health"), localAgentTLSMaterial{})
+	cancel()
+	if code := <-result; code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.LogManager.Dir, "cm-2026-07-01.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"action":"local-agent.recovery.failed"`)) {
+		t.Fatalf("recovery failure event missing from log tail")
+	}
+}
+
+func TestLocalTransferCanceledLogIsDistinctFromInterrupted(t *testing.T) {
+	var out, errOut bytes.Buffer
+	app := testApp(&out, &errOut, t.TempDir())
+	app.writeLocalTransferEventWithRequest(LocalTransferEvent{
+		TransferID: "canceled-transfer", LocalJobID: "job-1", Profile: "mac-one",
+		Direction: "push", Status: LocalTransferCanceled, Phase: TransferPhaseInterrupted,
+		Percent: 48, Error: context.Canceled.Error(),
+	}, "request-1")
+
+	entries := readTestLogEntries(t, app.LogManager)
+	if len(entries) != 1 || entries[0].Action != "transfer.local.canceled" ||
+		entries[0].Status != LocalTransferCanceled || entries[0].Level != "warn" {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
+
 func TestLocalAgentBrowserBoundaryRequiresExactConfiguredOrigin(t *testing.T) {
 	app := testApp(&bytes.Buffer{}, &bytes.Buffer{}, t.TempDir())
 	app.LocalAgentBrowserOrigins = map[string]struct{}{

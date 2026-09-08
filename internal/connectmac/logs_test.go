@@ -66,6 +66,120 @@ func TestLogManagerWriteCleanAndExport(t *testing.T) {
 	}
 }
 
+func TestReconcileInterruptedTransfersIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewLogManager(dir)
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	manager.Now = func() time.Time { return now }
+	writeTransferLogFixture(t, manager, "complete", "transfer.local.started", LocalTransferRunning)
+	writeTransferLogFixture(t, manager, "complete", "transfer.local.succeeded", LocalTransferSucceeded)
+	writeTransferLogFixture(t, manager, "orphan", "transfer.local.started", LocalTransferRunning)
+
+	if err := manager.ReconcileInterruptedTransfers("local agent restarted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ReconcileInterruptedTransfers("local agent restarted"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := manager.ReadSince(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := 0
+	for _, entry := range entries {
+		if entry.TransferID != "orphan" || entry.Action != "transfer.local.interrupted" {
+			continue
+		}
+		interrupted++
+		if entry.LocalJobID != "job-orphan" || entry.Profile != "profile-orphan" ||
+			entry.Direction != "push" || entry.RequestID != "request-orphan" ||
+			entry.Source != "local-agent-recovery" || entry.ErrorCode != "agent_restarted" ||
+			entry.Outcome != "failure" || entry.Level != "warn" ||
+			entry.Status != LocalTransferInterrupted || entry.Phase != TransferPhaseInterrupted {
+			t.Fatalf("interrupted entry = %+v", entry)
+		}
+	}
+	if interrupted != 1 {
+		t.Fatalf("interrupted count = %d, entries = %+v", interrupted, entries)
+	}
+}
+
+func TestLogManagerReadSinceSkipsMalformedAndLegacyLines(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewLogManager(dir)
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	manager.Now = func() time.Time { return now }
+	path := filepath.Join(dir, "cm-2026-09-08.log")
+	data := strings.Join([]string{
+		`not json`,
+		`{"action":"legacy.without-time"}`,
+		`{"time":"2026-09-08T10:00:00Z","action":"old"}`,
+		`{"time":"2026-09-08T11:30:00Z","action":"recent"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manager.ReadSince(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Action != "recent" {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
+
+func TestReconcileInterruptedTransfersSkipsOversizedLineAndContinues(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewLogManager(dir)
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	manager.Now = func() time.Time { return now }
+	writeTransferLogFixture(t, manager, "complete", "transfer.local.started", LocalTransferRunning)
+
+	path := filepath.Join(dir, "cm-2026-09-08.log")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(strings.Repeat("x", maxStructuredLogLineBytes+1) + "\n"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTransferLogFixture(t, manager, "complete", "transfer.local.succeeded", LocalTransferSucceeded)
+	writeTransferLogFixture(t, manager, "orphan", "transfer.local.started", LocalTransferRunning)
+	if err := manager.ReconcileInterruptedTransfers("local agent restarted"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manager.ReadSince(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, entry := range entries {
+		if entry.Action == "transfer.local.interrupted" {
+			counts[entry.TransferID]++
+		}
+	}
+	if counts["complete"] != 0 || counts["orphan"] != 1 {
+		t.Fatalf("interrupted counts = %#v", counts)
+	}
+}
+
+func writeTransferLogFixture(t *testing.T, manager LogManager, transferID, action, status string) {
+	t.Helper()
+	if err := manager.Write(LogEntry{
+		Action: action, TransferID: transferID, LocalJobID: "job-" + transferID,
+		Profile: "profile-" + transferID, Direction: "push", Status: status,
+		RequestID: "request-" + transferID, Source: "web-local", Message: action,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLogManagerStructuredRedaction(t *testing.T) {
 	dir := t.TempDir()
 	manager := NewLogManager(dir)
